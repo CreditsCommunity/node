@@ -190,6 +190,27 @@ jobs:
           grep -a "contract-executor.jar and sc-api-support.jar replaced: build [0-9]* (community)" setup5.txt
           test -f csnode-exec/contract-executor.jar && test -f csnode-exec/sc-api-support.jar
 
+      - name: Full rocksdb set-up from a snapshot, with and without the backfill
+        run: |
+          cp -a csnode-clean csnode-full && rm -f csnode-full/config.ini.bak-*
+          # storage, database, first start (network), backfill (Enter: yes), share (no), executor, start, write
+          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\n\nno\n\nno\n\n' 2>&1 | tee setup6.txt | tail -14
+          grep -a "fetches the older blocks from" setup6.txt
+          grep -a "backfill:     yes" setup6.txt
+          python check-config.py csnode-full/config.ini snapshot "serve=off fetch=auto" storage "db_backend=rocksdb backfill=on"
+          # a tuning key set by hand is kept; backfill no
+          printf 'backfill_rate=500\n' >> csnode-full/config.ini
+          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\nno\nno\n\nno\n\n' 2>&1 | tee setup7.txt | tail -8
+          python check-config.py csnode-full/config.ini snapshot "serve=off fetch=auto" storage "db_backend=rocksdb backfill=off backfill_rate=500"
+
+      - name: A pruned folder switched to full keeps its blocks and backfills
+        run: |
+          # csnode holds the pruned lmdb database of the first set-up: storage (full), database (Enter:
+          # lmdb), backfill (Enter: yes), share, executor, start (no), write
+          bash setup-run.sh csnode 'full\n\n\n\n\nno\n\n' 2>&1 | tee setup8.txt | tail -14
+          grep -a "keeps its blocks and fetches the ones" setup8.txt
+          python check-config.py csnode/config.ini snapshot "serve=on fetch=off" storage "db_backend=lmdb backfill=on"
+
       - name: Collect
         if: always()
         run: |
