@@ -1046,9 +1046,10 @@ void Config::readBackfillSettings(const boost::property_tree::ptree& data, Stora
             cswarning() << "config: [storage] backfill=" << text << " is not on or off, using " << (storage.backfill ? "on" : "off");
         }
     }
-    auto number = [&data](const char* key, size_t& value, size_t min, size_t max) {
+    // false: missing, or not a number (a warning, the value as it was, or `fallback` when given)
+    auto number = [&data](const char* key, size_t& value, size_t min, size_t max, const char* fallback = nullptr) {
         if (!data.count(key)) {
-            return;
+            return false;
         }
         const auto text = data.get<std::string>(key);
         try {
@@ -1060,18 +1061,28 @@ void Config::readBackfillSettings(const boost::property_tree::ptree& data, Stora
                     cswarning() << "config: [storage] " << key << "=" << text << " is not in [" << min << ", " << max << "], using " << clamped;
                 }
                 value = static_cast<size_t>(clamped);
-                return;
+                return true;
             }
         }
         catch (const std::exception&) {
         }
-        cswarning() << "config: [storage] " << key << "=" << text << " is not a number, using " << value;
+        if (fallback) {
+            cswarning() << "config: [storage] " << key << "=" << text << " is not a number, using " << fallback;
+        }
+        else {
+            cswarning() << "config: [storage] " << key << "=" << text << " is not a number, using " << value;
+        }
+        return false;
     };
     number("backfill_batch", storage.backfillBatch, 1, 1000);
     number("backfill_rate", storage.backfillRate, 0, 1'000'000);
     number("backfill_store_per_turn", storage.backfillStorePerTurn, 1, 1000);
     number("backfill_turn_budget_ms", storage.backfillTurnBudgetMs, 0, 1000);
     number("backfill_idle_turn_budget_ms", storage.backfillIdleTurnBudgetMs, 0, 1000);
+    size_t threads = 0;
+    if (number("backfill_verify_threads", threads, 0, 16, "the default (min(4, cores - 1))")) {
+        storage.backfillVerifyThreads = threads;
+    }
 }
 
 namespace {
