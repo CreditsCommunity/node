@@ -2,8 +2,8 @@
 
 ```sh
 mkdir credits && cd credits
-curl -fsSLO https://raw.githubusercontent.com/EnzinoBB/node/master/packaging/docker/docker-compose.yml
-curl -fsSL -o .env https://raw.githubusercontent.com/EnzinoBB/node/master/packaging/docker/.env.example
+curl -fsSLO https://raw.githubusercontent.com/CreditsCommunity/node/master/packaging/docker/docker-compose.yml
+curl -fsSL -o .env https://raw.githubusercontent.com/CreditsCommunity/node/master/packaging/docker/.env.example
 docker compose up -d && docker compose logs -f
 ```
 

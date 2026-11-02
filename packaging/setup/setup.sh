@@ -72,7 +72,7 @@ official_build=1518
 official_url=https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
 official_sha_executor=592510d1586818348c65bea9b443e7f58aa6947113e43aa8906af8426aeef028
 official_sha_support=395d9a108a66fe1d92c1d2096a9d11f4c7662b51b47af792db0ff4cc91df9807
-community_url=https://github.com/EnzinoBB/contract-executor/releases/latest/download
+community_url=https://github.com/CreditsCommunity/contract-executor/releases/latest/download
 
 # the java of executor_command, to find the JDK's jar tool when neither unzip nor python3 is there
 executor_java() {

@@ -88,7 +88,7 @@ INI
 cat > "$dir/README-COMMUNITY.txt" <<EOF
 Credits node, community build $version
 
-Built from https://github.com/EnzinoBB/node and https://github.com/EnzinoBB/contract-executor.
+Built from https://github.com/CreditsCommunity/node and https://github.com/CreditsCommunity/contract-executor.
 Node protocol version 532, compatible with the mainnet release 4.2.532.
 Runs on: ${PACKAGE_RUNS_ON:-Linux x86-64 with glibc 2.38 or later (Ubuntu 24.04, Debian 13 and later)}.
 
@@ -100,7 +100,7 @@ Differences from the official package:
   changes it). Keep port 9080 closed to other hosts anyway.
 - The node itself: same protocol and database format by default, new opt-in storage options,
   fixes and a state digest in the log. What changes from the official node:
-  https://github.com/EnzinoBB/node/blob/master/docs/differences.md
+  https://github.com/CreditsCommunity/node/blob/master/docs/differences.md
 
 Changing the block database (db_backend)
 - The node recognises the format of an existing db/ folder. If config.ini asks for another one, it
@@ -113,7 +113,7 @@ Changing the block database (db_backend)
   node checks the free space first. If interrupted it resumes at the next start. Checkpoints
   and the transaction index are kept, so the node quick-starts afterwards. The official node
   only reads berkeleydb: convert back before running it on this folder. In Docker, use
-  CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
+  CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/CreditsCommunity/node/blob/master/docs/storage.md
 
 First time: cd csnode && $setup
   asks a few questions (pruned or full, database, snapshot, sharing, contract executor; Enter keeps
@@ -126,7 +126,7 @@ Upgrading an existing folder (an official one too): stop the node, copy $exe, co
   executor_commit_min..executor_commit_max of config.ini: with the official config.ini (1518..1518)
   it stops the community executor (build $commits) and runs no smart contract. The set-up shows the
   build in the folder, asks whether to run the community executor or the official one (it can
-  download either: the community one from https://github.com/EnzinoBB/contract-executor/releases,
+  download either: the community one from https://github.com/CreditsCommunity/contract-executor/releases,
   the official one from the CREDITSCOM release), keeps the replaced jars aside and sets the range in
   config.ini. Both executors give the same contract results: either is compatible with the network.
 
@@ -138,7 +138,7 @@ A full node can too, on lmdb or rocksdb: set db_backend=lmdb (or rocksdb) in the
   neighbours in the background down to block 0 (backward sync: about five days and 400 GB with lmdb,
   130 GB with rocksdb, on mainnet; [storage] backfill=off keeps only the snapshot's blocks). A
   pruned node switched to full (prune_keep_blocks=0) fetches the blocks it pruned the same way.
-  https://github.com/EnzinoBB/node/blob/master/docs/storage.md#a-full-node-from-a-snapshot
+  https://github.com/CreditsCommunity/node/blob/master/docs/storage.md#a-full-node-from-a-snapshot
 EOF
 case "$os" in
     macos) cat >> "$dir/README-COMMUNITY.txt" <<'EOF'

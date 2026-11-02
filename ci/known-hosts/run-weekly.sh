@@ -10,7 +10,7 @@
 # snapshot_sources.txt (the serving nodes that answered) go to the same release and pull request.
 #
 # Usage: run-weekly.sh
-# Env:   WORK (default ~/Projects/credits/known-hosts-run), MINUTES (25), REPO (EnzinoBB/node),
+# Env:   WORK (default ~/Projects/credits/known-hosts-run), MINUTES (25), REPO (CreditsCommunity/node),
 #        CPUS (1.0), MEMORY (3g), PUBLISH (1), SURVEY_SECONDS (600)
 # Needs: docker, gh (authenticated), python3 with base58 and pynacl.
 set -euo pipefail
@@ -19,7 +19,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 WORK=${WORK:-$HOME/Projects/credits/known-hosts-run}
 MINUTES=${MINUTES:-25}
-REPO=${REPO:-EnzinoBB/node}
+REPO=${REPO:-CreditsCommunity/node}
 CPUS=${CPUS:-1.0}
 MEMORY=${MEMORY:-3g}
 PUBLISH=${PUBLISH:-1}

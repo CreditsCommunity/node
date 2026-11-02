@@ -47,7 +47,7 @@ on:
         description: 'With tokens: the node whose API the token calls go through (e.g. the restarted one; default 1)'
         default: '1'
       executor_ref:
-        description: 'With contracts: branch or commit of EnzinoBB/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
+        description: 'With contracts: branch or commit of CreditsCommunity/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
         default: ''
       node_alt_ref:
         description: 'Branch or commit of this repository built and run by the even nodes, the odd nodes run this run''s node; "official" = the official 4.2.532 node with the CI test-network hooks (the second nightly run uses it; empty = all the same)'
@@ -185,7 +185,7 @@ jobs:
             git -C node-alt diff --stat
           fi
           # the submodules are copied from this run's checkout, which must point to the same commits,
-          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # except p2p: this repository runs its fork (CreditsCommunity/p2p, which holds the upstream history),
           # and the node under comparison gets the files of the p2p commit it points to (same submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
@@ -226,13 +226,13 @@ jobs:
         if: inputs.contracts == '1'
         uses: ./.github/actions/contract-executor
 
-      # mixed executors: the even nodes run an executor built from EnzinoBB/contract-executor, so a
+      # mixed executors: the even nodes run an executor built from CreditsCommunity/contract-executor, so a
       # result that differs from the release executor's shows up as a failed contract consensus
       - name: Checkout contract executor under test
         if: inputs.contracts == '1' && inputs.executor_ref != ''
         uses: actions/checkout@v4
         with:
-          repository: EnzinoBB/contract-executor
+          repository: CreditsCommunity/contract-executor
           ref: ${{ inputs.executor_ref }}
           path: ce
           fetch-depth: 0  # the build reads the commit count the node checks
@@ -242,7 +242,7 @@ jobs:
         run: |
           git clone -q https://github.com/CREDITSCOM/smart-contract-api.git ce-deps/smart-contract-api
           git -C ce-deps/smart-contract-api checkout -q 677c567f308972224232023b18de531d22db2b8b
-          git clone -q -b build/reproducible-1518 https://github.com/EnzinoBB/thrift-api-client.git ce-deps/thrift-api-client
+          git clone -q -b build/reproducible-1518 https://github.com/CreditsCommunity/thrift-api-client.git ce-deps/thrift-api-client
 
       # build 1518 was compiled with JDK 11.0.3, as in the executor's own build workflow
       - name: Set up Java 11.0.3

@@ -59,7 +59,7 @@ $officialBuild = 1518
 $officialUrl = 'https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz'
 $officialShaExecutor = '592510d1586818348c65bea9b443e7f58aa6947113e43aa8906af8426aeef028'
 $officialShaSupport = '395d9a108a66fe1d92c1d2096a9d11f4c7662b51b47af792db0ff4cc91df9807'
-$communityUrl = 'https://github.com/EnzinoBB/contract-executor/releases/latest/download'
+$communityUrl = 'https://github.com/CreditsCommunity/contract-executor/releases/latest/download'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # the build (git commit count) an executor jar reports, 0 when it cannot be read

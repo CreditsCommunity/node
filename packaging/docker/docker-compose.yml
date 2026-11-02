@@ -2,7 +2,7 @@
 # Settings: .env (copy .env.example). Data, configuration and keys: ${CREDITS_HOME:-~/.credits}.
 services:
   node:
-    image: ghcr.io/enzinobb/credits-node:${CREDITS_VERSION:-latest}
+    image: ghcr.io/creditscommunity/credits-node:${CREDITS_VERSION:-latest}
     container_name: credits-node
     restart: unless-stopped
     stop_grace_period: 120s
