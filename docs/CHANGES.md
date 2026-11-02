@@ -43,6 +43,7 @@ lines under the new release.
 | PR | Change |
 |---|---|
 | #151 | csnode: every backfill progress line (each 100,000 blocks) is followed by the average cost of a block per phase (verify, store, confirmations), the transactions per block and the share of the processor thread the backfill took |
+| #152 | csnode: the backfill checks the signatures of the fetched blocks, and the round confirmations of the stored ones, on verifier threads (`backfill_verify_threads`, default min(4, cores − 1), `0` = as before); the thread that runs consensus only links and stores the blocks, about 0.5 ms a block instead of 2.5 ms on mainnet |
 
 ## community.15 — 2026-11-01
 
