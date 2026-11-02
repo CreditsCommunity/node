@@ -114,11 +114,12 @@ bool BackwardSync::submit(VerifyJob&& job) {
         }
         if (verifiers_.empty()) {
             try {
+                verifiers_.reserve(settings_.verifyThreads);
                 while (verifiers_.size() < settings_.verifyThreads) {
                     verifiers_.emplace_back([this] { verifyWorker(); });
                 }
             }
-            catch (const std::system_error& e) {
+            catch (const std::exception& e) {
                 log(std::string("BACKFILL: verifier thread ") + std::to_string(verifiers_.size() + 1) + " not started (" + e.what() + ")" +
                         (verifiers_.empty() ? ": verifying on the processor thread" : ""),
                     true);
@@ -128,8 +129,8 @@ bool BackwardSync::submit(VerifyJob&& job) {
                 return false;
             }
         }
-        const Sequence seq = job.block.sequence();
-        verifyQueue_.emplace(seq, std::move(job));
+        const auto key = std::make_pair(job.check != nullptr, job.block.sequence());
+        verifyQueue_.emplace(key, std::move(job));
     }
     verifyCv_.notify_one();
     return true;
@@ -810,7 +811,9 @@ void BackwardSync::drain() {
             log("BACKFILL: slow turn of " + std::to_string(now() - startedMs) + " ms (" + std::to_string(n) + " so far): " +
                 std::to_string(storedNow) + " blocks down to #" + std::to_string(first_.load()) + ", " +
                 std::to_string(transactions) + " transactions; verify " + std::to_string(verifyUs / 1000) + " ms, store " +
-                std::to_string(storeUs / 1000) + " ms, confirmations " + std::to_string(confirmUs / 1000) + " ms");
+                std::to_string(storeUs / 1000) + " ms" +
+                (settings_.verifyThreads > 0 ? std::string(" (signatures on the verifier threads)")
+                                             : ", confirmations " + std::to_string(confirmUs / 1000) + " ms"));
         }
     }
     flushIfDue(false);

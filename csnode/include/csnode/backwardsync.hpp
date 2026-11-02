@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <csdb/pool.hpp>
@@ -273,7 +274,9 @@ private:
     std::condition_variable verifyCv_;
     std::vector<std::thread> verifiers_;   // the fields below: under verifyMutex_
     // the highest blocks first: the storage waits for the highest buffered one
-    std::multimap<Sequence, VerifyJob, std::greater<Sequence>> verifyQueue_;
+    // signature checks first (the storage waits for them), the highest block first; the confirmation
+    // checks, counted only, after them
+    std::multimap<std::pair<bool, Sequence>, VerifyJob, std::greater<std::pair<bool, Sequence>>> verifyQueue_;
     bool verifyStopping_ = false;           // stop(): the jobs queued are dropped
     bool verifyClosing_ = false;            // finish(): the jobs queued are done, then the threads return
 };

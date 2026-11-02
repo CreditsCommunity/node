@@ -806,7 +806,10 @@ TEST_F(BackfillTest, VerifierThreadsStoreTheSameBlocks) {
     EXPECT_EQ(sync_->stats().rejected, 0u);
     EXPECT_EQ(logged("BACKFILL: full history stored"), 1u);
     // the confirmations are checked after the blocks are stored, on the verifier threads
-    ASSERT_TRUE(settle([this] { return sync_->stats().confirmationErrors >= 1; }));
+    // the counter goes up before the line is logged: wait for the line
+    ASSERT_TRUE(settle([this] {
+        return logged("the round confirmations of block 350 do not verify against the confidants of block 349") >= 1;
+    }));
     EXPECT_EQ(logged("the round confirmations of block 350 do not verify against the confidants of block 349"), 1u);
     sync_->stop();
     EXPECT_EQ(sync_->stats().confirmationErrors, 1u);
