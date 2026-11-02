@@ -76,7 +76,7 @@ pass "second start keeps keys and config.ini"
 # 3. a pruned node's first start downloads the snapshot (github, the default), then starts
 d=$(newdata 3)
 out=$(run "$d")
-grep -q -- '--download-snapshot https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/snapshot.json' "$d/stub-download" \
+grep -q -- '--download-snapshot https://github.com/CreditsCommunity/node/releases/download/pruned-snapshot/snapshot.json' "$d/stub-download" \
     || { echo "$out"; fail "no download on the first start"; }
 grep -q 'snapshot restored' <<<"$out" || { echo "$out"; fail "download result not logged"; }
 [ -f "$d/stub-args" ] || fail "node not started after the download"

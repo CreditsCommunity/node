@@ -1,7 +1,7 @@
 # Community Credits node. Build context (see build.sh): package/ holds an unpacked release package
 # (the csnode/ directory: node, executor, JDK, configuration), docker/ holds this directory.
 FROM ubuntu:24.04
-LABEL org.opencontainers.image.source=https://github.com/EnzinoBB/node \
+LABEL org.opencontainers.image.source=https://github.com/CreditsCommunity/node \
       org.opencontainers.image.description="Community Credits node"
 
 RUN apt-get update \

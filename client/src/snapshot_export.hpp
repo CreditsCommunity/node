@@ -22,6 +22,6 @@ int runImport(const Config& config, const std::string& manifestFile);
 // download leaves snapshot-download/ so that the next run resumes it.
 int runDownload(const Config& config, const std::string& url);
 
-inline const char* const kDefaultSnapshotUrl = "https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/snapshot.json";
+inline const char* const kDefaultSnapshotUrl = "https://github.com/CreditsCommunity/node/releases/download/pruned-snapshot/snapshot.json";
 
 }  // namespace snapshot_export

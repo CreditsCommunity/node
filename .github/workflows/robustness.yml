@@ -141,7 +141,7 @@ jobs:
             git -C node-alt diff --stat
           fi
           # the submodules are copied from this run's checkout, which must point to the same commits,
-          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # except p2p: this repository runs its fork (CreditsCommunity/p2p, which holds the upstream history),
           # and the node under comparison gets the files of the p2p commit it points to (same submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do

@@ -4,8 +4,8 @@
 [Guides](https://developers.credits.com/en/Articles/Guides) \|
 [News](https://credits.com/en/Home/News)
 
-[![Build](https://github.com/EnzinoBB/node/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/EnzinoBB/node/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/EnzinoBB/node?label=Community%20release&style=plastic)](https://github.com/EnzinoBB/node/releases/latest)
+[![Build](https://github.com/CreditsCommunity/node/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/CreditsCommunity/node/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/CreditsCommunity/node?label=Community%20release&style=plastic)](https://github.com/CreditsCommunity/node/releases/latest)
 [![AGPL License](https://img.shields.io/github/license/CREDITSCOM/node.svg?color=green&label=License&style=plastic)](LICENSE)
 [![Twitter](https://img.shields.io/twitter/follow/creditscom.svg?label=Follow&style=social)](https://twitter.com/intent/follow?screen_name=creditscom)
 # Credits Node (community)
@@ -25,7 +25,7 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 | Tokens, the token API and the token tests | [docs/tokens.md](docs/tokens.md) |
 | Docker (pruned node from a snapshot, or a full node from a snapshot that fetches the older blocks in the background) | [packaging/docker/README.md](packaging/docker/README.md) |
 | A full node from a snapshot without Docker (backward sync) | [docs/storage.md](docs/storage.md#a-full-node-from-a-snapshot) |
-| Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/EnzinoBB/node/releases) |
+| Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/CreditsCommunity/node/releases) |
 | Guided set-up in every package: pruned or full, database, first start, snapshot sharing, contract executor (`csnode/setup.sh` on Linux and macOS, `csnode/setup.bat` on Windows) | [packaging/setup/](packaging/setup/) |
 
 Replacing the official binaries with the community ones, with the official `config.ini`, keeps the same BerkeleyDB database and the same behaviour on the network. The new features (other block databases, pruned storage, conversion) are opt-in.

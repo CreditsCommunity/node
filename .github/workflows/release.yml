@@ -2,7 +2,7 @@ name: Release
 
 # Ready-to-run mainnet packages of the community node, one for full and pruned storage: config.ini
 # runs a full node (as the official release), config.pruned.ini a pruned one on LMDB. Each holds the node
-# built here, the contract executor of an EnzinoBB/contract-executor release, the JDK the official
+# built here, the contract executor of an CreditsCommunity/contract-executor release, the JDK the official
 # release ships, and the official configuration files kept in packaging/mainnet.
 #
 # A tag community-v<version> publishes a release; a manual run builds the packages as workflow
@@ -21,7 +21,7 @@ on:
         description: 'Package version, e.g. 4.2.532-community.1'
         required: true
       executor_tag:
-        description: 'Release tag of EnzinoBB/contract-executor holding contract-executor.jar and sc-api-support.jar'
+        description: 'Release tag of CreditsCommunity/contract-executor holding contract-executor.jar and sc-api-support.jar'
         required: true
       publish:
         description: 'Create the GitHub release community-v<version> (false = artifacts only)'
@@ -161,7 +161,7 @@ jobs:
         run: |
           mkdir -p executor
           for jar in contract-executor.jar sc-api-support.jar; do
-            curl -sSfL -o "executor/$jar" "https://github.com/EnzinoBB/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
+            curl -sSfL -o "executor/$jar" "https://github.com/CreditsCommunity/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
           done
           unzip -p executor/contract-executor.jar git.properties | grep -E 'commit.id=|total.commit.count='
 
@@ -217,7 +217,7 @@ jobs:
           Community build of the Credits node, protocol version 532, compatible with mainnet release 4.2.532.
 
           - node: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
-          - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
+          - contract executor: CreditsCommunity/contract-executor release ${EXECUTOR_TAG}
           - JDK: ojdkbuild 11.0.4, the one the official release ships (Linux); Eclipse Temurin 11 (Windows, macOS)
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
@@ -266,7 +266,7 @@ jobs:
         run: |
           mkdir -p executor
           for jar in contract-executor.jar sc-api-support.jar; do
-            curl -sSfL -o "executor/$jar" "https://github.com/EnzinoBB/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
+            curl -sSfL -o "executor/$jar" "https://github.com/CreditsCommunity/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
           done
 
       # the JDK without what the executor never uses (jmods for jlink, the sources)
@@ -357,7 +357,7 @@ jobs:
     env:
       VERSION: ${{ needs.package.outputs.version }}
       PUBLISH: ${{ needs.package.outputs.publish }}
-      IMAGE: ghcr.io/enzinobb/credits-node
+      IMAGE: ghcr.io/creditscommunity/credits-node
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -387,4 +387,15 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             docker tag "$IMAGE:$VERSION" "$IMAGE:latest"
             docker push "$IMAGE:latest"
+          fi
+          # the image of the releases before the move to CreditsCommunity, for the nodes that still
+          # pull it: best effort, the package must give this repository write access
+          old=ghcr.io/enzinobb/credits-node
+          docker tag "$IMAGE:$VERSION" "$old:$VERSION"
+          if docker push "$old:$VERSION"; then
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              docker tag "$IMAGE:$VERSION" "$old:latest" && docker push "$old:latest" || true
+            fi
+          else
+            echo "::warning::$old not updated: give CreditsCommunity/node write access in the package settings"
           fi

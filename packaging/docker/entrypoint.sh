@@ -20,7 +20,7 @@ case "$STORAGE" in pruned) default_backend=lmdb ;; full) default_backend=berkele
 BACKEND=${CREDITS_DB_BACKEND:-$default_backend}
 SNAPSHOT=${CREDITS_SNAPSHOT:-github}
 [ "$SNAPSHOT" != auto ] || SNAPSHOT=github   # the value of earlier releases
-SNAPSHOT_URL=${CREDITS_SNAPSHOT_URL:-https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/snapshot.json}
+SNAPSHOT_URL=${CREDITS_SNAPSHOT_URL:-https://github.com/CreditsCommunity/node/releases/download/pruned-snapshot/snapshot.json}
 # earlier releases pointed at the format-1 latest.json: the format-2 manifest sits next to it
 SNAPSHOT_URL=${SNAPSHOT_URL%/latest.json}
 [[ "$SNAPSHOT_URL" == *.json ]] || SNAPSHOT_URL=$SNAPSHOT_URL/snapshot.json

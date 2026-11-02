@@ -202,7 +202,7 @@ consensus rules.
   region, an empty packet, or a pool whose lengths point past its data. Also fixed: a data race
   in `LockFreeChanger`.
 - **A size limit on p2p packets.** The node runs its own fork of the p2p library
-  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). The
+  ([CreditsCommunity/p2p](https://github.com/CreditsCommunity/p2p), from the commit the official node uses). The
   first packet of a connection (the registration) may announce at most 64 bytes of data, any
   later packet at most 256 MiB, far above any packet the node sends; above that the connection is
   closed before anything is allocated, with an error line at most once a minute per address
@@ -287,7 +287,7 @@ rounds for both).
 
   The executor listens on 127.0.0.1 only.
 - **Known hosts.** `known_hosts.txt` is refreshed weekly from a verified list of seed nodes.
-- **Docker image.** The image is `ghcr.io/enzinobb/credits-node`. By default it runs a pruned
+- **Docker image.** The image is `ghcr.io/creditscommunity/credits-node` (until community.15 `ghcr.io/enzinobb/credits-node`, still updated for a while). By default it runs a pruned
   node that starts from a snapshot of the chain, published every 12 hours, instead of syncing
   from block 0. The snapshot's checksum and its state digest are verified before use. A full node
   on lmdb or rocksdb starts from the snapshot too and fetches the older blocks in the background
