@@ -2,6 +2,7 @@
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
 
+#include <optional>
 #include <string>
 
 #include <boost/asio.hpp>
@@ -76,6 +77,8 @@ struct StorageData {
     size_t backfillStorePerTurn = 50;       // blocks verified and stored per processor-thread turn, 1..1000
     size_t backfillTurnBudgetMs = 50;       // and ms per turn while a confidant, 0 (no limit)..1000
     size_t backfillIdleTurnBudgetMs = 90;   // and ms per turn otherwise, 0 (no limit)..1000
+    // threads that check the backfilled blocks' signatures, 0 (the processor thread)..16; none: min(4, cores - 1)
+    std::optional<size_t> backfillVerifyThreads;
 };
 
 // [snapshot]: snapshots served by this node to its p2p neighbours and fetched from them at a first

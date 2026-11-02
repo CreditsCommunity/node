@@ -24,7 +24,18 @@ std::string keyText(const PublicKey& key) {
 }
 
 constexpr uint64_t kForever = std::numeric_limits<uint64_t>::max();
+
+using Clock = std::chrono::steady_clock;
+
+uint64_t usSince(Clock::time_point from) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - from).count());
+}
 }  // namespace
+
+size_t defaultBackfillVerifyThreads() {
+    const unsigned cores = std::thread::hardware_concurrency();   // 0: unknown
+    return cores > 2 ? std::min<size_t>(4, cores - 1) : 1;
+}
 
 BackwardSync::BackwardSync(Hooks hooks, Settings settings)
 : hooks_(std::move(hooks))
@@ -36,6 +47,7 @@ BackwardSync::BackwardSync(Hooks hooks, Settings settings)
     settings_.storePerTurn = std::clamp<size_t>(settings_.storePerTurn, 1, 1000);
     settings_.turnBudgetMs = std::min<uint64_t>(settings_.turnBudgetMs, 1000);
     settings_.idleTurnBudgetMs = std::min<uint64_t>(settings_.idleTurnBudgetMs, 1000);
+    settings_.verifyThreads = std::min(settings_.verifyThreads, kMaxVerifyThreads);
 }
 
 uint64_t BackwardSync::now() const {
@@ -64,11 +76,108 @@ bool BackwardSync::isActive() const {
 
 BackwardSync::~BackwardSync() {
     stopFlusher();
+    stopVerifiers();
 }
 
 void BackwardSync::stop() {
     stopped_ = true;
     stopFlusher();
+    stopVerifiers();
+}
+
+// a verifier in the middle of a check ends it first (a few ms); the jobs still queued are dropped
+void BackwardSync::stopVerifiers() {
+    std::vector<std::thread> workers;
+    decltype(verifyQueue_) dropped;
+    {
+        std::lock_guard<std::mutex> lock(verifyMutex_);
+        verifyStopping_ = true;
+        workers = std::move(verifiers_);
+        dropped.swap(verifyQueue_);
+    }
+    verifyCv_.notify_all();
+    for (auto& worker : workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+}
+
+bool BackwardSync::submit(VerifyJob&& job) {
+    if (settings_.verifyThreads == 0) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(verifyMutex_);
+        if (verifyStopping_ || verifyClosing_) {
+            return false;
+        }
+        if (verifiers_.empty()) {
+            try {
+                while (verifiers_.size() < settings_.verifyThreads) {
+                    verifiers_.emplace_back([this] { verifyWorker(); });
+                }
+            }
+            catch (const std::system_error& e) {
+                log(std::string("BACKFILL: verifier thread ") + std::to_string(verifiers_.size() + 1) + " not started (" + e.what() + ")" +
+                        (verifiers_.empty() ? ": verifying on the processor thread" : ""),
+                    true);
+            }
+            if (verifiers_.empty()) {
+                settings_.verifyThreads = 0;
+                return false;
+            }
+        }
+        const Sequence seq = job.block.sequence();
+        verifyQueue_.emplace(seq, std::move(job));
+    }
+    verifyCv_.notify_one();
+    return true;
+}
+
+void BackwardSync::verifyWorker() {
+    std::unique_lock<std::mutex> lock(verifyMutex_);
+    for (;;) {
+        verifyCv_.wait(lock, [this] { return verifyStopping_ || verifyClosing_ || !verifyQueue_.empty(); });
+        if (verifyStopping_ || verifyQueue_.empty()) {
+            return;
+        }
+        {
+            auto node = verifyQueue_.extract(verifyQueue_.begin());
+            VerifyJob job = std::move(node.mapped());
+            lock.unlock();
+            runJob(job);
+        }   // the job's copies of the blocks go before the lock is taken again
+        lock.lock();
+    }
+}
+
+void BackwardSync::runJob(VerifyJob& job) {
+    try {
+        if (job.check) {
+            if (job.check.use_count() == 1) {
+                return;   // the block was refused, replaced or dropped meanwhile: nobody reads the result
+            }
+            if (hooks_.onVerify) {
+                hooks_.onVerify(job.block.sequence());
+            }
+            const auto at = Clock::now();
+            job.check->why = verifySignatures(job.block);
+            phaseVerifyUs_ += usSince(at);
+            job.check->ready.store(true, std::memory_order_release);
+        }
+        else {
+            checkConfirmations(job.block, job.below);
+        }
+    }
+    catch (const std::exception& e) {
+        log(std::string("BACKFILL: a verifier thread caught: ") + e.what(), true);
+        if (job.check) {
+            // not the sender's doing, but the block cannot be stored unchecked: it is asked for again
+            job.check->why = std::string("signatures: not checked (") + e.what() + ")";
+            job.check->ready.store(true, std::memory_order_release);
+        }
+    }
 }
 
 // a flush under way ends first: nothing flushes the storage behind the node's back once it stops
@@ -170,7 +279,8 @@ bool BackwardSync::refreshAnchor(const Context& ctx) {
         progressAt_ = lastFlushAt_;
         log("BACKFILL: " + std::string(floor_ == 0 ? "full node" : "pruned node") + " with blocks " + std::to_string(anchor.first) +
             ".." + std::to_string(ctx.lastSeq) + ": fetching " + std::to_string(floor_) + ".." + std::to_string(next_) +
-            " from peers in the background");
+            " from peers in the background" +
+            (settings_.verifyThreads > 0 ? ", signatures checked on " + std::to_string(settings_.verifyThreads) + " verifier threads" : ""));
     }
     return true;
 }
@@ -242,12 +352,15 @@ void BackwardSync::tick(const Context& ctx) {
         // where the time of a block goes, on average: what to move off the processor thread next
         const uint64_t blocks = std::max<uint64_t>(1, stored_ - progressStored_);
         const uint64_t busy = busyUs_ - progressBusyUs_;
-        log("BACKFILL: per block over the last " + std::to_string(blocks) + ": verify " + std::to_string(phaseVerifyUs_ / blocks) +
-            " us, store " + std::to_string(phaseStoreUs_ / blocks) + " us, confirmations " + std::to_string(phaseConfirmUs_ / blocks) +
-            " us, " + std::to_string(phaseTransactions_ * 100 / blocks / 100) + "." +
+        const uint64_t verifyUs = phaseVerifyUs_.exchange(0);
+        const uint64_t confirmUs = phaseConfirmUs_.exchange(0);
+        log("BACKFILL: per block over the last " + std::to_string(blocks) + ": verify " + std::to_string(verifyUs / blocks) +
+            " us, store " + std::to_string(phaseStoreUs_ / blocks) + " us, confirmations " + std::to_string(confirmUs / blocks) +
+            " us" + (settings_.verifyThreads > 0 ? " (verify and confirmations on " + std::to_string(settings_.verifyThreads) + " verifier threads)" : "") +
+            ", " + std::to_string(phaseTransactions_ * 100 / blocks / 100) + "." +
             std::to_string(phaseTransactions_ * 100 / blocks % 100 / 10) + " transactions; processor thread busy " +
             std::to_string(busy / 10 / std::max<uint64_t>(1, t - progressAt_)) + " % of the time");
-        phaseVerifyUs_ = phaseStoreUs_ = phaseConfirmUs_ = phaseTransactions_ = 0;
+        phaseStoreUs_ = phaseTransactions_ = 0;
         progressBusyUs_ = busyUs_;
         progressAt_ = t;
         progressStored_ = stored_;
@@ -371,13 +484,14 @@ std::optional<PublicKey> BackwardSync::pickPeer(const Context& ctx, Sequence hig
 
 void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
     const auto it = inFlight_.find(sender);
-    if (it == inFlight_.end()) {
+    if (it == inFlight_.end() || stopped_) {
         dropped_ += blocks.size();
         return;
     }
     Batch& batch = it->second;
     const size_t limit = kBufferBatches * settings_.batch;
     std::set<Sequence> noRoom;   // sent, but not kept: asked for again, not held against the peer
+    uint64_t handedUs = 0;       // hashing the blocks and queuing their checks, on this thread
     for (auto& block : blocks) {
         const Sequence seq = block.sequence();
         if (!block.is_valid() || batch.missing.count(seq) == 0) {
@@ -394,8 +508,19 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
             }
             continue;
         }
-        buffer_[seq] = Buffered{std::move(block), sender};
+        Buffered& entry = buffer_[seq];
+        entry = Buffered{std::move(block), sender, nullptr};
         batch.missing.erase(seq);
+        if (settings_.verifyThreads > 0) {
+            // the hash is computed and cached here, before the data is shared: a verifier never writes it
+            const auto at = Clock::now();
+            (void)entry.pool.hash();
+            auto check = std::make_shared<SignatureCheck>();
+            if (submit(VerifyJob{entry.pool, csdb::Pool{}, check})) {
+                entry.check = std::move(check);
+            }
+            handedUs += usSince(at);
+        }
     }
     if (!noRoom.empty()) {
         for (const Sequence seq : noRoom) {
@@ -418,6 +543,7 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
     }
     inFlightCount_ = inFlight_.size();
     bufferedCount_ = buffer_.size();
+    busyUs_ += handedUs;
     drain();
 }
 
@@ -517,18 +643,39 @@ void BackwardSync::expire() {
     }
 }
 
-std::string BackwardSync::verify(const csdb::Pool& block) const {
+std::string BackwardSync::verifyLink(const csdb::Pool& block) const {
     if (!block.is_valid() || block.sequence() != next_) {
         return "sequence";
     }
     if (expectedHash_.is_empty() || block.hash() != expectedHash_) {
         return "hash";
     }
+    return {};
+}
+
+std::string BackwardSync::verifySignatures(const csdb::Pool& block) {
     std::string why;
     if (!BlockVerifier::verifySignatures(block, why)) {
         return "signatures: " + why;
     }
     return {};
+}
+
+// the round confirmations of the block stored before are signed by the confidants of the one below
+// it: inside the hash, so a mismatch is the chain's, not the peer's. Counted, never refused
+void BackwardSync::checkConfirmations(const csdb::Pool& above, const csdb::Pool& block) {
+    const auto at = Clock::now();
+    std::string bad;
+    if (!BlockVerifier::verifyConfirmations(above, block.confidants(), bad)) {
+        const size_t n = ++confirmationErrors_;
+        if (n <= 10 || n % 10'000 == 0) {
+            log("BACKFILL: the round confirmations of block " + std::to_string(above.sequence()) +
+                    " do not verify against the confidants of block " + std::to_string(block.sequence()) + " (" + bad + "), " +
+                    std::to_string(n) + " so far",
+                true);
+        }
+    }
+    phaseConfirmUs_ += usSince(at);
 }
 
 // A block that fails its checks: every block that peer sent and that waits here goes, the peer is
@@ -573,10 +720,6 @@ void BackwardSync::drain() {
             return;
         }
     }
-    using Clock = std::chrono::steady_clock;
-    const auto usSince = [](Clock::time_point from) {
-        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - from).count());
-    };
     const auto startedAt = Clock::now();
     const uint64_t startedMs = now();   // the budget and the slow-turn decision: the hooks' clock (tests drive it)
     const uint64_t budgetMs = trusted_ ? settings_.turnBudgetMs : settings_.idleTurnBudgetMs;
@@ -593,8 +736,21 @@ void BackwardSync::drain() {
         if (it == buffer_.end()) {
             break;
         }
+        // the link to the chain here, the signatures by a verifier thread when one took them: the
+        // turn ends at a block whose check is not done yet, the next tick or reply goes on
         auto stepAt = Clock::now();
-        const std::string why = verify(it->second.pool);
+        std::string why = verifyLink(it->second.pool);
+        if (why.empty()) {
+            if (it->second.check) {
+                if (!it->second.check->ready.load(std::memory_order_acquire)) {
+                    break;
+                }
+                why = it->second.check->why;
+            }
+            else {
+                why = verifySignatures(it->second.pool);
+            }
+        }
         verifyUs += usSince(stepAt);
         if (!why.empty()) {
             const PublicKey peer = it->second.peer;   // reject() erases the node this iterator points to
@@ -616,19 +772,11 @@ void BackwardSync::drain() {
             storeFailing_ = false;
             log("BACKFILL: storing again from block " + std::to_string(next_));
         }
-        // the round confirmations of the block stored before are signed by the confidants of this
-        // one: inside the hash, so a mismatch is the chain's, not the peer's. Counted, never refused
+        // the round confirmations of the block stored before, against the confidants of this one: on
+        // a verifier thread when there is one, as they decide nothing here
         stepAt = Clock::now();
-        if (lastStored_) {
-            std::string bad;
-            if (!BlockVerifier::verifyConfirmations(*lastStored_, it->second.pool.confidants(), bad)) {
-                const size_t n = ++confirmationErrors_;
-                if (n <= 10 || n % 10'000 == 0) {
-                    log("BACKFILL: the round confirmations of block " + std::to_string(lastStored_->sequence()) +
-                        " do not verify against the confidants of block " + std::to_string(next_) + " (" + bad + "), " +
-                        std::to_string(n) + " so far", true);
-                }
-            }
+        if (lastStored_ && !submit(VerifyJob{*lastStored_, it->second.pool, nullptr})) {
+            checkConfirmations(*lastStored_, it->second.pool);
         }
         confirmUs += usSince(stepAt);
         transactions += it->second.pool.transactions_count();
@@ -651,9 +799,10 @@ void BackwardSync::drain() {
     if (us > longestTurnUs_) {
         longestTurnUs_ = us;
     }
-    phaseVerifyUs_ += verifyUs;
+    if (settings_.verifyThreads == 0) {
+        phaseVerifyUs_ += verifyUs;   // checkConfirmations() added its own time
+    }
     phaseStoreUs_ += storeUs;
-    phaseConfirmUs_ += confirmUs;
     phaseTransactions_ += transactions;
     if (now() >= startedMs + kSlowTurnMs) {
         const size_t n = ++slowTurns_;
@@ -728,6 +877,12 @@ void BackwardSync::flushIfDue(bool force) {
 
 void BackwardSync::finish() {
     done_ = true;
+    {
+        // the confirmations still queued are checked, then the verifier threads return
+        std::lock_guard<std::mutex> lock(verifyMutex_);
+        verifyClosing_ = true;
+    }
+    verifyCv_.notify_all();
     flushIfDue(true);
     const std::string cost = ", " + std::to_string(stored_.load()) + " blocks stored in " + std::to_string(busyUs_ / 1000) +
                              " ms of processor thread, longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms";

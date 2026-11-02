@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -19,14 +20,18 @@
 
 namespace cs {
 
+// min(4, cores - 1), at least 1: the verifier threads of a backward sync unless configured
+size_t defaultBackfillVerifyThreads();
+
 // Backward sync (docs/specs/2026-10-17-backward-sync-design.md): a node whose storage starts above
 // its floor (block 0 for a full node) fetches the blocks below its lowest one from its neighbours
 // with BlockRequest, newest first, checks each against the hash chain and its signatures, and
 // stores it strictly downwards, never applying it to the caches. Requests go out only while the
 // node is synced; replies already asked for are stored in any case. Single-threaded: every call
 // comes from the node's processor thread, but stop() and stats(); the periodic flush runs on a
-// thread of its own (Settings::asyncFlush). The chain, the network and the clock are reached only
-// through Hooks.
+// thread of its own (Settings::asyncFlush), and the signatures are checked on verifier threads
+// (Settings::verifyThreads), which see only copies of the blocks and hand back their results through
+// shared state. The chain, the network and the clock are reached only through Hooks.
 class BackwardSync {
 public:
     struct Peer {
@@ -59,6 +64,8 @@ public:
         std::function<void(const PublicKey&, const PoolsRequestedSequences&)> sendRequest;
         std::function<uint64_t()> clock;                // ms, steady; default: steady_clock
         std::function<void(const std::string&)> onLog;  // optional: every BACKFILL line, for tests
+        // optional, for tests: called on a verifier thread before it checks a block's signatures
+        std::function<void(Sequence)> onVerify;
     };
 
     struct Settings {
@@ -77,6 +84,10 @@ public:
         // the periodic flush (up to several seconds on mainnet) runs on a thread of its own instead of
         // the processor thread; the flushes at the end and at a stop stay where they are
         bool asyncFlush = true;
+        // threads that check the signatures of the buffered blocks and the round confirmations of the
+        // stored ones (about 2 ms a block on mainnet), so that the processor thread only links and
+        // stores them; 0: everything on the processor thread, at most 16
+        size_t verifyThreads = defaultBackfillVerifyThreads();
     };
 
     struct Stats {
@@ -87,7 +98,7 @@ public:
         size_t confirmationErrors = 0;
         size_t inFlight = 0;
         size_t buffered = 0;
-        uint64_t busyUs = 0;         // processor-thread time spent verifying and storing
+        uint64_t busyUs = 0;         // processor-thread time spent verifying and storing (not the verifier threads')
         uint64_t longestTurnUs = 0;  // the longest single call
         size_t slowTurns = 0;        // calls longer than kSlowTurnMs
         uint64_t longestFlushUs = 0; // the longest storage flush (every kFlushBlocks or kFlushMs)
@@ -112,6 +123,7 @@ public:
     static constexpr uint64_t kTrustedFlushDeferMs = 600'000;
     static constexpr size_t kProgressBlocks = 100'000;
     static constexpr uint64_t kSlowTurnMs = 200;              // a longer turn is logged, with where its time went
+    static constexpr size_t kMaxVerifyThreads = 16;
 
     BackwardSync(Hooks hooks, Settings settings);
     ~BackwardSync();
@@ -143,17 +155,44 @@ private:
         bool paced = false;            // AwaitAnswer seen: its anti-duplicate log is active (order 35)
         bool awaitingAnswer = false;   // AwaitAnswer for the batch in flight
     };
+    // a block's signature check on a verifier thread: `why` is written before `ready` is set, and
+    // read by the processor thread only after it sees `ready`
+    struct SignatureCheck {
+        std::atomic<bool> ready{false};
+        std::string why;   // empty: the signatures verify
+    };
     struct Buffered {
         csdb::Pool pool;
         PublicKey peer;
+        // none: checked on the processor thread when the block is stored. Owned by this entry: a
+        // block replaced or dropped leaves its result to nobody
+        std::shared_ptr<SignatureCheck> check;
+    };
+    // the work of a verifier thread, on copies of the blocks (csdb::Pool shares its data with an
+    // atomic count; each thread reads only through its own copy, the hash computed beforehand)
+    struct VerifyJob {
+        csdb::Pool block;                       // its signatures, or its round confirmations
+        csdb::Pool below;                       // confirmations: the block whose confidants signed them
+        std::shared_ptr<SignatureCheck> check;  // signatures: where the result goes
     };
 
     uint64_t now() const;
     void log(const std::string& text, bool error = false) const;
     bool refreshAnchor(const Context& ctx);
     void drain();
-    // why the block below the last stored one is refused, empty if it is accepted
-    std::string verify(const csdb::Pool& block) const;
+    // why the block below the last stored one does not link to the chain, empty if it does
+    std::string verifyLink(const csdb::Pool& block) const;
+    // why its signatures are refused, empty if they verify; any thread
+    static std::string verifySignatures(const csdb::Pool& block);
+    // the round confirmations of `above` against the confidants of `block`, the block below it:
+    // counted and logged when they do not verify, never refused; any thread
+    void checkConfirmations(const csdb::Pool& above, const csdb::Pool& block);
+    // hands a job to the verifier threads, started at the first one; false: none runs, the caller
+    // does the work itself
+    bool submit(VerifyJob&& job);
+    void verifyWorker();
+    void runJob(VerifyJob& job);
+    void stopVerifiers();
     void reject(const PublicKey& peer, Sequence seq, const std::string& why);
     void reassign(const PublicKey& peer);
     void mark(const PublicKey& peer, uint64_t until, const std::string& why);
@@ -194,10 +233,11 @@ private:
     size_t storedSinceFlush_ = 0;
     uint64_t progressAt_ = 0;
     size_t progressStored_ = 0;
-    // the phases of storing since the last progress line, for its averages per block
-    uint64_t phaseVerifyUs_ = 0;
+    // the phases of storing since the last progress line, for its averages per block; verify and
+    // confirmations are added by the verifier threads when they run there
+    std::atomic<uint64_t> phaseVerifyUs_{0};
     uint64_t phaseStoreUs_ = 0;
-    uint64_t phaseConfirmUs_ = 0;
+    std::atomic<uint64_t> phaseConfirmUs_{0};
     uint64_t phaseTransactions_ = 0;
     uint64_t progressBusyUs_ = 0;
 
@@ -226,6 +266,16 @@ private:
     bool flushStopping_ = false;
     size_t flushBlocks_ = 0;        // what the requested flush covers, for its log line
     Sequence flushDown_ = 0;
+
+    // the verifier threads: started at the first job, joined by stop() and the destructor; after the
+    // end of the backfill they finish the jobs queued and return
+    std::mutex verifyMutex_;
+    std::condition_variable verifyCv_;
+    std::vector<std::thread> verifiers_;   // the fields below: under verifyMutex_
+    // the highest blocks first: the storage waits for the highest buffered one
+    std::multimap<Sequence, VerifyJob, std::greater<Sequence>> verifyQueue_;
+    bool verifyStopping_ = false;           // stop(): the jobs queued are dropped
+    bool verifyClosing_ = false;            // finish(): the jobs queued are done, then the threads return
 };
 
 }  // namespace cs

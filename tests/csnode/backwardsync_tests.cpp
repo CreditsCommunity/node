@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -124,8 +125,34 @@ cs::BackwardSync::Settings settingsOf(size_t batch = 100, size_t rate = 1000, si
     s.turnBudgetMs = 0;   // no time limit unless a test sets one
     s.idleTurnBudgetMs = 0;
     s.asyncFlush = false;   // flushes on the calling thread unless a test says otherwise
+    s.verifyThreads = 0;    // and verifies there
     return s;
 }
+
+// a gate a test holds a background thread at, shared with that thread by value: it may outlive the
+// test body if an assertion fails
+struct Gate {
+    std::mutex m;
+    std::condition_variable cv;
+    bool release = false;
+    std::atomic<int> started{0};
+    void open() {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            release = true;
+        }
+        cv.notify_all();
+    }
+    void pass() {
+        ++started;
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [this] { return release; });
+    }
+};
+struct Release {   // a failed assertion must not leave the thread waiting for ever
+    std::shared_ptr<Gate> g;
+    ~Release() { g->open(); }
+};
 
 cs::PublicKey peerKey(uint8_t n) {
     cs::PublicKey k{};
@@ -141,6 +168,10 @@ protected:
             peers_.push_back(peerKey(i));
         }
         make();
+    }
+    // the verifier and flush threads end while the fixture they log to is whole
+    void TearDown() override {
+        sync_.reset();
     }
 
     void make(cs::BackwardSync::Settings settings = settingsOf()) {
@@ -175,6 +206,7 @@ protected:
             std::lock_guard<std::mutex> lock(logsMutex_);   // the flush thread logs too
             logs_.push_back(line);
         };
+        hooks.onVerify = verifyGate_;   // copied: a verifier thread never reads the fixture's
         sync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
     }
 
@@ -220,6 +252,25 @@ protected:
             answerAll();
         }
     }
+    // with verifier threads: ticks (1 ms of the clock each, so that no batch times out while the
+    // verifiers work), answering when `answer`, until `until` holds or 60 s of real time pass
+    bool settle(const std::function<bool()>& until, bool answer = false) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (!until()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            tick(1);
+            if (answer) {
+                answerAll();
+            }
+        }
+        return true;
+    }
+    bool runThreadedToEnd() {
+        return settle([this] { return sync_->stats().done; }, true);
+    }
 
     std::vector<cs::PublicKey> peers_;
     std::unique_ptr<cs::BackwardSync> sync_;
@@ -227,6 +278,7 @@ protected:
     std::vector<std::string> logs_;
     mutable std::mutex logsMutex_;
     std::function<void()> flushGate_;
+    std::function<void(cs::Sequence)> verifyGate_;   // set before make()
     cs::Sequence first_ = kFirst;
     cs::Sequence floor_ = 0;
     uint64_t now_ = 1'000'000;
@@ -640,30 +692,9 @@ TEST_F(BackfillTest, AConfidantDefersTheFlush) {
 // the periodic flush runs on its own thread: storing goes on while it lasts, a second one waits
 // for the first, and the last flush (end of the backfill) waits for the one under way
 TEST_F(BackfillTest, ThePeriodicFlushRunsOnItsOwnThread) {
-    // shared with the flush thread by value: it may outlive this body if an assertion fails
-    struct Gate {
-        std::mutex m;
-        std::condition_variable cv;
-        bool release = false;
-        std::atomic<int> started{0};
-        void open() {
-            {
-                std::lock_guard<std::mutex> lock(m);
-                release = true;
-            }
-            cv.notify_all();
-        }
-    };
     const auto gate = std::make_shared<Gate>();
-    struct Release {   // a failed assertion must not leave the flush thread waiting for ever
-        std::shared_ptr<Gate> g;
-        ~Release() { g->open(); }
-    } guard{gate};
-    flushGate_ = [gate] {
-        ++gate->started;
-        std::unique_lock<std::mutex> lock(gate->m);
-        gate->cv.wait(lock, [&] { return gate->release; });
-    };
+    Release guard{gate};
+    flushGate_ = [gate] { gate->pass(); };
     auto settings = settingsOf(100, 0, 50);
     settings.asyncFlush = true;
     make(settings);
@@ -753,4 +784,103 @@ TEST_F(BackfillTest, OtherSyncroMessagesAreIgnored) {
     sync_->onSyncroMessage(stranger, cs::SyncroMessage::NoSuchBlocks);
     sync_->onSyncroMessage(stranger, cs::SyncroMessage::DuplicatedRequest);
     EXPECT_EQ(logged("BACKFILL: peer"), 0u);
+}
+
+// verifier threads: the same blocks stored in the same order down to block 0, replies out of order,
+// the confirmation mismatch of block 350 counted once
+TEST_F(BackfillTest, VerifierThreadsStoreTheSameBlocks) {
+    auto settings = settingsOf();
+    settings.verifyThreads = 3;
+    make(settings);
+    tick();
+    ASSERT_EQ(requests_.size(), 4u);
+    EXPECT_EQ(logged("signatures checked on 3 verifier threads"), 1u);
+    sync_->onBlocks(requests_[1].first, blocksFor(requests_[1].second));
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    requests_.erase(requests_.begin(), requests_.begin() + 2);
+    ASSERT_TRUE(settle([this] { return first_ == 201u; }));
+    EXPECT_EQ(sync_->stats().buffered, 0u);
+    ASSERT_TRUE(runThreadedToEnd());
+    EXPECT_EQ(first_, 0u);
+    EXPECT_EQ(storedCount_, kFirst);
+    EXPECT_EQ(sync_->stats().rejected, 0u);
+    EXPECT_EQ(logged("BACKFILL: full history stored"), 1u);
+    // the confirmations are checked after the blocks are stored, on the verifier threads
+    ASSERT_TRUE(settle([this] { return sync_->stats().confirmationErrors >= 1; }));
+    EXPECT_EQ(logged("the round confirmations of block 350 do not verify against the confidants of block 349"), 1u);
+    sync_->stop();
+    EXPECT_EQ(sync_->stats().confirmationErrors, 1u);
+}
+
+// verifier threads: a bad signature is refused as on the processor thread, the peer marked, the
+// blocks asked for again from another peer
+TEST_F(BackfillTest, VerifierThreadsRefuseBadSignatures) {
+    auto settings = settingsOf();
+    settings.verifyThreads = 2;
+    make(settings);
+    tick();
+    const auto [badPeer, seqs] = requests_[0];
+    auto blocks = blocksFor(seqs);
+    blocks.back() = chain().badSignature(seqs.back());   // block 400
+    requests_.erase(requests_.begin());
+    sync_->onBlocks(badPeer, std::move(blocks));
+    ASSERT_TRUE(settle([this] { return sync_->stats().rejected == 1u; }));
+    EXPECT_EQ(first_, kFirst);
+    EXPECT_EQ(logged("block 400 from peer"), 1u);
+    EXPECT_EQ(logged("rejected (signatures"), 1u);
+    EXPECT_GE(logged("marked for 1 h"), 1u);
+    ASSERT_TRUE(runThreadedToEnd());
+    EXPECT_EQ(first_, 0u);
+    EXPECT_EQ(sync_->stats().rejected, 1u);
+    for (const auto& [peer, s] : requests_) {
+        EXPECT_NE(peer, badPeer);
+    }
+}
+
+// a turn never waits for a verifier: the blocks whose signatures are not checked yet wait in the
+// buffer, and the next calls store them once they are
+TEST_F(BackfillTest, ATurnDoesNotWaitForTheVerifiers) {
+    const auto gate = std::make_shared<Gate>();
+    Release guard{gate};
+    verifyGate_ = [gate](cs::Sequence) { gate->pass(); };
+    auto settings = settingsOf();
+    settings.verifyThreads = 2;
+    make(settings);
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    tick();
+    tick();
+    EXPECT_EQ(first_, kFirst) << "stored before its signatures were checked";
+    EXPECT_EQ(sync_->stats().buffered, 100u);
+    EXPECT_EQ(sync_->stats().rejected, 0u);
+    gate->open();
+    ASSERT_TRUE(settle([this] { return first_ == 301u; }));
+    EXPECT_EQ(sync_->stats().rejected, 0u);
+}
+
+// stop() while a verifier is in the middle of a check: it returns once that check ends, the checks
+// queued are dropped and nothing more is stored
+TEST_F(BackfillTest, StopEndsTheVerifiers) {
+    const auto gate = std::make_shared<Gate>();
+    Release guard{gate};
+    verifyGate_ = [gate](cs::Sequence) { gate->pass(); };
+    auto settings = settingsOf();
+    settings.verifyThreads = 1;
+    make(settings);
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    for (int i = 0; i < 1000 && gate->started.load() == 0; ++i) {   // up to 5 s on a busy runner
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_EQ(gate->started.load(), 1) << "a verifier took the first check";
+    std::thread opener([gate] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        gate->open();
+    });
+    sync_->stop();
+    opener.join();
+    tick();
+    answerAll();
+    EXPECT_EQ(first_, kFirst);
+    EXPECT_FALSE(sync_->isActive());
 }

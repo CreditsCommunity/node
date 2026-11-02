@@ -41,6 +41,7 @@ official node.
 | `backfill_store_per_turn` | `50` | Blocks checked and stored per turn of the thread that also runs consensus, `1` to `1000`; the rest waits for the next turn, 100 ms later. A turn over 200 ms is logged (`BACKFILL: slow turn of ...`) with the time spent verifying, storing and checking confirmations. |
 | `backfill_turn_budget_ms` | `50` | While the node is a confidant, a turn also ends once it has taken this long (after at least one block), `0` (no limit) to `1000`: consensus keeps most of the thread; on mainnet about 250 blocks/s. |
 | `backfill_idle_turn_budget_ms` | `90` | The same while the node is not a confidant, with little consensus work: on mainnet about 450 blocks/s. |
+| `backfill_verify_threads` | min(4, cores − 1) | Threads that check the signatures and round confirmations of the fetched blocks, `0` to `16`; `0` checks them on the thread that runs consensus, as before. |
 
 The periodic flush of the backfilled blocks (every 10,000 blocks or a minute; up to several seconds on mainnet) runs on a thread of its own, not on the thread that runs consensus; one flush at a time, and while the node is a confidant it waits until the node is out of the trusted set (10 minutes at most). The log line says `on the flush thread`. One wait remains possible: an LMDB index that must grow its map while the flush thread syncs it waits for that sync (rare: the map grows in steps).
 
@@ -98,6 +99,12 @@ restart.
   prune_keep_blocks` below its head at start), which a snapshot usually holds already.
 - Once block 1 is stored, the node knows the chain's identifier and, as a node synced from block
   0, no longer accepts neighbours that announce another chain.
+- The signature checks (about 2 ms a block on mainnet, 80 % of the cost of a block) run on
+  `backfill_verify_threads` threads of their own as soon as a block arrives; the thread that runs
+  consensus only links each block to the chain and stores it, and never waits for a check: a block
+  not checked yet waits for the next turn. The round confirmations of each stored block are checked
+  there too, after it is stored (a mismatch is counted and logged, as before; it never refuses a
+  block).
 - The log shows `BACKFILL: full node with blocks N..M: fetching 0..N-1`, a line every 100,000
   blocks, every peer left out, and at the end `BACKFILL: full history stored`; the status line
   gets `, oldest stored = K`. A restart resumes below the oldest stored block.

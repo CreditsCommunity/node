@@ -51,3 +51,13 @@ TEST(BackfillConfig, BadValuesKeepTheDefaultOrAreClamped) {
     EXPECT_EQ(parse("backfill_batch=many\n").backfillBatch, 100u);
     EXPECT_EQ(parse("backfill_rate=-5\n").backfillRate, 1000u);
 }
+
+// backfill_verify_threads: 0..16; missing or not a number: BackwardSync's default
+TEST(BackfillConfig, VerifyThreads) {
+    EXPECT_FALSE(parse("db_backend=lmdb\n").backfillVerifyThreads.has_value());
+    EXPECT_EQ(parse("backfill_verify_threads=0\n").backfillVerifyThreads.value_or(99), 0u);
+    EXPECT_EQ(parse("backfill_verify_threads=3\n").backfillVerifyThreads.value_or(99), 3u);
+    EXPECT_EQ(parse("backfill_verify_threads=64\n").backfillVerifyThreads.value_or(99), 16u);
+    EXPECT_FALSE(parse("backfill_verify_threads=many\n").backfillVerifyThreads.has_value());
+    EXPECT_FALSE(parse("backfill_verify_threads=-1\n").backfillVerifyThreads.has_value());
+}
