@@ -123,6 +123,9 @@ public:
     // not flushed yet are fetched again after a crash, nothing else is lost
     static constexpr uint64_t kTrustedFlushDeferMs = 600'000;
     static constexpr size_t kProgressBlocks = 100'000;
+    // confirmation jobs wait behind the signature jobs: past this many queued, the processor thread
+    // checks them itself, so that they cannot pile up (each holds two blocks) on a slow verifier
+    static constexpr size_t kMaxPendingConfirmations = 2'000;
     static constexpr uint64_t kSlowTurnMs = 200;              // a longer turn is logged, with where its time went
     static constexpr size_t kMaxVerifyThreads = 16;
 
@@ -278,6 +281,7 @@ private:
     // checks, counted only, after them
     std::multimap<std::pair<bool, Sequence>, VerifyJob, std::greater<std::pair<bool, Sequence>>> verifyQueue_;
     bool verifyStopping_ = false;           // stop(): the jobs queued are dropped
+    size_t pendingConfirmations_ = 0;       // confirmation jobs queued, at most kMaxPendingConfirmations
     bool verifyClosing_ = false;            // finish(): the jobs queued are done, then the threads return
 };
 

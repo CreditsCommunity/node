@@ -94,6 +94,7 @@ void BackwardSync::stopVerifiers() {
         verifyStopping_ = true;
         workers = std::move(verifiers_);
         dropped.swap(verifyQueue_);
+        pendingConfirmations_ = 0;
     }
     verifyCv_.notify_all();
     for (auto& worker : workers) {
@@ -111,6 +112,9 @@ bool BackwardSync::submit(VerifyJob&& job) {
         std::lock_guard<std::mutex> lock(verifyMutex_);
         if (verifyStopping_ || verifyClosing_) {
             return false;
+        }
+        if (!job.check && pendingConfirmations_ >= kMaxPendingConfirmations) {
+            return false;   // the caller checks these confirmations itself
         }
         if (verifiers_.empty()) {
             try {
@@ -130,6 +134,9 @@ bool BackwardSync::submit(VerifyJob&& job) {
             }
         }
         const auto key = std::make_pair(job.check != nullptr, job.block.sequence());
+        if (!job.check) {
+            ++pendingConfirmations_;
+        }
         verifyQueue_.emplace(key, std::move(job));
     }
     verifyCv_.notify_one();
@@ -146,6 +153,9 @@ void BackwardSync::verifyWorker() {
         {
             auto node = verifyQueue_.extract(verifyQueue_.begin());
             VerifyJob job = std::move(node.mapped());
+            if (!job.check) {
+                --pendingConfirmations_;
+            }
             lock.unlock();
             runJob(job);
         }   // the job's copies of the blocks go before the lock is taken again
