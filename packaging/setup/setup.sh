@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Guided set-up of the node in this folder: storage (pruned or full), database, how the first start
-# gets the chain, whether to share snapshots, which contract executor to run. Writes the [snapshot]
+# gets the chain, whether a full node fetches the older blocks in the background (backfill), whether
+# to share snapshots, which contract executor to run. Writes the [snapshot]
 # and [storage] sections of config.ini and the executor builds it accepts (the previous file is
 # kept as config.ini.bak-<date>), can replace the executor jars, and can start the node.
 #
@@ -171,9 +172,11 @@ echo "   pruned: keeps only recent blocks (a few GB), starts in minutes from a s
 echo "   full:   keeps every block since the start of the chain (tens of GB), for history and explorers."
 ask "   Pruned or full node? (pruned/full)" "$storage_default" pruned full
 storage=$answer
+pruned_to_full=no
 if [ "$storage" = full ] && [ -n "$have" ] && [ -n "$cur_prune" ] && [ "$cur_prune" != 0 ]; then
-    echo "   This folder holds a pruned database: its removed blocks are gone. To get a full node,"
-    echo "   move db, caches and qs away and run the set-up again on the empty folder."
+    echo "   This folder holds a pruned database: as a full node it keeps its blocks and fetches the ones"
+    echo "   it removed from other nodes in the background (backfill, question 3)."
+    pruned_to_full=yes
 fi
 echo
 
@@ -228,13 +231,32 @@ if [ -z "$have" ]; then
         echo "   sync:    sync from block 0 by itself (about 35 hours on mainnet)."
         first_default=github
         if [ "$storage" = full ]; then
-            echo "   A full node started from a snapshot holds the blocks from the snapshot on only."
-            first_default=sync
+            echo "   A full node started from a snapshot runs in minutes and fetches the older blocks from"
+            echo "   other nodes in the background (backfill, next question)."
         fi
         ask "   How should the node get the chain? (github/network/sync)" "$first_default" github network sync
         first=$answer
     fi
     echo
+fi
+
+# 3b. backfill: a full node that starts above block 0 (from a snapshot, or a pruned folder) fetches
+# the older blocks from other nodes in the background
+backfill=
+if [ "$storage" = full ] && { [ "$first" = github ] || [ "$first" = network ] || [ "$pruned_to_full" = yes ]; }; then
+    backfill_default=yes
+    [ "$(current storage backfill)" != off ] || backfill_default=no
+    echo "3b. History (backfill)"
+    echo "   yes: fetch every older block down to block 0 in the background, each checked against the chain;"
+    echo "        the node runs and takes part in the network meanwhile. On mainnet about 186 million blocks:"
+    echo "        one to five days, and the disk of a full node (about 130 GB or more with rocksdb, 400 GB"
+    echo "        with lmdb or berkeleydb)."
+    echo "   no:  keep only the blocks from the snapshot on (a few GB); the history before is not served."
+    ask "   Fetch the older blocks? (yes/no)" "$backfill_default" yes no
+    backfill=$answer
+    echo
+elif [ "$storage" = full ] && [ "$(current storage backfill)" = off ]; then
+    backfill=no   # not asked: a choice made before is kept
 fi
 
 # 4. sharing snapshots
@@ -303,6 +325,7 @@ case "$first" in
     github)  echo "  first start:  snapshot downloaded from GitHub now" ;;
     sync)    echo "  first start:  sync from block 0" ;;
 esac
+[ -z "$backfill" ] || echo "  backfill:     $backfill"
 echo "  share:        $serve"
 case "$executor_choice/$executor_action" in
     none/*)            ;;
@@ -342,6 +365,15 @@ awk '
         echo "checkpoint_every=100000"
         echo "checkpoint_keep=2"
         echo "prune_keep_blocks=1000"
+    fi
+    case "$backfill" in
+        yes) echo "backfill=on" ;;
+        no)  echo "backfill=off" ;;
+    esac
+    # the backfill's tuning keys set by hand (backfill_rate, backfill_batch...) are kept
+    if [ "$storage" = full ]; then
+        awk '/^[[:space:]]*\[/ { in_s = ($0 ~ /^[[:space:]]*\[storage\]/); next }
+             in_s && /^[[:space:]]*backfill_[a-z_]+[[:space:]]*=/ { sub(/^[[:space:]]+/, ""); print }' "$backup" | tr -d '\r'
     fi
 } >> "$tmp"
 mv "$tmp" "$config"

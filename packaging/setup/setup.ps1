@@ -155,9 +155,11 @@ Write-Host '1. Storage'
 Write-Host '   pruned: keeps only recent blocks (a few GB), starts in minutes from a snapshot. Enough to run a node.'
 Write-Host '   full:   keeps every block since the start of the chain (tens of GB), for history and explorers.'
 $storage = Ask '   Pruned or full node? (pruned/full)' $storageDefault @('pruned', 'full')
+$prunedToFull = $false
 if ($storage -eq 'full' -and $have -and $curPrune -and $curPrune -ne '0') {
-    Write-Host '   This folder holds a pruned database: its removed blocks are gone. To get a full node,'
-    Write-Host '   move db, caches and qs away and run the set-up again on the empty folder.'
+    Write-Host '   This folder holds a pruned database: as a full node it keeps its blocks and fetches the ones'
+    Write-Host '   it removed from other nodes in the background (backfill, question 3).'
+    $prunedToFull = $true
 }
 Write-Host ''
 
@@ -201,12 +203,29 @@ if (-not $have) {
         Write-Host '   sync:    sync from block 0 by itself (about 35 hours on mainnet).'
         $firstDefault = 'github'
         if ($storage -eq 'full') {
-            Write-Host '   A full node started from a snapshot holds the blocks from the snapshot on only.'
-            $firstDefault = 'sync'
+            Write-Host '   A full node started from a snapshot runs in minutes and fetches the older blocks from'
+            Write-Host '   other nodes in the background (backfill, next question).'
         }
         $first = Ask '   How should the node get the chain? (github/network/sync)' $firstDefault @('github', 'network', 'sync')
     }
     Write-Host ''
+}
+
+# 3b. backfill: a full node that starts above block 0 (from a snapshot, or a pruned folder) fetches
+# the older blocks from other nodes in the background
+$backfill = ''
+if ($storage -eq 'full' -and ($first -eq 'github' -or $first -eq 'network' -or $prunedToFull)) {
+    $backfillDefault = if ((Current 'storage' 'backfill') -eq 'off') { 'no' } else { 'yes' }
+    Write-Host '3b. History (backfill)'
+    Write-Host '   yes: fetch every older block down to block 0 in the background, each checked against the chain;'
+    Write-Host '        the node runs and takes part in the network meanwhile. On mainnet about 186 million blocks:'
+    Write-Host '        one to five days, and the disk of a full node (about 130 GB or more with rocksdb, 400 GB'
+    Write-Host '        with lmdb or berkeleydb).'
+    Write-Host '   no:  keep only the blocks from the snapshot on (a few GB); the history before is not served.'
+    $backfill = Ask '   Fetch the older blocks? (yes/no)' $backfillDefault @('yes', 'no')
+    Write-Host ''
+} elseif ($storage -eq 'full' -and (Current 'storage' 'backfill') -eq 'off') {
+    $backfill = 'no'   # not asked: a choice made before is kept
 }
 
 # 4. sharing snapshots
@@ -269,6 +288,7 @@ switch ($first) {
     'github'  { Write-Host '  first start:  snapshot downloaded from GitHub now' }
     'sync'    { Write-Host '  first start:  sync from block 0' }
 }
+if ($backfill) { Write-Host "  backfill:     $backfill" }
 Write-Host "  share:        $serve"
 if ($executorChoice -ne 'none') {
     switch ($executorAction) {
@@ -311,6 +331,15 @@ if ($storage -eq 'pruned') {
     $out.Add('checkpoint_every=100000')
     $out.Add('checkpoint_keep=2')
     $out.Add('prune_keep_blocks=1000')
+}
+if ($backfill -eq 'yes') { $out.Add('backfill=on') } elseif ($backfill -eq 'no') { $out.Add('backfill=off') }
+# the backfill's tuning keys set by hand (backfill_rate, backfill_batch...) are kept
+if ($storage -eq 'full') {
+    $inStorage = $false
+    foreach ($l in $lines) {
+        if ($l -match '^\s*\[') { $inStorage = ($l -match '^\s*\[storage\]'); continue }
+        if ($inStorage -and $l -match '^\s*backfill_[a-z_]+\s*=') { $out.Add($l.Trim()) }
+    }
 }
 
 # the executor: put the chosen jars in place, then make config.ini accept their build
