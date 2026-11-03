@@ -1,0 +1,13 @@
+[package]
+name = "credits-client"
+version = "1.0.0"
+edition = "2021"
+description = "A small client of the Credits node API (sample)"
+publish = false
+
+[dependencies]
+thrift = "=0.17.0"
+ed25519-dalek = "=2.1.1"
+bs58 = "=0.5.1"
+hex = "=0.4.3"
+chrono = { version = "=0.4.38", default-features = false, features = ["std", "alloc"] }

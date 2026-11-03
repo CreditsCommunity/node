@@ -1,0 +1,17 @@
+{
+  "name": "credits-client",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small client of the Credits node API (sample)",
+  "main": "credits-client.js",
+  "bin": { "credits-client": "credits-client.js" },
+  "scripts": {
+    "generate": "node -e \"require('fs').rmSync('gen',{recursive:true,force:true});require('fs').mkdirSync('gen')\" && thrift -r --gen js:node -I ../../../third-party/thrift-interface-definitions -out gen ../../../third-party/thrift-interface-definitions/api.thrift",
+    "prepare": "npm run generate"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "thrift": "0.19.0"
+  },
+  "license": "AGPL-3.0-only"
+}
