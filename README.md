@@ -2,16 +2,15 @@
 
 [Documentation](https://developers.credits.com/en/Articles/Platform) \|
 [Guides](https://developers.credits.com/en/Articles/Guides) \|
-[News](https://credits.com/en/Home/News)
+[CREDITS website](https://credits.com/)
 
 [![Build](https://github.com/CreditsCommunity/node/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/CreditsCommunity/node/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/CreditsCommunity/node?label=Community%20release&style=plastic)](https://github.com/CreditsCommunity/node/releases/latest)
 [![AGPL License](https://img.shields.io/github/license/CREDITSCOM/node.svg?color=green&label=License&style=plastic)](LICENSE)
 [![Twitter](https://img.shields.io/twitter/follow/creditscom.svg?label=Follow&style=social)](https://twitter.com/intent/follow?screen_name=creditscom)
 # Credits Node (community)
-A node is a client-side application that is installed on the user equipment.
-The Node processes and stores transactions, executes and confirms smart contract rules requests processing from third-party systems and provides data when requested.
-Written on C++.
+The node is the program that runs on the operator's machine and takes part in the CREDITS network.
+Written in C++.
 
 ## Version
 This repository is the community continuation of [CREDITSCOM/node](https://github.com/CREDITSCOM/node), forked from the official release 4.2.532. Community releases are numbered `4.2.532-community.N`. They keep protocol version 532 and stay compatible with the mainnet.
@@ -28,189 +27,101 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 | Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/CreditsCommunity/node/releases) |
 | Guided set-up in every package: pruned or full, database, first start, snapshot sharing, contract executor (`csnode/setup.sh` on Linux and macOS, `csnode/setup.bat` on Windows) | [packaging/setup/](packaging/setup/) |
 
-Replacing the official binaries with the community ones, with the official `config.ini`, keeps the same BerkeleyDB database and the same behaviour on the network. The new features (other block databases, pruned storage, conversion) are opt-in.
+Replacing the official binaries with the community ones, with the official `config.ini`, keeps the same BerkeleyDB database and the same behaviour on the network. The new features (other block databases, pruned storage, conversion, snapshots, backfill) are opt-in.
 
-<h2>What is Credits Node?</h2>
-<p>Credits Node is the main module that provide an opportunity to run a node and participate in CREDITS blockhain network. The node performs processing and storage of transactions, execution and confirmation of the terms of smart contracts, processing requests from third-party systems, and provides data upon request. Each node on the network has the same functionality.
-The node consists of the following elements:</p>
-<ul>
-<li>API</li> 
-<li>Desision-making module(Solver)</li> 
-<li>Storage(CSDB)</li> 
-<li>Transport protocol</li> 
-</ul>
+## What is Credits Node?
+Credits Node is the program that runs a node of the CREDITS blockchain network. It processes and
+stores transactions, executes and confirms smart contracts, answers requests from third-party
+systems, and provides data on request. Every node on the network has the same functions. Its main
+parts are:
 
-<h2>Build dependencies</h2>
-<ul>
-<li><a href="https://www.boost.org/users/history/version_1_70_0.html">Boost 1.70</a> or newest static prebuild</li>
-<li>Compiler with C++17 support</li>
-<li><a href="https://cmake.org/download/">Cmake 3.11</a> or newest</li>
-<li> Requirements fo building <a href="https://thrift.apache.org/docs/install/">Apache Thrift</a></li>
-<li>The building Berkeley DB distribution uses the Free Software Foundation's autoconf and libtool tools to build on UNIX platforms.</li>
+- the API;
+- the decision-making module (Solver);
+- the storage (CSDB);
+- the transport protocol.
 
+## Running a node
+Most operators do not need to build: download the package for your system from the
+[Releases](https://github.com/CreditsCommunity/node/releases), unpack it and run the guided set-up
+(`csnode/setup.sh` on Linux and macOS, `csnode/setup.bat` on Windows), or use the
+[Docker image](packaging/docker/README.md).
 
+Indicative requirements:
 
-It is necessary to run in the terminal, which sets the environment variables for building a Visual Studio project
-For Windows:<br/>
->```sh
->git clone https://github.com/CREDITSCOM/node.git
->cd node
->git submodule update --init --recursive
->mkdir build
->cd build
->cmake -DCMAKE_BUILD_TYPE=Release -A x64 ..
->cmake --build . --target ALL_BUILD --config Release
+| | Pruned node | Full node |
+|---|---|---|
+| Operating system | Linux x86-64 (glibc 2.31 or later: Ubuntu 20.04, Debian 11 and later), Windows 10 or later (x64), macOS on Apple Silicon | same |
+| CPU | 2 cores | 4 cores or more (the backfill checks signatures on several threads) |
+| Memory | 4 GB (8 GB recommended) | 8 GB |
+| Disk | about 10 GB | about 200 to 250 GB with RocksDB, 400 GB or more with LMDB or BerkeleyDB; an SSD |
+| Network | 3 Mbit/s | 5 Mbit/s or more |
 
+See [docs/storage.md](docs/storage.md) for the storage options.
 
-<h4>If necessary, full step-by-step instruction for Windows:</h4>
+## Building from source
+The builds that CI runs on every change are the reference:
+[build.yml](.github/workflows/build.yml) (Linux) and
+[build-platforms.yml](.github/workflows/build-platforms.yml) (Windows with Visual Studio 2022,
+macOS on Apple Silicon).
 
->```sh
-># Install cmake
-># After install you can try to run in command line version check:
->cmake --version
-># If installation was successful, the result will be like:
->cmake version 3.17.0-rc1
-># Install git, check the version the same way:
->git --version
-># and result result:
->git version 2.33.0.windows.2
-># Install Visual Studio, as result you can rut it
-># FLEX&BISON usually are installed automatically with Visual Studio and are not necessary to install yourself
-># DO NOT TRY TO INSTALL IT SEPARATELY IF IT ISN'T NECESSARY, IT CAN PREVENT YOU FROM CORRECT NODE BUILDING PROCESS
-># Check is made the same way by requesting Software version. System should give the correct answer.
-># Install boost from 1.68.0 to 1.72.0:
->wget -c $https://dl.bintray.com/boostorg/release/1.72.0/source/boost_1_72_0.tar.gz
-># or just load with your browser
-># unzip with any archiver, you prefer and go to directory:
->cd boost_1_72_0
->./bootstrap.sh
->./b2 --build-type=complete link=static threading=multi $runtime-link=static --layout=tagged install --prefix=../boost
-># do not forget to add BOOST_ROOT to your SYSTEM VARIABLES and set the value pointing your BOOST directory C:\boost\boost_1_72_0
-># Check it:
->echo %BOOST_ROOT%
-># Result: boost root variable value
-># and add the directories of boost-root and boost-libs to your SYSTEM PATHS like that:
-># C:\boost\boost_1_72_0
-># C:\boost\boost_1_72_0\stage\lib
-># Now you are ready to get node repository and build it:
->git clone https://github.com/CREDITSCOM/node.git
->cd node
->git submodule update --init --recursive
->mkdir build
->cd build
->cmake -DCMAKE_BUILD_TYPE=Release -A x64 ..
->cmake --build . --target ALL_BUILD --config Release
+Requirements: CMake 3.12 or later, a C++17 compiler (GCC 13 on Ubuntu 24.04 is what CI uses),
+[Boost 1.83](https://www.boost.org/users/history/version_1_83_0.html) built as static libraries with
+a static runtime, flex, bison, autoconf, automake and libtool (for Apache Thrift and BerkeleyDB).
 
+On Linux (Ubuntu 24.04):
 
+```sh
+sudo apt install build-essential cmake ninja-build flex bison autoconf automake libtool pkg-config
 
-For Linux:<br/>
->```sh
->git clone https://github.com/CREDITSCOM/node.git
->cd node
->git submodule update --init --recursive
->mkdir build
->cd build
->cmake -DCMAKE_BUILD_TYPE=Release ..
->make -j4
+# Boost, static with a static runtime
+curl -sSfLO https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.bz2
+tar xjf boost_1_83_0.tar.bz2 && cd boost_1_83_0
+./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+./b2 -j"$(nproc)" variant=release link=static runtime-link=static threading=multi cxxflags=-fPIC \
+  --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 install --prefix="$HOME/boost"
+cd ..
 
-<h4>If necessary, full step-by-step instruction for Linux:</h4>
+# the node
+git clone https://github.com/CreditsCommunity/node.git
+cd node
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DBoost_ROOT="$HOME/boost" -DBoost_NO_SYSTEM_PATHS=ON \
+  -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" -DWITH_HASKELL=OFF
+cmake --build build -j"$(nproc)"
+```
 
-Update repos and install required package
->```sh
->sudo apt update
->apt upgrade -y
->sudo apt install build-essential libssl-dev autoconf -y
->sudo apt install flex bison libtool -y
+The binary is `build/client/node`. Add `-DENABLE_TESTS=ON` to build the unit tests, then run
+`ctest --test-dir build`.
 
-Create build directory
->```sh
->mkdir csbuild
->d csbuild
+## Contribution
+Contributions are welcome. Fork the repository, make your change on a branch and open a pull
+request against `master` of [CreditsCommunity/node](https://github.com/CreditsCommunity/node).
+Please:
 
-Update gcc g++ (there is no need to update in version of Ubuntu 20 and later)
->```sh
->sudo apt install gcc-8 g++-8 -y
->sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-8 80 --slave /usr/bin/g++ g++ /usr/bin/g++-8 --slave /usr/bin/gcov gcov /usr/bin/gcov-8
->gcc --version
->gcc (Ubuntu 8.4.0-1ubuntu1~18.04) 8.4.0
->Copyright (C) 2018 Free Software Foundation, Inc.
->This is free software; see the source for copying conditions.  There is NO
->warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE
+- follow the [coding style](codingstyle.md);
+- prefix commit messages with the part they change (`csnode:`, `api:`, `ci:`...);
+- add a line to [docs/CHANGES.md](docs/CHANGES.md);
+- update the guided set-up (`packaging/setup/`) when a change adds or changes a setting an
+  operator chooses.
 
-Update cmake to latest version
->```sh
->wget -c https://github.com/Kitware/CMake/releases/download/v3.17.0/cmake-3.17.0.tar.gz
->tar zxfv cmake-3.17.0.tar.gz
->cd cmake-3.17.0
->./bootstrap
->make
->sudo make install
->cd ..
+Every pull request is built and tested on Linux, Windows and macOS.
 
-Install boost
->```sh
->wget -c $https://dl.bintray.com/boostorg/release/1.72.0/source/boost_1_72_0.tar.gz
->tar zxfv boost_1_72_0.tar.gz
->cd boost_1_72_0
->./bootstrap.sh
->./b2 --build-type=complete link=static threading=multi $runtime-link=static --layout=tagged install --prefix=../boost
->export PATH=~/csbuild/boost:$PATH
->export BOOST_ROOT=~/csbuild/boost
->cd ..
+### Resources
 
-Build node
->```sh
->git clone https://github.com/CREDITSCOM/node.git
->cd node
->git submodule update --init --recursive
->mkdir build
->cd build
->cmake -DCMAKE_BUILD_TYPE=Release ..
->make -j2
+- [CREDITS website](https://credits.com/)
+- [Documentation](https://github.com/CREDITSCOM/Documentation)
+- [Whitepaper](https://github.com/CREDITSCOM/Documentation/blob/master/WhitePaper%20CREDITS%20Eng.pdf)
+- [Technical paper](https://github.com/CREDITSCOM/Documentation/blob/master/TechnicalPaper%20CREDITS%20Eng.pdf)
+- [Developers portal](https://developers.credits.com/)
 
-<h2>System requirements:</h2>
-<h4>Minimum system requirements:</h4>
-Operating system: Windows® 7 / Windows® 8 / Windows® 10 64-bit (with the last update package)
-Processor (CPU): with frequency of 1 GHz (or faster) with PAE, NX and SSE2 support;
-Memory (RAM): 8 Gb
-HDD: 600Gb
-Internet connection: 3 Mbit/s.
-<h4>Recommended system requirements:</h4>
+### Community links
 
-Operating system: Windows® 7 / Windows® 8 / Windows® 10 64-bit (with the last update package)
-Processor (CPU): Intel® Core ™ i3 or AMD Phenom ™ X3 8650
-Memory (RAM): 8 Gb
-HDD: 3 Tb
-Internet connection: 5 Mbit/s.
-
-<h2>Contribution</h2>
-<p>Thank you for considering to help out with the source code! We welcome contributions from anyone on the internet, and are grateful for even the smallest of fixes!
-If you'd like to contribute to Credits Node, please fork, fix, commit and send a pull request for the maintainers to review and merge into the main code base. If you wish to submit more complex changes though, please check up with the core devs first on our <a href="https://developers.credits.com/">Developers portal</a> and <a href="https://github.com/CREDITSCOM/Documentation/blob/master/Contribution.md"> Contribution file</a> to ensure those changes are in line with the general philosophy of the project and/or get some early feedback which can make both your efforts much lighter as well as our review and merge procedures quick and simple.
-Please make sure your contributions adhere to our coding guidelines:</p>
-<ul>
-<li>Code must adhere to the <a href="https://github.com/CREDITSCOM/node/blob/master/codingstyle.md">Credits coding style</a></li>
-
-<li>Pull requests need to be based on and opened against the master branch</li>
-<li>Commit messages should be prefixed with the package(s) they modify</li>
-</ul>
-<h3>Resources</h3>
-
-<a href="https://credits.com//">CREDITS Website</a>
-
-<a href="https://github.com/CREDITSCOM/DOCUMENTATION">Documentation</a>
-
-<a href="https://github.com/CREDITSCOM/Documentation/blob/master/WhitePaper%20CREDITS%20Eng.pdf">Whitepaper</a>
-
-<a href="https://github.com/CREDITSCOM/Documentation/blob/master/TechnicalPaper%20CREDITS%20Eng.pdf">Technical paper</a>
-
-<a href="https://developers.credits.com/">Developers portal</a>
-
-<h3>Community links</h3>
-   <a href="https://t.me/creditstechnical"><<img src ="https://simpleicons.org/icons/telegram.svg" height=40 widht=40 ></a>
-   <a href="https://t.me/creditscom"><img src ="https://simpleicons.org/icons/telegram.svg" height=40 widht=40 ></a>
-   <a href="https://twitter.com/creditscom"><img src ="https://simpleicons.org/icons/twitter.svg" height=40 widht=40 ></a>
-   <a href="https://www.reddit.com/r/CreditsOfficial/"><img src ="https://simpleicons.org/icons/reddit.svg" height=40 widht=40></a> 
-   <a href="https://medium.com/@credits"><img src="https://simpleicons.org/icons/medium.svg" height=40 widht=40></a>
-   <a href="https://www.instagram.com/credits_com/"><img src="https://simpleicons.org/icons/facebook.svg" height=40 widht=40></a>
-   <a href="https://www.facebook.com/creditscom"><img src="https://simpleicons.org/icons/instagram.svg" height=40 widht=40></a>
-   <a href="https://www.youtube.com/channel/UC7kjX_jgauCqmf_a4fqLGOQ"><img src="https://simpleicons.org/icons/youtube.svg" height=40 widht=40></a>
+<a href="https://t.me/creditstechnical"><img src="https://cdn.simpleicons.org/telegram" height="40" width="40" alt="Telegram (technical)"></a>
+<a href="https://t.me/creditscom"><img src="https://cdn.simpleicons.org/telegram" height="40" width="40" alt="Telegram"></a>
+<a href="https://twitter.com/creditscom"><img src="https://cdn.simpleicons.org/x" height="40" width="40" alt="X (Twitter)"></a>
+<a href="https://www.reddit.com/r/CreditsOfficial/"><img src="https://cdn.simpleicons.org/reddit" height="40" width="40" alt="Reddit"></a>
+<a href="https://medium.com/@credits"><img src="https://cdn.simpleicons.org/medium" height="40" width="40" alt="Medium"></a>
+<a href="https://www.facebook.com/creditscom"><img src="https://cdn.simpleicons.org/facebook" height="40" width="40" alt="Facebook"></a>
+<a href="https://www.instagram.com/credits_com/"><img src="https://cdn.simpleicons.org/instagram" height="40" width="40" alt="Instagram"></a>
+<a href="https://www.youtube.com/channel/UC7kjX_jgauCqmf_a4fqLGOQ"><img src="https://cdn.simpleicons.org/youtube" height="40" width="40" alt="YouTube"></a>

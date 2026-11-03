@@ -84,11 +84,11 @@ transaction lookups and wallet histories grow downwards while the node runs, wit
 restart.
 
 - **By default a full node started from a snapshot fetches the whole history to disk.** On mainnet
-  that is about 186 million blocks: about five days (measured on mainnet: 300 to 450 blocks/s while
-  the node is not a confidant, less while it is, since consensus comes first; see
-  `backfill_idle_turn_budget_ms`), and the disk of a full node, about 400 GB with lmdb or
-  berkeleydb, about 130 GB with rocksdb (the recent blocks take about 1.3 KB each in rocksdb: keep
-  room to spare). Set `backfill=off` to keep only the blocks of the snapshot.
+  that is about 186 million blocks: about two to three days (measured on mainnet: about 1,000
+  blocks/s, the `backfill_rate` default, with the signatures checked on verifier threads; slower on
+  a node with few cores or a slow disk), and the disk of a full node: 400 GB or more with lmdb or
+  berkeleydb, about 200 to 250 GB with rocksdb (measured: 128 GB, transaction index included, for
+  the newest 75 million blocks; keep room to spare). Set `backfill=off` to keep only the blocks of the snapshot.
 - Requests go out only while the node is in sync (not syncing forward, not in a bootstrap round,
   not fetching a snapshot); a trusted node keeps fetching, at most `backfill_store_per_turn` blocks
   per turn of the thread that also runs consensus.
