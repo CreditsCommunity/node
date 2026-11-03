@@ -15,8 +15,8 @@ import static java.math.BigDecimal.ZERO;
  *   contract's balance. Throwing refuses it: the node gives the CS back to the payer, who still pays
  *   the fee (WalletsCache, a contract state that was not updated).
  * - sendTransaction(contractAddress, to, amount) makes the contract pay from its own balance. The
- *   emitted transfer is part of the call's result: it lands only if the call succeeds, and its fee
- *   is taken from the contract.
+ *   emitted transfer is part of the call's result: it lands only if the call succeeds. Its fee is
+ *   charged to the caller (here the owner), not to the contract.
  * - The contract decides what it can withdraw from its own bookkeeping (what was paid in minus what
  *   was taken out), not from getBalance(): its result depends only on the calls before it, so every
  *   node that executes it, now or later while syncing, computes the same. See Faucet.java for the

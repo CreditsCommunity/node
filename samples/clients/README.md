@@ -135,7 +135,9 @@ getters, fees and `payable()` are, and are deployed with these commands on a pri
   It still pays its fee.
 - **get** sends a `TransactionFlow` with `forgetNewState=true`, an all-zero source and signature:
   the node runs the method on its own executor against the current state and forgets the result.
-- **Paying a contract** is a plain `transfer` to its address: the node calls its `payable()`.
+- **Paying a contract** is a plain `transfer` to its address: the node calls its `payable()` and
+  answers once it ran; if `payable()` throws, `transfer` reports "call to contract failed" and the
+  CS go back to the sender (the fee is still paid).
 
 The fake node also plays a node with one made-up contract (`add(int)`, `setNote(String)`,
 `paidBy(String)`, `isOpen()`): it accepts a deploy only to the derived address, with a valid

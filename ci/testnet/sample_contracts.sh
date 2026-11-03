@@ -11,7 +11,8 @@
 # The deployer (a node's wallet, funded by fund.py) funds a second wallet, the user, derived from
 # LABEL, and both of them then:
 #   Counter    deploy, increment, add, setNote by the owner and by the user (refused), getters, a call
-#              with an argument the method refuses, a CS transfer to it (payable() throws: refunded)
+#              with an argument the method refuses, a CS transfer to it (payable() throws: refused
+#              and refunded)
 #   TestToken  deploy, getters, transfer, approve, allowance, transferFrom, a transfer above the
 #              balance (refused), and with TOKEN_API=1 the token API
 #   TipJar     two payments (CS transfers to the contract), paidBy/received/payments, a withdraw by
@@ -122,8 +123,13 @@ if COUNTER=$(deploy Counter.java) && [ -n "$COUNTER" ]; then
     get "Counter.getNote" "hello from $LABEL" "$COUNTER" getNote
     get "Counter.getOwner" "$DEPLOYER" "$COUNTER" getOwner
     before=$(balance "$USER")
-    c transfer "$USER_KEY" "$COUNTER" 2 >/dev/null || bad "transfer 2 CS to Counter"
-    sleep 20
+    # the node answers a payment once payable() ran: it throws here, so the transfer is refused
+    if out=$(c transfer "$USER_KEY" "$COUNTER" 2 2>&1); then
+        bad "2 CS to Counter refused" "accepted: $out"
+    else
+        ok "2 CS to Counter refused ($(echo "$out" | tail -1))"
+    fi
+    sleep 10
     after=$(balance "$USER")
     counter_balance=$(balance "$COUNTER")
     # payable() throws: the CS go back to the sender, who pays the fee only

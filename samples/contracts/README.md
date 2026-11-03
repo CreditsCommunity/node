@@ -36,11 +36,13 @@ Use the v3 API, `com.credits.scapi.v3.SmartContract`, as the examples do:
   refuses a call no method matches. The sample clients read the declared types from the node and
   convert the text you type.
 - **`payable(BigDecimal amount, byte[] userData)`.** v3 makes every contract declare it. A plain
-  CS transfer to a contract calls it, with `initiator` set to the payer. Returning normally
-  accepts the payment; throwing refuses it, and the node gives the CS back to the payer, who still
-  pays the fee.
+  CS transfer to a contract calls it, with `initiator` set to the payer, and the node answers the
+  transfer once `payable()` ran. Returning normally accepts the payment; throwing refuses it: the
+  transfer is answered with an error ("call to contract failed"), the node gives the CS back to
+  the payer, who still pays the fee.
 - **API methods** of `SmartContract`: `sendTransaction(contractAddress, to, amount)` pays CS from
-  the contract's balance (the transfer lands only if the call succeeds);
+  the contract's balance (the transfer lands only if the call succeeds, and its fee is charged to
+  the caller, not to the contract);
   `getBalance(address)` reads a balance at the moment the method runs;
   `invokeExternalContract(...)` calls another contract (see the note below); `getSeed()` gives the
   block's random seed.
@@ -92,7 +94,10 @@ clients set a maximum fee of 10 CS for contract transactions (1 CS for transfers
 charges the actual one, which the clients print (`fee ... CS`), and which grows with the size of
 the transaction (a deploy carries the source and the byte code) and the execution. A call that
 throws still pays its fee. A transfer the contract emits with `sendTransaction()` has its own
-fee. Getters are free.
+fee, charged to the caller of the method. Getters are free.
+
+On the private network of the CI, a CS transfer cost about 0.0087 CS, a contract call about
+0.0175 CS (the call and the new state it produces), a deploy a little more.
 
 ## A contract that reads its own balance
 

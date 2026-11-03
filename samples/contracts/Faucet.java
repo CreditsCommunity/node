@@ -24,7 +24,7 @@ import java.util.HashSet;
 public class Faucet extends SmartContract {
 
     private static final BigDecimal GIFT = new BigDecimal("5");
-    // the gift plus a margin for the fee of the transfer the contract emits
+    // the gift plus a reserve (the fee of the payout is charged to the caller, not to the contract)
     private static final BigDecimal MIN_BALANCE = new BigDecimal("10");
 
     private final HashSet<String> served = new HashSet<>();

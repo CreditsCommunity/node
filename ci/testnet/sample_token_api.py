@@ -35,7 +35,7 @@ def check(c, token, expected):
         problems.append(f"total supply {t.totalSupply}")
     if t.holdersCount < 2:
         problems.append(f"holders {t.holdersCount}")
-    listed = c.TokensListGet(0, 100, 0, True, api.TokenFilters(name="", code="CTT", tokenStandard=-1))
+    listed = c.TokensListGet(0, 100, 0, False, api.TokenFilters(name="", code="", tokenStandard=0))
     if token not in [x.address for x in (listed.tokens or [])]:
         problems.append(f"TokensListGet does not list it ({listed.status.message!r})")
     for holder, want in expected:
