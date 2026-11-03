@@ -20,6 +20,10 @@ with an AccessControlException (its configuration is created lazily inside the c
 
 ContractAllMethodsGet must report the @Getter annotations of samples/contracts/Counter.java.
 
+It deploys samples/contracts/TipJar.java and pays it with plain CS transfers: SmartContractsListGet
+must still list, for the payers, exactly the contracts they deployed, and TransactionsGet must show
+the payments as contract replenishes.
+
 Then, once --final-file exists (run.sh creates it when every node reached its target sequence),
 it compares the contract states on nodes 1 to --check-nodes (default <nodes>; run.sh adds a node
 that joined later).
@@ -240,6 +244,71 @@ def report_compile_errors(client_for, nodes):
             print(f"SmartContractCompile with errors on n{i} (reported): status {got.status.code}, {' | '.join(lines)!r}", flush=True)
         except Exception as e:
             print(f"SmartContractCompile with errors on n{i} (reported): {type(e).__name__}: {e}", flush=True)
+
+
+TT_CONTRACT_REPLENISH = 4  # api.TransactionType: a CS transfer that ran a contract's payable()
+
+
+def tipjar_payments(client_for, master, deployed):
+    """Deploy samples/contracts/TipJar.java and pay it with plain CS transfers, from a new account
+    and from the master. The API used to record a payment as a deploy by the payer (it has no
+    invocation, so its method looks empty), and SmartContractsListGet then failed on every page
+    holding it ("No more data to read"). On node 1: the payer lists no contract, the master lists
+    exactly the contracts it deployed, page by page, and both see their payment as a contract
+    replenish. Returns (TipJar's address, number of failures)."""
+    with open(os.path.join(SAMPLES, "TipJar.java")) as f:
+        tipjar = deploy(client_for(1), master, "TipJar", f.read())
+    deployed = deployed + [tipjar]
+    funder = Client(9090, 300)
+    payer = Account(hashlib.sha256(master.pk + b"tipjar payer").digest())
+    master.next_inner_id = None
+    ok, message = send(funder, master, payer.pk, 50)
+    print(f"TipJar: fund the payer: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline and balance(funder, payer.pk) < 50:
+        time.sleep(5)
+    failures = 0
+    for name, account, amount in (("payer", payer, 3), ("master", master, 2)):
+        account.next_inner_id = None
+        ok, message = send(funder, account, tipjar, amount)
+        print(f"TipJar: {name} pays {amount} CS: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+        failures += 0 if ok else 1
+    deadline = time.time() + 300
+    payments = None
+    while time.time() < deadline:
+        payments = read_value(client_for(1), master, tipjar, "getPayments")[0]
+        if payments == 2:
+            break
+        time.sleep(5)
+    print(f"TipJar: payments recorded {payments}: {'ok' if payments == 2 else 'FAILED'} (expected 2)", flush=True)
+    failures += 0 if payments == 2 else 1
+
+    client = client_for(1)
+    for name, account, expected in (("payer", payer, []), ("master", master, deployed)):
+        try:
+            listed = client.SmartContractsListGet(account.pk, 0, 100)
+            addresses = [sc.address for sc in listed.smartContractsList]
+            # pages of 2: a page holding a payment used to fail whole
+            paged = []
+            for offset in range(0, len(expected) + 2, 2):
+                paged += [sc.address for sc in client.SmartContractsListGet(account.pk, offset, 2).smartContractsList]
+            ok = sorted(addresses) == sorted(expected) and sorted(paged) == sorted(expected) and listed.count == len(expected)
+            detail = f"count {listed.count}, {len(addresses)} listed, {len(paged)} in pages of 2, {len(expected)} deployed"
+        except Exception as e:  # the failure this checks: the node answers with an internal error
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        print(f"SmartContractsListGet of the {name} after a TipJar payment: {'ok' if ok else 'FAILED'} ({detail})", flush=True)
+        failures += 0 if ok else 1
+        try:
+            trxs = client.TransactionsGet(account.pk, 0, 20).transactions or []
+            types = [t.trxn.type for t in trxs if t.trxn.target == tipjar and t.trxn.source == account.pk]
+            ok = TT_CONTRACT_REPLENISH in types
+            detail = f"types {types}"
+        except Exception as e:
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        print(f"TransactionsGet of the {name}: the TipJar payment is a contract replenish: {'ok' if ok else 'FAILED'} ({detail})",
+              flush=True)
+        failures += 0 if ok else 1
+    return tipjar, failures
 
 
 def write_sources(directory):
@@ -589,6 +658,8 @@ def main():
     failures = 0
     failures += check_getter_annotations(client_for(1))
     report_compile_errors(client_for, args.nodes)
+    tipjar, tipjar_failures = tipjar_payments(client_for, master, [counter, ledger, caller, declared] + ([dice] if dice else []))
+    failures += tipjar_failures
     calls = 0
     for n in range(args.calls_before):
         calls += 1
@@ -688,7 +759,7 @@ def main():
             time.sleep(5)
         print(f"final file {'found' if os.path.exists(args.final_file) else 'MISSING'}", flush=True)
     time.sleep(60)  # let the last state reach every node
-    for name, contract in (("Counter", counter), ("Ledger", ledger)) + callers + ((("Dice", dice),) if dice else ()):
+    for name, contract in (("Counter", counter), ("Ledger", ledger), ("TipJar", tipjar)) + callers + ((("Dice", dice),) if dice else ()):
         states = {}
         for i in range(1, (args.check_nodes or args.nodes) + 1):
             try:

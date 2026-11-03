@@ -2233,7 +2233,12 @@ bool APIHandler::updateSmartCachesTransaction(csdb::Transaction trxn, cs::Sequen
         }
 
         const auto smart = fetch_smart(trxn);
-        if (is_smart_deploy(smart)) {
+        // a CS payment to a payable contract carries no invocation: fetch_smart gives an empty one,
+        // whose empty method looks like a deploy. Only a transaction carrying an invocation is a
+        // deploy here (as in SmartContracts::is_deploy), or the payer would list the payment among
+        // its contracts and SmartContractsListGet would fail on it ("No more data to read").
+        // API caches only: the node's own deploy checks never use is_smart_deploy.
+        if (is_smart(trxn) && is_smart_deploy(smart)) {
             if (!smart.smartContractDeploy.byteCodeObjects.empty()) {
                 auto lockedSmartOrigin = lockedReference(this->smart_origin);
                 (*lockedSmartOrigin)[target_pk] = trxn.id();
@@ -2332,6 +2337,10 @@ size_t APIHandler::getMappedDeployerSmart(const csdb::Address& deployer, Mapper 
         }
 
         if (cs::SmartContracts::get_contract_state(blockchain_, tr.target()).empty()) {
+            continue;
+        }
+        // fetch_smart_body throws on a transaction without an invocation: one page would fail whole
+        if (!is_deploy_transaction(tr)) {
             continue;
         }
 
