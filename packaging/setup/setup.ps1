@@ -559,8 +559,19 @@ if ($wallet -ne 'none') {
     $toml.Add("network = `"$walletNetwork`"")
     $toml.Add("diag = `"$diag`"")
     foreach ($l in $kept) { $toml.Add($l) }
-    # UTF-8 without a byte-order mark (TOML)
-    [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot 'wallet.toml'), $toml, (New-Object System.Text.UTF8Encoding($false)))
+    # never written through a link (a symlink or junction planted there) or over anything but a
+    # regular file: a new file, then moved over; UTF-8 without a byte-order mark (TOML)
+    $tomlPath = Join-Path $PSScriptRoot 'wallet.toml'
+    if (Test-Path -LiteralPath $tomlPath) {
+        $item = Get-Item -LiteralPath $tomlPath -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            Write-Host 'wallet.toml is a link or not a regular file: refused, nothing written. Remove it and run the set-up again.'
+            exit 1
+        }
+    }
+    $tomlTmp = Join-Path $PSScriptRoot ("wallet.toml." + [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllLines($tomlTmp, $toml, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tomlTmp -Destination $tomlPath -Force
     Write-Host ''
     Write-Host "wallet.toml written: node 127.0.0.1:$apiPort, $walletNetwork, diag port $diag"
     if ($apiPort -eq '0') { Write-Host "The node's API is off ([api] port=0): the wallet needs it. Set port=9090 in config.ini." }

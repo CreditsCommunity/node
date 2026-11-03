@@ -303,6 +303,25 @@ jobs:
           grep -a "keep it, the node needs it" setup-pty2.txt
           test -f "$CREDITS_WALLET_HOME/accounts/node.json" && test -f csnode-pty/NodePrivate.txt && echo "node key imported, NodePrivate.txt kept"
 
+      # a wallet.toml planted as a symlink is never written through; as root (sudo) in a folder the
+      # runner's user owns, the set-up runs again as that user, so root writes nothing there
+      - name: No write through a symlink; sudo runs as the folder's owner (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          cp -a csnode-clean csnode-link && rm -f csnode-link/wallet.toml
+          echo "untouched" > "$RUNNER_TEMP/target" && ln -s "$RUNNER_TEMP/target" csnode-link/wallet.toml
+          # storage, database, first start (sync), share, executor, wallet (no), token cache, start, write
+          if bash setup-run.sh csnode-link 'pruned\nlmdb\nsync\nno\n\nno\n\nno\n\n' > setup-link.txt 2>&1; then
+            cat setup-link.txt; echo "the set-up wrote over a symlinked wallet.toml"; exit 1
+          fi
+          grep -a "wallet.toml is a symlink or not a regular file: refused" setup-link.txt
+          test "$(cat "$RUNNER_TEMP/target")" = untouched && test -L csnode-link/wallet.toml
+          rm csnode-link/wallet.toml
+          printf 'pruned\nlmdb\nsync\nno\n\nno\n\nno\n\n' | sudo ./csnode-link/setup.sh > setup-sudo.txt 2>&1
+          grep -a "This folder belongs to $(id -un): the set-up continues as $(id -un)." setup-sudo.txt
+          test "$(stat -c %u csnode-link/wallet.toml)" = "$(id -u)" && test "$(stat -c %u csnode-link/config.ini)" = "$(id -u)"
+          test -z "$(find csnode-link -maxdepth 1 -user root)" && echo "nothing in the folder belongs to root"
+
       - name: Collect
         if: always()
         run: |

@@ -15,6 +15,25 @@ set -eu
 
 cd "$(dirname "$0")"
 
+# Never work as root in a folder another user controls: every file the set-up writes here
+# (config.ini and its backup and temporary files, wallet.toml) could be a symlink planted by that
+# user, and root would write through it. As root in a folder owned by another user, the set-up runs
+# again as that user (sudo); in a root-owned folder that others can write to, it stops.
+if [ "$(id -u)" = 0 ]; then
+    owner_uid=$(ls -nd . | awk '{ print $3 }')
+    owner_name=$(ls -ld . | awk '{ print $3 }')
+    if [ "$owner_uid" != 0 ]; then
+        command -v sudo >/dev/null 2>&1 \
+            || { echo "This folder belongs to $owner_name: run the set-up as $owner_name, not as root."; exit 1; }
+        echo "This folder belongs to $owner_name: the set-up continues as $owner_name."
+        exec sudo -u "#$owner_uid" -H env CREDITS_SETUP_INVOKER="${SUDO_USER:-root}" \
+            ${CREDITS_WALLET_HOME:+CREDITS_WALLET_HOME="$CREDITS_WALLET_HOME"} "$(pwd)/$(basename "$0")" "$@"
+    fi
+    case "$(ls -ld . | cut -c6,9)" in
+        *w*) echo "This folder is owned by root but others can write to it: fix its permissions (chmod go-w) first."; exit 1 ;;
+    esac
+fi
+
 defaults=no
 case "${1:-}" in
     --defaults|-y) defaults=yes ;;
@@ -328,8 +347,11 @@ if [ -n "$(current api executor_command)" ]; then
 fi
 
 # 6. the wallet (the package's credits-wallet): an account now, with a profile for this node.
-# Run as root (sudo ./setup.sh), the wallet's steps run as the user who called sudo, in that
-# user's home: a key store under /root would be the wrong place. Root without sudo: no account.
+# Run as root (sudo ./setup.sh) in a root-owned folder, the wallet's steps run as the user who
+# called sudo, in that user's home: a key store under /root would be the wrong place. Root without
+# sudo: no account. Started by sudo in another user's folder, the set-up runs as the folder's
+# owner (above): an account would then belong to the owner, so it is made only when the owner is
+# the user who called sudo.
 wallet_bin=./credits-wallet
 wallet=none
 wallet_name=
@@ -354,10 +376,16 @@ if [ -x "$wallet_bin" ]; then
     echo "6. Wallet"
     echo "   credits-wallet, in this folder, is a terminal wallet: it keeps your keys on this machine,"
     echo "   encrypted, and sends through this node. The user guide is wallet-guide.md."
+    me=$(id -un)
     if [ "$(id -u)" = 0 ] && [ -z "$run_as" ]; then
         echo "   The set-up runs as root, not through sudo: a wallet account is not created here (its keys"
         echo "   would belong to root). Later, as the user who runs the node:"
-        echo "     cd \"$(pwd)\" && ./credits-wallet --config wallet.toml account new main"
+        echo "     cd $(printf '%q' "$(pwd)") && ./credits-wallet --config wallet.toml account new main"
+        wallet=no
+    elif [ -n "${CREDITS_SETUP_INVOKER:-}" ] && [ "$CREDITS_SETUP_INVOKER" != "$me" ]; then
+        echo "   The set-up runs as $me, who owns this folder, for $CREDITS_SETUP_INVOKER: an account made"
+        echo "   here would belong to $me. Later, as the user the wallet is for:"
+        echo "     cd $(printf '%q' "$(pwd)") && ./credits-wallet --config wallet.toml account new main"
         wallet=no
     else
         [ -z "$run_as" ] || echo "   The account will belong to $run_as (who ran sudo), in $wallet_home."
@@ -606,6 +634,13 @@ if [ "$wallet" != none ]; then
         [ -z "$n" ] || wallet_network=$n
         kept=$(grep -E '^(history_node|network_uuid|require_network_uuid) *=' wallet.toml || true)
     fi
+    # never written through a symlink or over anything but a regular file: a new file, then renamed
+    if [ -L wallet.toml ] || { [ -e wallet.toml ] && [ ! -f wallet.toml ]; }; then
+        echo
+        echo "wallet.toml is a symlink or not a regular file: refused, nothing written. Remove it and run the set-up again."
+        exit 1
+    fi
+    wallet_tmp=$(mktemp wallet.toml.XXXXXX)
     {
         echo "# written by setup.sh on $(date '+%Y-%m-%d %H:%M'): the wallet profile of the node in this folder"
         echo "# (./credits-wallet --config wallet.toml; see wallet-guide.md, section 4)"
@@ -616,9 +651,9 @@ if [ "$wallet" != none ]; then
         echo "network = \"$wallet_network\""
         echo "diag = \"$diag\""
         [ -z "$kept" ] || echo "$kept"
-    } > wallet.toml
-    # as root, the file belongs to whoever owns this folder (the node's user)
-    [ "$(id -u)" != 0 ] || chown "$(ls -nd . | awk '{ print $3 ":" $4 }')" wallet.toml
+    } > "$wallet_tmp"
+    chmod 644 "$wallet_tmp"
+    mv -f "$wallet_tmp" wallet.toml
     echo
     echo "wallet.toml written: node 127.0.0.1:$api_port, $wallet_network, diag port $diag"
     if [ "$api_port" = 0 ]; then
