@@ -14,7 +14,7 @@ format and the transfer format.
   repository root (another directory with `-p:CreditsIdl=DIR`).
 
 Dependencies (pinned in `CreditsClient.csproj`): `ApacheThrift` and `BouncyCastle.Cryptography`
-(.NET has no ed25519). Base58 is a small class of the sample.
+(.NET has no ed25519; it also has the Blake2s digest for contract addresses). Base58 is a small class of the sample.
 
 The IDL declares no `netstd` namespace, and generating `api.thrift` and `general.thrift` into one
 namespace does not compile (both define the same `DeepCopy` extensions): the build copies the two
@@ -37,6 +37,12 @@ dotnet bin/Release/net8.0/credits-client.dll tx u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyY
 dotnet bin/Release/net8.0/credits-client.dll sign ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5 7
 # SPENDS REAL CS ON MAINNET: try it on a test network or the fake node first
 dotnet bin/Release/net8.0/credits-client.dll --node 127.0.0.1:19090 transfer ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5
+# smart contracts: deploy and call SPEND REAL CS ON MAINNET (try them on a test network first);
+# get runs a method as a getter, which is free and changes nothing
+dotnet bin/Release/net8.0/credits-client.dll --node 127.0.0.1:19090 deploy ../testdata/test-key.txt ../../contracts/Counter.java
+dotnet bin/Release/net8.0/credits-client.dll --node 127.0.0.1:19090 methods <contract>
+dotnet bin/Release/net8.0/credits-client.dll --node 127.0.0.1:19090 call ../testdata/test-key.txt <contract> add 5
+dotnet bin/Release/net8.0/credits-client.dll --node 127.0.0.1:19090 get <contract> paidBy u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w
 ```
 
 `--node` defaults to `127.0.0.1:9090`. `dotnet run -c Release -- status` works too.

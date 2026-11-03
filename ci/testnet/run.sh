@@ -41,6 +41,11 @@
 #        n1, and checks the balances on every node, the states, and the token API of n1 (an API
 #        mismatch is reported; TOKENS_STRICT_API=1 fails the run on it); TOKENS_VIA=N sends them
 #        through node N instead (e.g. the node of the restart test, once it restarted)
+#        SAMPLE_CONTRACTS=1 (with CONTRACTS): once fund.py's load is over, sample_contracts.sh deploys and
+#        uses the examples of samples/contracts (Counter, TestToken, TipJar, Faucet) from the wallet of
+#        node NODES - 1 through n1, with the Python sample client and, when SAMPLE_JAVA_CLIENT is set
+#        (the command that runs the Java sample, e.g. "java -jar .../credits-client.jar"), with the Java
+#        one; the nodes keep the token cache, and the token API must report the test token
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
 #        times before the restart test; a node that syncs through the plays re-executes them
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
@@ -276,6 +281,8 @@ CONTRACT_DICE=${CONTRACT_DICE:-0}
 TOKENS=${TOKENS:-0}
 TOKENS_STRICT_API=${TOKENS_STRICT_API:-0}
 TOKENS_VIA=${TOKENS_VIA:-1}
+SAMPLE_CONTRACTS=${SAMPLE_CONTRACTS:-0}
+SAMPLE_JAVA_CLIENT=${SAMPLE_JAVA_CLIENT:-}
 SYNC_CONTRACT_EXECUTION=${SYNC_CONTRACT_EXECUTION:-1}
 [ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
     || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
@@ -537,6 +544,7 @@ if [ "$CONTRACTS" = "1" ]; then
     # compile error reaches the API only as a dropped connection, so compile them here first
     mkdir -p "$WORK/contract-sources"
     (cd "$HERE" && python3 -c "import contracts, sys; contracts.write_sources(sys.argv[1])" "$WORK/contract-sources")
+    [ "$SAMPLE_CONTRACTS" != 1 ] || cp "$REPO"/samples/contracts/*.java "$WORK/contract-sources/"
     for jar in "$EXECUTOR_JAR" ${EXECUTOR_JAR_ALT:+"$EXECUTOR_JAR_ALT"}; do
         if ! "$EXECUTOR_JDK/bin/javac" -parameters -cp "$jar" -d "$WORK/contract-sources" "$WORK"/contract-sources/*.java; then
             echo "FAIL: the test contracts do not compile against the class path of $jar"
@@ -578,7 +586,7 @@ api_settings() {
     echo "executor_command=$WORK/n$i/executor.sh"
     echo "executor_multi_instance=true"
     # the token cache behind the Token* API methods (read by builds that have the key)
-    [ "$TOKENS" != "1" ] || echo "tokens_cache=true"
+    { [ "$TOKENS" != "1" ] && [ "$SAMPLE_CONTRACTS" != "1" ]; } || echo "tokens_cache=true"
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
@@ -912,6 +920,7 @@ crashed_all=0
 FUND_PID=
 CONTRACTS_PID=
 TOKENS_PID=
+SAMPLES_PID=
 disk_filled_at=0
 disk_freed=0
 net_fault_at=0
@@ -1597,6 +1606,20 @@ PY
             $([ "$TOKENS_STRICT_API" = 1 ] && echo --strict-api)) > "$WORK/tokens.log" 2>&1 &
         TOKENS_PID=$!
     fi
+    if [ "$SAMPLE_CONTRACTS" = "1" ] && [ "$CONTRACTS" = "1" ] && [ -z "$SAMPLES_PID" ] && grep -q "load transfers sent" "$WORK/fund.log" 2>/dev/null; then
+        echo "sample contracts: deploying samples/contracts with the sample clients through node 1"
+        (
+            status=0
+            TOKEN_API=1 LABEL=python "$HERE/sample_contracts.sh" "$WORK" "$WORK/n$((NODES - 1))/NodePrivate.txt" \
+                python3 "$REPO/samples/clients/python/credits_client.py" || status=1
+            if [ -n "$SAMPLE_JAVA_CLIENT" ]; then
+                # shellcheck disable=SC2086 # a command line: java and its arguments
+                LABEL=java "$HERE/sample_contracts.sh" "$WORK" "$WORK/n$((NODES - 1))/NodePrivate.txt" $SAMPLE_JAVA_CLIENT || status=1
+            fi
+            exit $status
+        ) > "$WORK/sample-contracts.log" 2>&1 &
+        SAMPLES_PID=$!
+    fi
     # contracts.py ended before its first calls were done: nothing would release the restart test
     if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
         cat "$WORK/contracts.log"
@@ -1610,7 +1633,8 @@ PY
 
     # with contracts, not before the calls after the restart were let go
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
-        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; }; then break; fi
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
+        && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
@@ -1667,6 +1691,24 @@ if [ -n "$TOKENS_PID" ]; then
     [ "$tokens_status" -eq 0 ] || { echo "FAIL: token checks failed"; exit 1; }
 elif [ "$TOKENS" = "1" ]; then
     echo "FAIL: tokens.py never started (TOKENS=1 needs CONTRACTS=1 and FUND=1)"
+    exit 1
+fi
+
+if [ -n "$SAMPLES_PID" ]; then
+    samples_deadline=$(( $(date +%s) + 1200 ))
+    while kill -0 "$SAMPLES_PID" 2>/dev/null && [ "$(date +%s)" -lt "$samples_deadline" ]; do sleep 5; done
+    if kill -0 "$SAMPLES_PID" 2>/dev/null; then
+        kill "$SAMPLES_PID" 2>/dev/null || true
+        cat "$WORK/sample-contracts.log"
+        echo "FAIL: the sample contracts did not finish within 20 min of the target"
+        exit 1
+    fi
+    samples_status=0
+    wait "$SAMPLES_PID" || samples_status=$?
+    cat "$WORK/sample-contracts.log"
+    [ "$samples_status" -eq 0 ] || { echo "FAIL: sample contract checks failed"; exit 1; }
+elif [ "$SAMPLE_CONTRACTS" = "1" ]; then
+    echo "FAIL: sample_contracts.sh never started (SAMPLE_CONTRACTS=1 needs CONTRACTS=1 and FUND=1)"
     exit 1
 fi
 

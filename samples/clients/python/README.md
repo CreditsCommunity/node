@@ -26,7 +26,13 @@ python3 credits_client.py tx u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 5
 python3 credits_client.py sign ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5 7
 # SPENDS REAL CS ON MAINNET: try it on a test network or the fake node first
 python3 credits_client.py --node 127.0.0.1:19090 transfer ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5
+# smart contracts: deploy and call SPEND REAL CS ON MAINNET too; get and methods are free
+python3 credits_client.py --node 127.0.0.1:19090 deploy ../testdata/test-key.txt ../../contracts/Counter.java
+python3 credits_client.py --node 127.0.0.1:19090 call ../testdata/test-key.txt <contract> add 5
+python3 credits_client.py --node 127.0.0.1:19090 get <contract> isOpen
+python3 credits_client.py --node 127.0.0.1:19090 methods <contract>
 ```
 
-`--node` defaults to `127.0.0.1:9090`. For smart contracts (calling methods with their declared
-argument types) see [../../python/token_client.py](../../python/token_client.py).
+`--node` defaults to `127.0.0.1:9090`. Contract arguments are given as text and converted to the
+type the method declares; see [../README.md](../README.md#smart-contracts) and the examples in
+[../../contracts](../../contracts/).

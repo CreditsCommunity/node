@@ -7,10 +7,19 @@
 //! credits-client [--node HOST:PORT] tx <address> [n]
 //! credits-client [--node HOST:PORT] transfer <key-file> <to-address> <amount>
 //! credits-client sign <key-file> <to-address> <amount> <inner-id>
+//! credits-client [--node HOST:PORT] deploy <key-file> <Contract.java>
+//! credits-client [--node HOST:PORT] call <key-file> <contract> <method> [args...]
+//! credits-client [--node HOST:PORT] get <contract> <method> [args...]
+//! credits-client [--node HOST:PORT] methods <contract>
 //! ```
 //!
-//! transfer SIGNS AND SENDS A REAL TRANSACTION: on mainnet it spends real CS. Try it on a private
-//! or test network first. sign builds the same transaction offline and prints it.
+//! transfer, deploy and call SIGN AND SEND REAL TRANSACTIONS: on mainnet they spend real CS. Try
+//! them on a private or test network first. sign builds a transfer offline and prints it; get runs
+//! a contract method as a getter, which costs nothing and changes nothing.
+//!
+//! Contract arguments are given as text and converted to the type the method declares (the node
+//! refuses a call whose Variants do not match): String, BigDecimal, int, long, boolean, double and
+//! their wrappers, byte[] as hex. With overloads, the method with as many arguments as given is used.
 
 #[allow(dead_code, unused_imports, unused_extern_crates, clippy::all)]
 mod general {
@@ -23,11 +32,13 @@ mod api {
 
 use std::error::Error;
 use std::process::exit;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{APISyncClient, TAPISyncClient};
+use blake2::{Blake2s256, Digest};
 use ed25519_dalek::{Signer, SigningKey};
-use thrift::protocol::{TBinaryInputProtocol, TBinaryOutputProtocol};
+use thrift::protocol::{TBinaryInputProtocol, TBinaryOutputProtocol, TSerializable};
+use thrift::OrderedFloat;
 use thrift::transport::{
     ReadHalf, TBufferedReadTransport, TBufferedWriteTransport, TIoChannel, TTcpChannel, WriteHalf,
 };
@@ -39,6 +50,8 @@ type Client = APISyncClient<
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const CURRENCY_CS: i8 = 1;
+/// Contracts cost more: a deploy, or a call that runs long.
+const CONTRACT_FEE: f64 = 10.0;
 const FRACTION: i128 = 1_000_000_000_000_000_000; // general.Amount: integral + fraction / 10^18
 
 /// csdb::AmountCommission(double) as its 16-bit pattern (5-bit exponent, 10-bit mantissa).
@@ -118,7 +131,7 @@ fn check(status: &Option<general::APIResponse>, call: &str) -> Result<()> {
 
 fn connect(node: &str) -> Result<Client> {
     let stream = std::net::TcpStream::connect(node)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
     let (read, write) = TTcpChannel::with_stream(stream).split()?;
     Ok(APISyncClient::new(
         TBinaryInputProtocol::new(TBufferedReadTransport::new(read), true),
@@ -244,6 +257,287 @@ fn transfer(c: &mut Client, key_file: &str, to: &str, amount: &str) -> Result<()
     Ok(())
 }
 
+// ---- smart contracts ----------------------------------------------------------------------
+
+fn inner_id6(inner_id: i64) -> [u8; 6] {
+    inner_id.to_le_bytes()[..6].try_into().unwrap()
+}
+
+fn next_inner_id(c: &mut Client, pk: &[u8]) -> Result<i64> {
+    // the sender's last inner id + 1 (replay protection); a wallet the node has never seen: 1
+    let last = c.wallet_transactions_count_get(pk.to_vec())?;
+    let found = last.status.as_ref().and_then(|s| s.code).unwrap_or(0) == 0;
+    Ok(if found { last.last_transaction_inner_id.unwrap_or(0) } else { 0 } + 1)
+}
+
+fn invocation(
+    method: &str,
+    params: Vec<general::Variant>,
+    deploy: Option<api::SmartContractDeploy>,
+    getter: bool,
+) -> api::SmartContractInvocation {
+    // every field the IDL does not mark optional is set: these are the bytes the node
+    // serializes again to check the signature
+    api::SmartContractInvocation {
+        method: Some(method.to_string()),
+        params: Some(params),
+        used_contracts: Some(Vec::new()),
+        forget_new_state: Some(getter),
+        smart_contract_deploy: deploy,
+        version: Some(1),
+    }
+}
+
+/// A signed contract transaction (deploy or call). The invocation travels as the transaction's one
+/// user field: its Thrift binary serialization, which the signature covers.
+fn contract_transaction(
+    key: &SigningKey,
+    target: Vec<u8>,
+    sci: api::SmartContractInvocation,
+    kind: api::TransactionType,
+    inner_id: i64,
+) -> Result<api::Transaction> {
+    let max_fee = encode_max_fee(CONTRACT_FEE);
+    let source = key.verifying_key().to_bytes().to_vec();
+    let mut code: Vec<u8> = Vec::new();
+    sci.write_to_out_protocol(&mut TBinaryOutputProtocol::new(&mut code, true))?;
+    let mut signed = Vec::with_capacity(90 + code.len());
+    signed.extend_from_slice(&inner_id6(inner_id));
+    signed.extend_from_slice(&source);
+    signed.extend_from_slice(&target);
+    signed.extend_from_slice(&0i32.to_le_bytes()); // amount: none
+    signed.extend_from_slice(&0u64.to_le_bytes());
+    signed.extend_from_slice(&(max_fee as u16).to_le_bytes());
+    signed.push(CURRENCY_CS as u8);
+    signed.push(1); // one user field: u32 size + bytes
+    signed.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    signed.extend_from_slice(&code);
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+    Ok(api::Transaction {
+        id: Some(inner_id),
+        source: Some(source),
+        target: Some(target),
+        amount: Some(general::Amount::new(0, 0)),
+        balance: Some(general::Amount::new(0, 0)),
+        currency: Some(CURRENCY_CS),
+        signature: Some(key.sign(&signed).to_bytes().to_vec()),
+        smart_contract: Some(sci),
+        fee: Some(api::AmountCommission::new(max_fee)),
+        time_creation: Some(now),
+        type_: Some(kind),
+        ..Default::default()
+    })
+}
+
+fn flag(text: &str) -> Result<bool> {
+    match text.to_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("not a boolean".into()),
+    }
+}
+
+/// A decimal number as BigDecimal text: digits, a point, an exponent.
+fn decimal(text: &str) -> Result<String> {
+    let plain = text.chars().all(|c| c.is_ascii_digit() || "+-.eE".contains(c));
+    if plain && text.parse::<f64>().is_ok() { Ok(text.to_string()) } else { Err("not a decimal".into()) }
+}
+
+/// The Variant the executor matches with a declared Java type.
+fn variant(declared: &str, text: &str) -> Result<general::Variant> {
+    use general::Variant as V;
+    let converted: Result<V> = match declared {
+        "java.lang.String" => Ok(V::VString(text.to_string())),
+        "java.math.BigDecimal" => decimal(text).map(V::VBigDecimal),
+        "int" => text.parse().map(V::VInt).map_err(Into::into),
+        "java.lang.Integer" => text.parse().map(V::VIntBox).map_err(Into::into),
+        "long" => text.parse().map(V::VLong).map_err(Into::into),
+        "java.lang.Long" => text.parse().map(V::VLongBox).map_err(Into::into),
+        "boolean" => flag(text).map(V::VBoolean),
+        "java.lang.Boolean" => flag(text).map(V::VBooleanBox),
+        "double" => text.parse().map(|d| V::VDouble(OrderedFloat(d))).map_err(Into::into),
+        "java.lang.Double" => text.parse().map(|d| V::VDoubleBox(OrderedFloat(d))).map_err(Into::into),
+        "byte[]" => hex::decode(text).map(V::VByteArray).map_err(Into::into),
+        _ => return Err(format!("arguments of type {declared} are not supported by this client").into()),
+    };
+    converted.map_err(|_| format!("'{text}' is not a {declared}").into())
+}
+
+/// A returned Variant as text, the same way in every sample.
+fn show(v: &Option<general::Variant>) -> String {
+    use general::Variant as V;
+    match v {
+        None => "(nothing)".into(),
+        Some(V::VBoolean(b)) | Some(V::VBooleanBox(b)) => b.to_string(),
+        Some(V::VString(s)) | Some(V::VBigDecimal(s)) => s.clone(),
+        Some(V::VByte(n)) | Some(V::VByteBox(n)) => n.to_string(),
+        Some(V::VShort(n)) | Some(V::VShortBox(n)) => n.to_string(),
+        Some(V::VInt(n)) | Some(V::VIntBox(n)) => n.to_string(),
+        Some(V::VLong(n)) | Some(V::VLongBox(n)) => n.to_string(),
+        Some(V::VFloat(d)) | Some(V::VFloatBox(d)) | Some(V::VDouble(d)) | Some(V::VDoubleBox(d)) => format!("{:?}", d.0),
+        Some(V::VByteArray(b)) => hex::encode(b),
+        Some(V::VVoid(_)) => "void".into(),
+        Some(V::VNull(_)) => "null".into(),
+        Some(other) => format!("{other:?}"),
+    }
+}
+
+/// The public methods of a deployed contract, as the node's executor lists them from its byte code.
+fn contract_methods(c: &mut Client, contract: &[u8]) -> Result<Vec<general::MethodDescription>> {
+    let deployed = c.smart_contract_get(contract.to_vec())?;
+    check(&deployed.status, "SmartContractGet")?;
+    let classes = deployed
+        .smart_contract
+        .and_then(|s| s.smart_contract_deploy)
+        .and_then(|d| d.byte_code_objects)
+        .unwrap_or_default();
+    let r = c.contract_all_methods_get(classes)?;
+    if r.code.unwrap_or(0) != 0 {
+        return Err(format!("ContractAllMethodsGet: {}", r.message.unwrap_or_default()).into());
+    }
+    Ok(r.methods.unwrap_or_default())
+}
+
+fn arg_types(m: &general::MethodDescription) -> Vec<String> {
+    m.arguments.iter().flatten().map(|a| a.type_.clone().unwrap_or_default()).collect()
+}
+
+fn typed_params(c: &mut Client, contract: &[u8], method: &str, texts: &[&str]) -> Result<Vec<general::Variant>> {
+    let candidates: Vec<_> =
+        contract_methods(c, contract)?.into_iter().filter(|m| m.name.as_deref() == Some(method)).collect();
+    let Some(found) = candidates.iter().find(|m| arg_types(m).len() == texts.len()) else {
+        let there = if candidates.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = candidates.iter().map(|m| format!("{method}({})", arg_types(m).join(", "))).collect();
+            format!("; there is {}", list.join(", "))
+        };
+        return Err(format!("no method {method} with {} arguments{there}", texts.len()).into());
+    };
+    arg_types(found).iter().zip(texts).map(|(declared, text)| variant(declared, text)).collect()
+}
+
+fn methods(c: &mut Client, contract: &str) -> Result<()> {
+    let mut all = contract_methods(c, &address(contract)?)?;
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    for m in all {
+        let args: Vec<String> = m
+            .arguments
+            .iter()
+            .flatten()
+            .map(|a| format!("{} {}", a.type_.clone().unwrap_or_default(), a.name.clone().unwrap_or_default()))
+            .collect();
+        println!("{} {}({})", m.return_type.unwrap_or_default(), m.name.unwrap_or_default(), args.join(", "));
+    }
+    Ok(())
+}
+
+fn deploy(c: &mut Client, key_file: &str, source_file: &str) -> Result<()> {
+    let key = read_key(key_file)?;
+    let pk = key.verifying_key().to_bytes().to_vec();
+    let source = std::fs::read_to_string(source_file)?;
+    // the node's executor compiles the source and checks it against its rules
+    let compiled = c.smart_contract_compile(source.clone())?;
+    check(&compiled.status, "SmartContractCompile")?;
+    let classes = compiled.byte_code_objects.unwrap_or_default();
+    let token_standard = compiled.token_standard.unwrap_or(0);
+    println!("compiled: {} class(es), token standard {token_standard}", classes.len());
+    let inner_id = next_inner_id(c, &pk)?;
+    // the address of the new contract (SmartContracts::get_valid_smart_address):
+    // blake2s-256(deployer public key, 6-byte inner id, the byte code of every class in order)
+    let mut blake = Blake2s256::new();
+    blake.update(&pk);
+    blake.update(inner_id6(inner_id));
+    for class in &classes {
+        blake.update(class.byte_code.as_deref().unwrap_or_default());
+    }
+    let target = blake.finalize().to_vec();
+
+    let deploy = api::SmartContractDeploy {
+        source_code: Some(source),
+        byte_code_objects: Some(classes),
+        hash_state: Some(String::new()),
+        token_standard: Some(token_standard),
+        lang: Some(0),
+        methods: None,
+    };
+    let t = contract_transaction(
+        &key,
+        target.clone(),
+        invocation("", Vec::new(), Some(deploy), false),
+        api::TransactionType::T_T_CONTRACT_DEPLOY,
+        inner_id,
+    )?;
+    let r = c.transaction_flow(t)?;
+    check(&r.status, "TransactionFlow")?;
+    println!(
+        "sent: inner id {inner_id}, round {}, fee {} CS",
+        r.round_num.unwrap_or(0),
+        fmt_amount(&r.fee.unwrap_or(general::Amount::new(0, 0)))
+    );
+    // the contract exists once the deploy is in a block and its executions are done
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while c.smart_contract_get(target.clone())?.status.and_then(|s| s.code).unwrap_or(0) != 0 {
+        if Instant::now() > deadline {
+            return Err(format!("{} is not deployed after 180 s", bs58::encode(&target).into_string()).into());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    println!("contract: {}", bs58::encode(&target).into_string());
+    Ok(())
+}
+
+fn call(c: &mut Client, key_file: &str, contract: &str, method: &str, texts: &[&str]) -> Result<()> {
+    let key = read_key(key_file)?;
+    let contract = address(contract)?;
+    let params = typed_params(c, &contract, method, texts)?;
+    let inner_id = next_inner_id(c, &key.verifying_key().to_bytes())?;
+    let t = contract_transaction(
+        &key,
+        contract,
+        invocation(method, params, None, false),
+        api::TransactionType::T_T_CONTRACT_CALL,
+        inner_id,
+    )?;
+    // the node answers once the confidants executed the call: the result is the method's return value
+    let r = c.transaction_flow(t)?;
+    check(&r.status, "TransactionFlow")?;
+    println!(
+        "sent: inner id {inner_id}, round {}, fee {} CS",
+        r.round_num.unwrap_or(0),
+        fmt_amount(&r.fee.unwrap_or(general::Amount::new(0, 0)))
+    );
+    println!("returned: {}", show(&r.smart_contract_result));
+    Ok(())
+}
+
+fn get(c: &mut Client, contract: &str, method: &str, texts: &[&str]) -> Result<()> {
+    let contract = address(contract)?;
+    let params = typed_params(c, &contract, method, texts)?;
+    // a getter: TransactionFlow with forgetNewState runs the method on the node's own executor against
+    // the current state and throws the new state away; nothing is sent, no fee, no signature is checked
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+    let t = api::Transaction {
+        id: Some(0),
+        source: Some(vec![0; 32]),
+        target: Some(contract),
+        amount: Some(general::Amount::new(0, 0)),
+        balance: Some(general::Amount::new(0, 0)),
+        currency: Some(CURRENCY_CS),
+        signature: Some(vec![0; 64]),
+        smart_contract: Some(invocation(method, params, None, true)),
+        fee: Some(api::AmountCommission::new(encode_max_fee(CONTRACT_FEE))),
+        time_creation: Some(now),
+        type_: Some(api::TransactionType::T_T_CONTRACT_CALL),
+        ..Default::default()
+    };
+    let r = c.transaction_flow(t)?;
+    check(&r.status, "TransactionFlow")?;
+    println!("{}", show(&r.smart_contract_result));
+    Ok(())
+}
+
 fn usage() -> ! {
     eprintln!(
         "usage: credits-client [--node HOST:PORT] <command>
@@ -253,6 +547,11 @@ fn usage() -> ! {
   tx <address> [n]                     the last n transactions of a wallet (default 10)
   transfer <key-file> <to> <amount>    sign and send a transfer: SPENDS REAL CS ON MAINNET
   sign <key-file> <to> <amount> <id>   build and sign a transfer with inner id <id>, print it, send nothing
+  deploy <key-file> <Contract.java>    compile and deploy a contract: SPENDS REAL CS ON MAINNET
+  call <key-file> <contract> <method> [args...]
+                                       call a method in a transaction: SPENDS REAL CS ON MAINNET
+  get <contract> <method> [args...]    run a method as a getter: free, changes nothing
+  methods <contract>                   a contract's methods and their argument types
 --node defaults to 127.0.0.1:9090"
     );
     exit(2)
@@ -274,6 +573,10 @@ fn run(args: &[String]) -> Result<()> {
         ["blocks"] | ["blocks", _] => blocks(&mut connect(node)?, n(args.get(1))?),
         ["tx", addr] | ["tx", addr, _] => transactions(&mut connect(node)?, addr, n(args.get(2))?),
         ["transfer", key, to, amount] => transfer(&mut connect(node)?, key, to, amount),
+        ["deploy", key, source] => deploy(&mut connect(node)?, key, source),
+        ["call", key, contract, method, ..] => call(&mut connect(node)?, key, contract, method, &args[4..]),
+        ["get", contract, method, ..] => get(&mut connect(node)?, contract, method, &args[3..]),
+        ["methods", contract] => methods(&mut connect(node)?, contract),
         _ => usage(),
     }
 }

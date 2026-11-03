@@ -43,6 +43,9 @@ on:
       tokens:
         description: 'With contracts: deploy a v1 and a v0 token and use them through the API of tokens_via, checking balances, states and the token API (ci/testnet/tokens.py; 0 = off)'
         default: '0'
+      sample_contracts:
+        description: 'With contracts: deploy and call the examples of samples/contracts (Counter, TestToken, TipJar, Faucet) with the Python and Java sample clients, and check the token API (ci/testnet/sample_contracts.sh; shortens the transfer load to 60 s; 0 = off)'
+        default: '0'
       tokens_via:
         description: 'With tokens: the node whose API the token calls go through (e.g. the restarted one; default 1)'
         default: '1'
@@ -228,6 +231,23 @@ jobs:
 
       # mixed executors: the even nodes run an executor built from CreditsCommunity/contract-executor, so a
       # result that differs from the release executor's shows up as a failed contract consensus
+      - name: Set up Java 17 for the Java sample client
+        if: inputs.contracts == '1' && inputs.sample_contracts == '1'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: samples/clients/java/pom.xml
+
+      # the executor keeps the JDK of the release (run.sh finds it next to the jar); the client runs on 17
+      - name: Build the Java sample client
+        if: inputs.contracts == '1' && inputs.sample_contracts == '1'
+        run: |
+          sudo apt-get install -y -qq thrift-compiler
+          mvn -B -q -f samples/clients/java/pom.xml package
+          echo "SAMPLE_JAVA_CLIENT=$JAVA_HOME/bin/java -jar $PWD/samples/clients/java/target/credits-client.jar" >> "$GITHUB_ENV"
+
       - name: Checkout contract executor under test
         if: inputs.contracts == '1' && inputs.executor_ref != ''
         uses: actions/checkout@v4
@@ -293,9 +313,10 @@ jobs:
           TOKENS_VIA: ${{ inputs.tokens_via || '1' }}
           TOKENS_STRICT_API: ${{ inputs.tokens || '0' }}
           CONTRACT_LOAD: ${{ inputs.contract_load || '' }}
+          SAMPLE_CONTRACTS: ${{ inputs.sample_contracts || '0' }}
           RESTART_NODES: ${{ inputs.restart_nodes || '' }}
           FUND: '1'
-          LOAD_SECONDS: '300'
+          LOAD_SECONDS: ${{ inputs.sample_contracts == '1' && '60' || '300' }}
           WORK: ${{ github.workspace }}/testnet-run
         run: |
           if [ -n "$CONTRACT_LOAD" ]; then
@@ -324,6 +345,7 @@ jobs:
             testnet-run/n*/*.log
             testnet-run/fund.log
             testnet-run/contracts.log
+            testnet-run/sample-contracts.log
             testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
             testnet-run/resources.tsv
