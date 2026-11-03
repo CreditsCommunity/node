@@ -309,6 +309,11 @@ public:
         return alwaysExecuteContracts_;
     }
 
+    // [params] banner: the logo at start-up (off: the version and settings lines only)
+    bool startupBanner() const {
+        return startupBanner_;
+    }
+
     bool newBlockchainTop() const {
         return newBlockchainTop_;
     }
@@ -461,6 +466,7 @@ private:
 
     bool showBalanceChange_ = false;
     bool alwaysExecuteContracts_ = false;
+    bool startupBanner_ = true;
     bool syncContractExecution_ = true;
     bool recreateIndex_ = false;
     bool newBlockchainTop_ = false;
