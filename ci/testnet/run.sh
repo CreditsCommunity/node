@@ -592,7 +592,8 @@ api_settings() {
     echo "executor_command=$WORK/n$i/executor.sh"
     echo "executor_multi_instance=true"
     # the token cache behind the Token* API methods (read by builds that have the key)
-    { [ "$TOKENS" != "1" ] && [ "$SAMPLE_CONTRACTS" != "1" ]; } || echo "tokens_cache=true"
+    { [ "$TOKENS" != "1" ] && [ "$SAMPLE_CONTRACTS" != "1" ]; } || [[ ",${TOKENS_CACHE_OFF_NODES:-}," == *",$i,"* ]] \
+        || echo "tokens_cache=true"
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
@@ -2376,5 +2377,29 @@ if [ "$JOIN_SURVEY" = 1 ]; then
     ! grep -aq 'SNAPSHOT: importing\|SNAPSHOT: fetched block' "$sdir/survey.err" "$sdir/survey.txt" || fail_survey "the survey fetched or imported a snapshot"
     echo "survey: $(grep -a '^SURVEY end' "$sdir/survey.txt"); $(grep -vc '^#' "$sdir/survey-out/snapshot_sources.txt") source(s) listed"
     PIDS[$JOIN_NODE]=""
+fi
+if [ "${TOKENS_PRUNED_CHECK:-0}" = 1 ]; then
+    # report only: the token cache of every other node against n1's (full, cache on from block 0)
+    for i in $(seq 1 "$ALL_NODES"); do
+        echo "tokens-pruned: n$i $(grep -ahoE "pruned storage: (oldest block stored is [0-9']+|blocks before [0-9']+ removed)" "$WORK/n$i/node.log" | tail -1) ;" \
+            "$(grep -ah 'API: token cache is empty\|API: [0-9]* tokens found\|tokens are loading\|API: token cache on' "$WORK/n$i/node.log" | sed 's/^.*\] //' | sort | uniq -c | tr '\n' ';')"
+    done
+    others=$(for i in $(seq 2 "$ALL_NODES"); do [[ ",${TOKENS_CACHE_OFF_NODES:-}," == *",$i,"* ]] || echo "127.0.0.1:$(api_port "$i")"; done)
+    python3 "$HERE/tokens_pruned.py" running 127.0.0.1:9090 $others || true
+    for i in ${TOKENS_CACHE_OFF_NODES//,/ }; do
+        # the node ran with the cache off and pruned: restarted with it on, it rebuilds the cache
+        kill -TERM "${PIDS[$i]}" 2>/dev/null || true
+        for _ in $(seq 1 180); do kill -0 "${PIDS[$i]}" 2>/dev/null || break; sleep 1; done
+        wait "${PIDS[$i]}" 2>/dev/null || true
+        kill_executor "$i"; sleep 2
+        sed -i 's/^\[api\]$/[api]\ntokens_cache=true/' "$WORK/n$i/config.ini"
+        before=$(grep -ac 'tokens loaded!' "$WORK/n$i/node.log" || true)
+        start_node "$i"
+        deadline=$(( $(date +%s) + 600 ))
+        while [ "$(grep -ac 'tokens loaded!' "$WORK/n$i/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 5; done
+        echo "tokens-pruned: n$i restarted with tokens_cache=true: $(grep -ah 'API: token cache is empty\|API: [0-9]* tokens found\|tokens loaded!' "$WORK/n$i/node.log" | tail -3 | sed 's/^.*\] //' | tr '\n' ';')"
+        sleep 20
+        python3 "$HERE/tokens_pruned.py" "restarted-n$i" 127.0.0.1:9090 "127.0.0.1:$(api_port "$i")" || true
+    done
 fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

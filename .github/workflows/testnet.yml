@@ -67,6 +67,9 @@ on:
       contract_load:
         description: 'With contracts: load phase as "seconds,writes per second,reads per second", e.g. 120,2,20 (empty = none)'
         default: ''
+      extra_env:
+        description: 'Test branch only: more run.sh variables, space separated NAME=value'
+        default: ''
   schedule:
     # every night: one run of this node alone, one with official nodes on the even positions
     - cron: '17 2 * * *'
@@ -319,7 +322,9 @@ jobs:
           FUND: '1'
           LOAD_SECONDS: ${{ inputs.sample_contracts == '1' && '60' || '300' }}
           WORK: ${{ github.workspace }}/testnet-run
+          EXTRA_ENV: ${{ inputs.extra_env || '' }}
         run: |
+          for kv in $EXTRA_ENV; do export "$kv"; echo "extra: $kv"; done
           if [ -n "$CONTRACT_LOAD" ]; then
             echo "$CONTRACT_LOAD" | grep -qE '^[0-9]+,[0-9.]+,[0-9.]+$' || { echo "contract_load must be seconds,writes,reads"; exit 1; }
             IFS=, read -r CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE <<< "$CONTRACT_LOAD"
