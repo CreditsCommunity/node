@@ -27,7 +27,7 @@ The node also serves its own snapshots to its neighbours (`CREDITS_SERVE_SNAPSHO
 | `snapshot/` | The snapshots this node builds and serves to its neighbours. |
 | `snapshot-download/` | A download in progress; the next first start resumes it. |
 
-The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid.
+The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid. Keep `user:` a non-root uid: the node, its keys and the wallet's key store must not run or be written as root.
 
 ## The wallet
 

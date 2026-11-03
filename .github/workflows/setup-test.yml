@@ -162,9 +162,11 @@ jobs:
           "$w" version
           "$w" --config wallet.toml status
           "$w" --config wallet.toml status --json > ../wallet-status.json
-          cp NodePrivate.txt ../node-key.txt
           printf 'ci password\n' > ../pw && chmod 600 ../pw
-          "$w" --config wallet.toml account import node ../node-key.txt --password-file ../pw
+          # the node's own key file: the wallet must say to keep it (the node needs it)
+          "$w" --config wallet.toml account import node NodePrivate.txt --password-file ../pw 2> ../import.txt
+          cat ../import.txt
+          grep -q "keep it, the node needs it" ../import.txt && test -f NodePrivate.txt
           "$w" --config wallet.toml balance node
           for _ in $(seq 1 30); do
             "$w" --config wallet.toml tokens node --json > ../wallet-tokens.json && break
@@ -198,10 +200,10 @@ jobs:
       - name: Second set-up (Enter everywhere, do not start) changes nothing
         run: |
           sleep 1
-          # storage, database, share, executor, wallet, token cache, start, write (no first-start
-          # question: the database exists)
+          # storage, database, share, executor, wallet (no: Enter would create one, the wallet has
+          # no account yet), token cache, start, write (no first-start question: the database exists)
           cp csnode/wallet.toml wallet-before.toml
-          bash setup-run.sh csnode '\n\n\n\n\n\nno\n\n' 2>&1 | tee setup2.txt | tail -20
+          bash setup-run.sh csnode '\n\n\n\nno\n\nno\n\n' 2>&1 | tee setup2.txt | tail -20
           grep -a "already holds a lmdb database" setup2.txt
           if grep -a "How should the node get the chain" setup2.txt; then echo "asked about the first start"; exit 1; fi
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
@@ -216,7 +218,7 @@ jobs:
       - name: Full berkeleydb set-up with a wrong answer first
         run: |
           # storage (wrong, then full), database, share (no), executor, wallet, token cache, start, write
-          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\n\n\n\nno\n\n' 2>&1 | tee setup3.txt | tail -20
+          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup3.txt | tail -20
           grep -a "Please answer one of" setup3.txt
           python check-config.py csnode-clean/config.ini snapshot "serve=off fetch=off" storage "db_backend=berkeleydb"
           # the rest of config.ini is the package's
@@ -244,14 +246,14 @@ jobs:
           sed -i.orig 's/^executor_commit_max=.*/executor_commit_max=1518/' csnode-exec/config.ini && rm csnode-exec/config.ini.orig
           # storage, database, first start (sync), share, executor (Enter: community), wallet, token
           # cache, start, write
-          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\n\n\n\nno\n\n' 2>&1 | tee setup4.txt | tail -12
+          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\n\nno\n\nno\n\n' 2>&1 | tee setup4.txt | tail -12
           grep -a "In this folder: build $build (community); config.ini accepts 1518..1518" setup4.txt
           grep -q "^executor_commit_max=$build" csnode-exec/config.ini && echo "executor_commit_max=$build"
           # no executor jars at all: the community one is downloaded from GitHub and checked
           rm csnode-exec/contract-executor.jar csnode-exec/sc-api-support.jar
           # storage, database, first start (sync), share, executor (community), download (Enter: yes),
           # wallet, token cache, start, write
-          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\ncommunity\n\n\n\nno\n\n' 2>&1 | tee setup5.txt | tail -12
+          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\ncommunity\n\nno\n\nno\n\n' 2>&1 | tee setup5.txt | tail -12
           grep -a "contract-executor.jar and sc-api-support.jar replaced: build [0-9]* (community)" setup5.txt
           test -f csnode-exec/contract-executor.jar && test -f csnode-exec/sc-api-support.jar
 
@@ -260,28 +262,52 @@ jobs:
           cp -a csnode-clean csnode-full && rm -f csnode-full/config.ini.bak-*
           # storage, database, first start (network), backfill (Enter: yes), share (no), executor, wallet,
           # token cache, start, write
-          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\n\nno\n\n\n\nno\n\n' 2>&1 | tee setup6.txt | tail -14
+          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup6.txt | tail -14
           grep -a "fetches the older blocks from" setup6.txt
           grep -a "backfill:     yes" setup6.txt
           python check-config.py csnode-full/config.ini snapshot "serve=off fetch=auto" storage "db_backend=rocksdb backfill=on"
           # a tuning key set by hand is kept; backfill no
           printf 'backfill_rate=500\n' >> csnode-full/config.ini
-          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\nno\nno\n\n\n\nno\n\n' 2>&1 | tee setup7.txt | tail -8
+          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\nno\nno\n\nno\n\nno\n\n' 2>&1 | tee setup7.txt | tail -8
           python check-config.py csnode-full/config.ini snapshot "serve=off fetch=auto" storage "db_backend=rocksdb backfill=off backfill_rate=500"
 
       - name: A pruned folder switched to full keeps its blocks and backfills
         run: |
           # csnode holds the pruned lmdb database of the first set-up: storage (full), database (Enter:
           # lmdb), backfill (Enter: yes), share, executor, wallet, token cache, start (no), write
-          bash setup-run.sh csnode 'full\n\n\n\n\n\n\nno\n\n' 2>&1 | tee setup8.txt | tail -14
+          bash setup-run.sh csnode 'full\n\n\n\n\nno\n\nno\n\n' 2>&1 | tee setup8.txt | tail -14
           grep -a "keeps its blocks and fetches the ones" setup8.txt
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" storage "db_backend=lmdb backfill=on"
+
+      # a user at a terminal: the account created by the set-up (the default when the wallet has
+      # none), then the node's key imported as the explicit second choice, with its warning
+      - name: Wallet accounts through the set-up, on a terminal (Linux, macOS)
+        if: matrix.os != 'windows'
+        env:
+          CREDITS_WALLET_HOME: ${{ github.workspace }}/wallet-home-pty
+        run: |
+          cp -a csnode-clean csnode-pty && rm -f csnode-pty/config.ini.bak-* csnode-pty/wallet.toml
+          common=('Pruned or full node\? \(pruned/full\) \[\w+\]:=>pruned' 'Database\? \([a-z/]+\) \[\w+\]:=>lmdb'
+                  'How should the node get the chain\? \(github/network/sync\) \[\w+\]:=>sync'
+                  'Share snapshots with other nodes\? \(yes/no\) \[\w+\]:=>no' 'Which executor\? \(community/official\) \[\w+\]:=>'
+                  'Keep a token cache\? \(yes/no\) \[\w+\]:=>no' 'Start the node when the set-up is done\? \(yes/no\) \[yes\]:=>no'
+                  'Write config.ini\? \(yes/no\) \[yes\]:=>')
+          python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
+            'Create a wallet account now\? \(create/import/node/no\) \[create\]:=>' 'Account name \[main\]:=>' | tee setup-pty1.txt | tail -12
+          grep -a "type back three of the words" setup-pty1.txt
+          test -f "$CREDITS_WALLET_HOME/accounts/main.json" && echo "account main created"
+          python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
+            'Create a wallet account now\? \(create/import/node/no\) \[no\]:=>node' "Import the node's key anyway\? \(no/yes\) \[no\]:=>yes" \
+            'Account name \[node\]:=>' | tee setup-pty2.txt | tail -12
+          grep -a "Importing it makes it a spending key as well" setup-pty2.txt
+          grep -a "keep it, the node needs it" setup-pty2.txt
+          test -f "$CREDITS_WALLET_HOME/accounts/node.json" && test -f csnode-pty/NodePrivate.txt && echo "node key imported, NodePrivate.txt kept"
 
       - name: Collect
         if: always()
         run: |
           mkdir -p result
-          cp setup*.txt csnode/config.ini csnode/wallet.toml wallet-*.json result/ 2>/dev/null || true
+          cp setup*.txt import.txt csnode/config.ini csnode/wallet.toml wallet-*.json result/ 2>/dev/null || true
           cp csnode-clean/config.ini result/config-full.ini 2>/dev/null || true
           tail -c 1000000 csnode/stdout.log > result/stdout.log 2>/dev/null || true
 

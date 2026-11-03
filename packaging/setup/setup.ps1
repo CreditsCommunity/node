@@ -295,22 +295,60 @@ if (Current 'api' 'executor_command') {
 $walletBin = '.\credits-wallet.exe'
 $wallet = 'none'; $walletName = ''; $walletFile = ''
 $walletHome = if ($env:CREDITS_WALLET_HOME) { $env:CREDITS_WALLET_HOME } else { Join-Path $env:APPDATA 'credits-wallet' }
+# an elevated set-up writes the account to the profile that runs it (%APPDATA% of that user)
+$elevated = $false
+try {
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch { }
 if (Test-Path -LiteralPath $walletBin) {
     Write-Host '6. Wallet'
     Write-Host '   credits-wallet.exe, in this folder, is a terminal wallet: it keeps your keys on this machine,'
     Write-Host '   encrypted, and sends through this node. The user guide is wallet-guide.md.'
-    $accDir = Join-Path $walletHome 'accounts'
-    if ((Test-Path -LiteralPath $accDir) -and @(Get-ChildItem -LiteralPath $accDir).Count -gt 0) {
-        Write-Host "   The wallet in $walletHome has accounts already."
+    if ($elevated) {
+        Write-Host "   The set-up runs as administrator: an account goes to $walletHome, the profile of"
+        Write-Host "   $env:USERNAME. If you use the wallet as another user, answer no and create it later as that user."
     }
-    Write-Host '   create: a new account: you write its 24-word recovery phrase on paper (in this terminal).'
-    Write-Host "   import: a key you have: the node's NodePrivate.txt, a 24-word phrase, or the keys JSON of"
-    Write-Host '           the official wallet.'
+    $accDir = Join-Path $walletHome 'accounts'
+    $haveAccounts = (Test-Path -LiteralPath $accDir) -and @(Get-ChildItem -LiteralPath $accDir).Count -gt 0
+    if ($haveAccounts) { Write-Host "   The wallet in $walletHome has accounts already." }
+    Write-Host '   create: a new account, separate from the node (recommended): you write its 24-word'
+    Write-Host '           recovery phrase on paper, in this terminal.'
+    Write-Host '   import: a key you have: a 24-word phrase, a base58 key, or the keys JSON of the official'
+    Write-Host '           wallet.'
+    Write-Host "   node:   this node's own key (NodePrivate.txt), to see its rewards in the wallet. Not for"
+    Write-Host '           funds: that key stays in clear on this computer for the node.'
     Write-Host '   no:     not now (later: credits-wallet.exe).'
-    $wallet = Ask '   Create a wallet account now? (no/create/import)' 'no' @('no', 'create', 'import')
+    $walletDefault = if ($haveAccounts -or $Defaults) { 'no' } else { 'create' }
+    $wallet = Ask '   Create a wallet account now? (create/import/node/no)' $walletDefault @('create', 'import', 'node', 'no')
+    if ($wallet -eq 'import') {
+        $walletFile = Ask-Text '   File holding the key (Enter: paste or type it when the wallet asks)' ''
+        if ($walletFile -and -not (Test-Path -LiteralPath $walletFile -PathType Leaf)) {
+            Write-Host "   $walletFile is not a file: the wallet will ask for the key."
+            $walletFile = ''
+        }
+        if ($walletFile -and ((Split-Path -Leaf $walletFile) -eq 'NodePrivate.txt' -or
+                (Test-Path -LiteralPath (Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $walletFile)) 'NodePublic.txt')))) {
+            $wallet = 'node'
+        }
+    } elseif ($wallet -eq 'node') {
+        $walletFile = 'NodePrivate.txt'
+    }
+    if ($wallet -eq 'node') {
+        Write-Host "   This is a node's key. Importing it makes it a spending key as well, and the node keeps"
+        Write-Host "   it in clear on this computer: anyone who gets into it can take that account's CS."
+        Write-Host '   Keep funds in a separate account (create), and never delete NodePrivate.txt: the node'
+        Write-Host '   needs it.'
+        if (-not (Test-Path -LiteralPath $walletFile)) {
+            Write-Host "   There is no $walletFile here: nothing is imported."
+            $wallet = 'no'
+        } elseif ((Ask "   Import the node's key anyway? (no/yes)" 'no' @('no', 'yes')) -ne 'yes') {
+            $wallet = 'no'
+        }
+    }
     if ($wallet -ne 'no') {
+        $defaultName = if ($wallet -eq 'node') { 'node' } else { 'main' }
         while ($true) {
-            $walletName = Ask-Text '   Account name' 'main'
+            $walletName = Ask-Text '   Account name' $defaultName
             if ($walletName -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$' -and -not $walletName.EndsWith('.')) { break }
             Write-Host "  An account name has 1 to 32 letters, digits, '.', '_' or '-'."
             if ($Defaults) { break }
@@ -318,12 +356,6 @@ if (Test-Path -LiteralPath $walletBin) {
         if (Test-Path -LiteralPath (Join-Path $accDir "$walletName.json")) {
             Write-Host "   The wallet has an account named $walletName already: nothing will be created."
             $wallet = 'no'
-        } elseif ($wallet -eq 'import') {
-            $walletFile = Ask-Text '   File holding the key (Enter: paste or type it when the wallet asks)' ''
-            if ($walletFile -and -not (Test-Path -LiteralPath $walletFile -PathType Leaf)) {
-                Write-Host "   $walletFile is not a file: the wallet will ask for the key."
-                $walletFile = ''
-            }
         }
     }
     Write-Host ''
@@ -370,6 +402,7 @@ if ($executorChoice -ne 'none') {
 switch ($wallet) {
     'create' { Write-Host "  wallet:       create the account $walletName" }
     'import' { Write-Host ("  wallet:       import the account $walletName" + $(if ($walletFile) { " from $walletFile" } else { '' })) }
+    'node'   { Write-Host "  wallet:       import the node's key as $walletName (not for funds)" }
     'no'     { Write-Host '  wallet:       no account now' }
 }
 Write-Host "  token cache:  $tokens"
@@ -526,7 +559,8 @@ if ($wallet -ne 'none') {
     $toml.Add("network = `"$walletNetwork`"")
     $toml.Add("diag = `"$diag`"")
     foreach ($l in $kept) { $toml.Add($l) }
-    [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot 'wallet.toml'), $toml, (New-Object System.Text.ASCIIEncoding))
+    # UTF-8 without a byte-order mark (TOML)
+    [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot 'wallet.toml'), $toml, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host ''
     Write-Host "wallet.toml written: node 127.0.0.1:$apiPort, $walletNetwork, diag port $diag"
     if ($apiPort -eq '0') { Write-Host "The node's API is off ([api] port=0): the wallet needs it. Set port=9090 in config.ini." }
@@ -545,7 +579,8 @@ if ($wallet -ne 'none') {
             $walletArgs = @('--config', 'wallet.toml', 'account', 'import', $walletName)
             if ($walletFile) { $walletArgs += $walletFile }
         }
-        $walletCmd = 'credits-wallet.exe ' + (($walletArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
+        # the command to run later, every argument quoted for PowerShell
+        $walletCmd = '.\credits-wallet.exe ' + (($walletArgs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
         if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
             Write-Host ''
             if ($wallet -eq 'create') {
@@ -554,7 +589,8 @@ if ($wallet -ne 'none') {
             }
             & $walletBin @walletArgs
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "Open the wallet with: cd `"$PSScriptRoot`" ; credits-wallet.exe"
+                Write-Host "Open the wallet with: cd `"$PSScriptRoot`" ; .\credits-wallet.exe"
+                if ($wallet -eq 'node') { Write-Host 'Keep NodePrivate.txt: the node needs it. Keep funds in a separate account.' }
             } else {
                 Write-Host "The wallet did not finish; run it again later: cd `"$PSScriptRoot`" ; $walletCmd"
             }
