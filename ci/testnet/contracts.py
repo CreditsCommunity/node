@@ -18,6 +18,8 @@ mainnet node and executor: the node refuses methods declaring @UsingContract
 (Violations::SubsequentCall), and executor build 1518 fails an undeclared invokeExternalContract
 with an AccessControlException (its configuration is created lazily inside the contract sandbox).
 
+ContractAllMethodsGet must report the @Getter annotations of samples/contracts/Counter.java.
+
 Then, once --final-file exists (run.sh creates it when every node reached its target sequence),
 it compares the contract states on nodes 1 to --check-nodes (default <nodes>; run.sh adds a node
 that joined later).
@@ -192,6 +194,33 @@ public class CallerDeclared extends SmartContract {
     }
 }
 """
+
+
+# the examples of samples/contracts, read by the checks below
+SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "samples", "contracts")
+GETTER = "com.credits.scapi.annotations.Getter"
+
+
+def check_getter_annotations(client):
+    """ContractAllMethodsGet passes on the annotations the executor reports: the @Getter methods of
+    samples/contracts/Counter.java carry it and its state-changing methods do not, so a client can
+    tell what it may run as a free getter. Returns the number of failures."""
+    with open(os.path.join(SAMPLES, "Counter.java")) as f:
+        source = f.read()
+    compiled = client.SmartContractCompile(source)
+    if compiled.status.code != 0:
+        print(f"ContractAllMethodsGet annotations: FAILED, compile: {compiled.status.message}", flush=True)
+        return 1
+    got = client.ContractAllMethodsGet(compiled.byteCodeObjects)
+    if got.code != 0:
+        print(f"ContractAllMethodsGet annotations: FAILED, {got.message}", flush=True)
+        return 1
+    annotated = sorted(m.name for m in got.methods if any(a.name == GETTER for a in (m.annotations or [])))
+    getters, others = {"getValue", "getNote", "getOwner"}, {"increment", "add", "setNote"}
+    ok = getters <= set(annotated) and not (others & set(annotated))
+    print(f"ContractAllMethodsGet annotations: {'ok' if ok else 'FAILED'} (@Getter on {annotated}, "
+          f"expected {sorted(getters)} and not {sorted(others)})", flush=True)
+    return 0 if ok else 1
 
 
 def write_sources(directory):
@@ -539,6 +568,7 @@ def main():
     call_callers("before restart", 1)
 
     failures = 0
+    failures += check_getter_annotations(client_for(1))
     calls = 0
     for n in range(args.calls_before):
         calls += 1
