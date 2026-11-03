@@ -188,25 +188,26 @@ jobs:
             git -C node-alt diff --stat
           fi
           # the submodules are copied from this run's checkout, which must point to the same commits,
-          # except p2p: this repository runs its fork (CreditsCommunity/p2p, which holds the upstream history),
-          # and the node under comparison gets the files of the p2p commit it points to (same submodules)
+          # except p2p and the Thrift definitions: this repository runs its forks (CreditsCommunity/p2p and
+          # CreditsCommunity/thrift-interface-definitions, which hold the upstream history), and the node
+          # under comparison gets the files of the commit it points to (same nested submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
             alt=$(git -C node-alt ls-tree HEAD -- "$m" | awk '{print $3}')
-            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ]; then
+            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ] && [ "$m" != third-party/thrift-interface-definitions ]; then
               echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
             fi
             rm -rf "node-alt/$m"
             cp -a "$m" "node-alt/$m"
-            if [ "$m" = p2p ] && [ "$(git -C p2p rev-parse HEAD)" != "$alt" ]; then
-              git -C p2p cat-file -e "$alt^{commit}" 2>/dev/null || git -C p2p fetch -q origin "$alt"
-              for s in $(git -C p2p ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
-                [ "$(git -C p2p ls-tree HEAD -- "$s")" = "$(git -C p2p ls-tree "$alt" -- "$s")" ] \
-                  || { echo "p2p $alt points $s to another commit than this run"; exit 1; }
+            if { [ "$m" = p2p ] || [ "$m" = third-party/thrift-interface-definitions ]; } && [ "$(git -C "$m" rev-parse HEAD)" != "$alt" ]; then
+              git -C "$m" cat-file -e "$alt^{commit}" 2>/dev/null || git -C "$m" fetch -q origin "$alt"
+              for s in $(git -C "$m" ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
+                [ "$(git -C "$m" ls-tree HEAD -- "$s")" = "$(git -C "$m" ls-tree "$alt" -- "$s")" ] \
+                  || { echo "$m $alt points $s to another commit than this run"; exit 1; }
               done
-              git -C p2p ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd node-alt/p2p && xargs rm -f)
-              git -C p2p archive "$alt" | tar -x -C node-alt/p2p
-              echo "$NODE_ALT_REF: p2p at $alt (this run: $(git -C p2p rev-parse --short HEAD))"
+              git -C "$m" ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd "node-alt/$m" && xargs rm -f)
+              git -C "$m" archive "$alt" | tar -x -C "node-alt/$m"
+              echo "$NODE_ALT_REF: $m at $alt (this run: $(git -C "$m" rev-parse --short HEAD))"
             fi
           done
           cmake -S node-alt -B build-alt -G Ninja \

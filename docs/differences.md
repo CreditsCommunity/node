@@ -17,8 +17,9 @@ list of changes, pull request by pull request, see [CHANGES.md](CHANGES.md).
   back to the official binaries later. Both directions are tested in CI on mainnet data
   (`upgrade-compat`). Going back works only on a full BerkeleyDB folder: the official node reads
   only BerkeleyDB, and needs every block.
-- **Keys, ports and the Thrift API.** These are unchanged. The only API change: when blocks are
-  pruned, `TransactionsListGet` skips them (see "Pruned storage" below).
+- **Keys, ports and the Thrift API.** These are unchanged. The API changes: when blocks are
+  pruned, `TransactionsListGet` skips them (see "Pruned storage" below), and the diagnostic API
+  returns two more optional fields (see "Network identity in the diagnostic API" below).
 
 ## New options
 
@@ -97,6 +98,22 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   or `snapshot.mismatch` and stops with exit code 4; it refuses to start while
   `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
   start removes what that import wrote before it looks at `db/`.
+
+### Network identity in the diagnostic API
+
+`GetNodeInfo` of the diagnostic API (`[api] diag_port`) returns two optional fields in `NodeInfo`,
+from the Thrift definitions of the fork
+[CreditsCommunity/thrift-interface-definitions](https://github.com/CreditsCommunity/thrift-interface-definitions)
+(branch `community/network-id`):
+
+| Field | Value |
+|---|---|
+| `9: optional i64 networkUuid` | The chain identifier: the first 8 bytes of the hash of block 1, read as a little-endian unsigned 64-bit number (`BlockChain::uuid()`). It is the same on every node of a network, so a client such as a wallet can tell mainnet from a test network. Pruned nodes and nodes started from a snapshot know it too (it is in the checkpoint). Left out while the node does not know it yet (an empty database before block 1). Thrift has no unsigned type: the same 64 bits travel as a signed number, so mainnet, `11024959585341937636`, arrives as `-7421784488367613980`; add 2^64 to a negative value (or mask with `0xFFFFFFFFFFFFFFFF`) to get the unsigned one. |
+| `10: optional string communityVersion` | The package version, the first line of the `VERSION` file, for example `4.2.532-community.17`. Without a `VERSION` file it is `4.2.<protocol>.<minor>`. Always set by the community node. |
+
+The official node sets neither field, and clients built from the official definitions ignore them,
+so a client can detect a community node by the presence of `communityVersion`. A local clone made
+before this change needs `git submodule sync` once, since the submodule now points to the fork.
 
 ### Token cache
 

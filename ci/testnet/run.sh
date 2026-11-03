@@ -232,7 +232,7 @@ case "$TRUSTED_NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
     *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
 esac
-# ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i
+# ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i, diag 9400 + i
 [ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
     || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
 # 25 is Consensus::MaxTrustedNodes: no larger set of initial confidants can bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
@@ -702,7 +702,7 @@ port=$((BASE_PORT + i))
 [api]
 $(api_settings "$i")
 ajax_port=0
-diag_port=0
+diag_port=$((9400 + i))
 $(storage_section "$i")
 $(snapshot_section "$i")
 
@@ -726,6 +726,13 @@ if [ "$JOIN_SOURCES" = file ]; then
         echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$WORK/n$JOIN_NODE/snapshot_sources.txt"
     done
 fi
+
+# the package version a node of this build reports (diagnostic API, GetNodeInfo communityVersion):
+# the first line of VERSION in its working directory, as in a package
+CI_VERSION=4.2.532-community.ci
+for i in $(seq 1 "$ALL_NODES"); do
+    alt_node "$i" || printf '%s\n' "$CI_VERSION" > "$WORK/n$i/VERSION"
+done
 
 # the binary node i runs
 bin_of() {
@@ -1640,6 +1647,12 @@ PY
         exit 1
     fi
 done
+
+# network identity for clients: GetNodeInfo on the diag port of every node, the same networkUuid on
+# all the nodes of this build and communityVersion from their VERSION file
+community=$(for i in $(seq 1 "$ALL_NODES"); do alt_node "$i" || echo "$i"; done | paste -sd, -)
+python3 "$HERE/diag_info.py" "$ALL_NODES" "$CI_VERSION" --community "$community" \
+    || { echo "FAIL: GetNodeInfo did not report the network identity"; exit 1; }
 
 if [ -n "$CONTRACTS_PID" ]; then
     # every node, a joining one too, is at TARGET_SEQ: contracts.py may compare the states now
