@@ -77,10 +77,17 @@ contracts, signed in the wallet and sent through the node's API. It opens no por
   refuses to send when that contradicts its profile. The node listens on that port, as on the API
   port, on every interface: keep 9088 and 9090 closed to other hosts. The set-up never turns the diag
   port on: with `diag_port=0` the wallet works without that confirmation.
-- The package ships the wallet release named in [packaging/wallet-tag](packaging/wallet-tag),
-  downloaded from its public release and checked against its `SHA256SUMS`
-  ([packaging/fetch-wallet.sh](packaging/fetch-wallet.sh)). A node release ships a final wallet
-  release: tag the wallet first, then bump `packaging/wallet-tag`, then release the node.
+- The package ships the wallet release named in [packaging/wallet-tag](packaging/wallet-tag), and
+  only the archives whose SHA-256 is pinned in [packaging/wallet-sha256](packaging/wallet-sha256)
+  (that release's `SHA256SUMS`, kept in this repository; the release's own file is only compared):
+  [packaging/fetch-wallet.sh](packaging/fetch-wallet.sh) downloads them over HTTPS and refuses any
+  other bytes, and `packaging/check-wallet-pin.sh` checks that the two files name the same
+  release. A node release ships a final wallet release: tag the wallet first, then bump
+  `wallet-tag` and `wallet-sha256` together, then release the node; the release notes list the
+  pinned hashes. A manual release run may take another `wallet_tag`, but publishes only with
+  `wallet_sums_sha256`, the SHA-256 of that release's `SHA256SUMS`.
+- Once CreditsCommunity/wallet is public, its release tags get a ruleset (no deletion, no update),
+  so that a published wallet tag cannot move; see the wallet's README, "Releases".
 
 ## Building from source
 The builds that CI runs on every change are the reference:
