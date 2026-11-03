@@ -50,6 +50,7 @@
 #include <cscrypto/cscrypto.hpp>
 
 #include <observer.hpp>
+#include <banner.hpp>
 #include <numeric>
 
 namespace {
@@ -5677,6 +5678,12 @@ void Node::getNodeInfo(const api_diag::NodeInfoRequest& request, api_diag::NodeI
     info.id = EncodeBase58(nodeIdKey_.data(), nodeIdKey_.data() + nodeIdKey_.size());
     info.version = std::to_string(NODE_VERSION);
     info.platform = (api_diag::Platform) csconnector::connector::platform();
+    // network identity for clients (CreditsCommunity, optional fields): the chain uuid from block 1, also known to
+    // nodes started from a snapshot (it is in the checkpoint); sent as the same 64 bits in the signed Thrift i64
+    if (const uint64_t uuid = blockChain_.uuid(); uuid != 0) {
+        info.__set_networkUuid(static_cast<int64_t>(uuid));
+    }
+    info.__set_communityVersion(cs::packageVersion(Config::getNodeVersion(), Config::getMinorNodeVersion()));
     if (request.session) {
         api_diag::SessionInfo session;
         session.__set_startRound(stat_.nodeStartRound());
