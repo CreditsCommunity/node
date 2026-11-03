@@ -167,18 +167,6 @@ struct EventsReportData {
     bool alarm_invalid_block = true;
 };
 
-struct DbSQLData {
-    // SQL server host name or ip address
-    std::string host { "localhost" };
-    // connection port 5432 by default
-    int port = 5432;
-    // name of database
-    std::string name { "roundinfo" };
-    // username and password for access
-    std::string user { "postgres" };
-    std::string password { "postgres" };
-};
-
 namespace cs::config {
 class Observer;
 }
@@ -379,9 +367,6 @@ public:
         return eventsReport_;
     }
 
-    const DbSQLData& getDbSQLData() const {
-        return dbSQLData_;
-    }
 
     bool isStakinOn(cs::RoundNumber round);
     bool isMiningOn(cs::RoundNumber round);
@@ -415,7 +400,6 @@ private:
     void readApiData(const boost::property_tree::ptree& config);
     void readConveyerData(const boost::property_tree::ptree& config);
     void readEventsReportData(const boost::property_tree::ptree& config);
-    void readDbSQLData(const boost::property_tree::ptree& config);
 
     bool readKeys(const std::string& pathToPk, const std::string& pathToSk, const bool encrypt);
     void showKeys(const std::string& pk58);
@@ -462,7 +446,6 @@ private:
     StorageData storageData_;
     SnapshotData snapshotData_;
     ApiData apiData_;
-    DbSQLData dbSQLData_;
 
     bool showBalanceChange_ = false;
     bool alwaysExecuteContracts_ = false;
@@ -512,8 +495,6 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs);
 bool operator==(const SnapshotData& lhs, const SnapshotData& rhs);
 bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs);
 
-bool operator==(const DbSQLData& lhs, const DbSQLData& rhs);
-bool operator!=(const DbSQLData& lhs, const DbSQLData& rhs);
 
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs);
 bool operator!=(const ConveyerData& lhs, const ConveyerData& rhs);

@@ -2,10 +2,7 @@ cmake_minimum_required(VERSION 3.3)
 
 project(csdb)
 
-option(CSDB_BUILD_UNITTESTS "Bulid unit tests" OFF)
-option(CSDB_AUTORUN_UNITTESTS "Automatically run unit tests after build" OFF)
 
-option(CSDB_BUILD_BENCHMARK "Bulid benchmark" OFF)
 
 include (TestBigEndian)
 TEST_BIG_ENDIAN(CSDB_PLATFORM_IS_BIG_ENDIAN)
@@ -117,10 +114,4 @@ endif()
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)
   
-if(CSDB_BUILD_UNITTESTS)
-  add_subdirectory(unittests)
-endif()
 
-if(CSDB_BUILD_BENCHMARK)
-  add_subdirectory(benchmark)
-endif()

@@ -44,6 +44,7 @@ lines under the new release.
 |---|---|
 | #159 | samples: example API clients in Python, Go, Java, Rust, C# and JavaScript (`samples/clients/`): status, balance, last blocks, a wallet's transactions and a signed CS transfer, the Thrift code generated at build time from the IDL (compiler 0.19.0), checked offline by the workflow `samples.yml` (signature bytes, and transfers to a fake node that verifies them); the 2020 C++ sample `samples/api-client` and `SKIP_SAMPLES` are removed |
 | #157 | client: at start the console and the log show a banner, the CREDITS logo with "community" under it, the release from `VERSION`, the protocol, the build commit, the storage, snapshot serving and the backfill; `[params] banner=off` keeps the text lines only (the start used to log nothing about the version) |
+| #158 | clean-up: obsolete folders removed, none built or used: `js-client/` (2018 JavaScript test page), `example/` (a config for the signal server that no longer exists), `CMakeSettings.msvs2019-vcpkg.json`, `cmake/Modules/FindGMock.cmake`, `dbsql/` (the optional PostgreSQL round log, with the `DBSQL` option and the `[dbsql]` config section), `solver/tests/`, `csdb/unittests/`, `csdb/benchmark/`, `benchmark/`; the Linux package ships a systemd unit (`credits-node.service`, from `packaging/systemd/`) |
 
 ## community.16 — 2026-11-03
 

@@ -45,7 +45,6 @@ const std::string BLOCK_NAME_SNAPSHOT = "snapshot";
 const std::string BLOCK_NAME_API = "api";
 const std::string BLOCK_NAME_CONVEYER = "conveyer";
 const std::string BLOCK_NAME_EVENT_REPORTER = "event_report";
-const std::string BLOCK_NAME_DBSQL = "dbsql";
 
 const std::string PARAM_NAME_HOSTS_FILENAME = "hosts_filename";
 const std::string PARAM_NAME_INITIAL_TRUSTED = "init_trusted_filename";
@@ -121,11 +120,6 @@ const std::string PARAM_NAME_EVENTS_REJECT_CONTRACT_EXECUTION = "reject_contract
 const std::string PARAM_NAME_EVENTS_REJECT_CONTRACT_CONSENSUS = "reject_contract_consensus";
 const std::string PARAM_NAME_EVENTS_ALARM_INVALID_BLOCK = "alarm_invalid_block";
 
-const std::string PARAM_NAME_DBSQL_HOST = "host";
-const std::string PARAM_NAME_DBSQL_PORT = "port";
-const std::string PARAM_NAME_DBSQL_NAME = "name";
-const std::string PARAM_NAME_DBSQL_USER = "user";
-const std::string PARAM_NAME_DBSQL_PASSWORD = "password";
 
 const std::string ARG_NAME_CONFIG_FILE = "config-file";
 const std::string ARG_NAME_DB_PATH = "db-path";
@@ -923,7 +917,6 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
-        result.readDbSQLData(config);
 
         result.good_ = true;
     }
@@ -1276,21 +1269,6 @@ void Config::readEventsReportData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, BLOCK_NAME_EVENT_REPORTER, PARAM_NAME_EVENTS_ALARM_INVALID_BLOCK, eventsReport_.alarm_invalid_block);
 }
 
-void Config::readDbSQLData(const boost::property_tree::ptree& config) {
-    const std::string& block = BLOCK_NAME_DBSQL;
-
-    if (!config.count(block)) {
-        return;
-    }
-
-    const boost::property_tree::ptree& data = config.get_child(block);
-    checkAndSaveValue(data, block, PARAM_NAME_DBSQL_HOST, dbSQLData_.host);
-    checkAndSaveValue(data, block, PARAM_NAME_DBSQL_PORT, dbSQLData_.port);
-    checkAndSaveValue(data, block, PARAM_NAME_DBSQL_NAME, dbSQLData_.name);
-    checkAndSaveValue(data, block, PARAM_NAME_DBSQL_USER, dbSQLData_.user);
-    checkAndSaveValue(data, block, PARAM_NAME_DBSQL_PASSWORD, dbSQLData_.password);
-}
-
 template <typename T>
 bool Config::checkAndSaveValue(const boost::property_tree::ptree& data, const std::string& block, const std::string& param, T& value) {
     if (data.count(param)) {
@@ -1412,18 +1390,6 @@ bool operator==(const EventsReportData& lhs, const EventsReportData rhs) {
 }
 
 bool operator!=(const EventsReportData& lhs, const EventsReportData& rhs) {
-    return !(lhs == rhs);
-}
-
-bool operator==(const DbSQLData& lhs, const DbSQLData& rhs) {
-    return lhs.host == rhs.host &&
-           lhs.port == rhs.port &&
-           lhs.name == rhs.name &&
-           lhs.user == rhs.user &&
-           lhs.password == rhs.password;
-}
-
-bool operator!=(const DbSQLData& lhs, const DbSQLData& rhs) {
     return !(lhs == rhs);
 }
 

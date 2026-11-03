@@ -56,6 +56,8 @@ else
     install -m 755 "$here/setup/setup.sh" "$dir/"
     setup=./setup.sh
     setup_files=setup.sh
+    # a systemd unit to run the node as a service on Linux (instructions inside)
+    [ "$os" != linux ] || install -m 644 "$here/systemd/credits-node.service" "$dir/"
 fi
 
 # the node accepts an executor only within [executor_commit_min, executor_commit_max], and the

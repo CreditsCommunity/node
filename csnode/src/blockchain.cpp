@@ -10,9 +10,6 @@
 #include <lib/system/utils.hpp>
 #include <limits>
 
-#ifdef DBSQL
-#include <dbsql/roundinfo.hpp>
-#endif
 #include <csnode/blockchain.hpp>
 #include <csnode/blockhashes.hpp>
 #include <csnode/blocktakeover.hpp>
@@ -1518,9 +1515,6 @@ void BlockChain::tryFlushDeferredBlock() {
         if (NodeUtils::checkGroupSignature(deferredBlock_.confidants(), mask, deferredBlock_.signatures(), tempHash)) {
             deferredBlock_.set_storage(storage_);
             if (saveDeferredBlock()) {
-#ifdef DBSQL
-                dbsql::saveConfidants(deferredBlock_.sequence(), deferredBlock_.confidants(), deferredBlock_.realTrusted());
-#endif
                 csdebug() << kLogPrefix << "block #" << WithDelimiters(deferredBlock_.sequence()) << " is flushed to DB";
                 deferredBlock_ = csdb::Pool{};
             }
@@ -1875,9 +1869,6 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
             deferredBlock_.set_storage(storage_);
 
             if (saveDeferredBlock()) {
-#ifdef DBSQL
-                dbsql::saveConfidants(pool_seq, deferredBlock_.confidants(), deferredBlock_.realTrusted());
-#endif
                 flushed_block_seq = deferredBlock_.sequence();
                 if (uuid_ == 0 && flushed_block_seq == 1) {
                     uuid_ = uuidFromBlock(deferredBlock_);
