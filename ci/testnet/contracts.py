@@ -223,6 +223,25 @@ def check_getter_annotations(client):
     return 0 if ok else 1
 
 
+def report_compile_errors(client_for, nodes):
+    """With mixed executors (EXECUTOR_JAR_ALT, testnet.yml input executor_ref): SmartContractCompile
+    of a source with two errors (lines 11 and 12) on the even nodes, which run the executor under
+    test. Reported, not checked. An executor with CreditsCommunity/contract-executor#13 returns the
+    compiler's errors with their line numbers; the release executor (build 1555 and before) fails
+    with "Internal error processing compileSourceCode", and the node then drops and reopens its
+    executor connection, so the nodes running it are left out."""
+    if not os.environ.get("EXECUTOR_JAR_ALT"):
+        return
+    broken = COUNTER.replace("value += 1;", "value += missingA;\n        value += missingB;")
+    for i in range(2, nodes + 1, 2):
+        try:
+            got = client_for(i).SmartContractCompile(broken)
+            lines = [l for l in (got.status.message or "").splitlines() if not l.lstrip().startswith("at ")][:4]
+            print(f"SmartContractCompile with errors on n{i} (reported): status {got.status.code}, {' | '.join(lines)!r}", flush=True)
+        except Exception as e:
+            print(f"SmartContractCompile with errors on n{i} (reported): {type(e).__name__}: {e}", flush=True)
+
+
 def write_sources(directory):
     """Write the test contracts as Java files, for a compile check before the network starts."""
     placeholder = "11111111111111111111111111111111"
@@ -569,6 +588,7 @@ def main():
 
     failures = 0
     failures += check_getter_annotations(client_for(1))
+    report_compile_errors(client_for, args.nodes)
     calls = 0
     for n in range(args.calls_before):
         calls += 1
