@@ -1,5 +1,5 @@
-# Guided set-up of the node in this folder (Windows): the same questions, the same config.ini and the
-# same contract executor choice as setup.sh. Started by setup.bat; "setup.bat --defaults" takes every
+# Guided set-up of the node in this folder (Windows): the same questions, the same config.ini, the
+# same contract executor choice, wallet.toml and wallet account as setup.sh. Started by setup.bat; "setup.bat --defaults" takes every
 # default without asking.
 param([switch]$Defaults)
 
@@ -29,6 +29,22 @@ function Ask([string]$Question, [string]$Default, [string[]]$Choices) {
         foreach ($c in $Choices) { if ($c.StartsWith($reply)) { return $c } }
         Write-Host "  Please answer one of: $($Choices -join ' ')"
     }
+}
+
+# a free-text answer, trimmed (the default for an empty one)
+function Ask-Text([string]$Question, [string]$Default) {
+    if ($Defaults) { Write-Host "$Question [$Default]: $Default"; return $Default }
+    if ([Console]::IsInputRedirected) {
+        Write-Host -NoNewline "${Question} [$Default]: "
+        $reply = [Console]::In.ReadLine()
+        if ($null -eq $reply) { $reply = '' }
+        Write-Host $reply
+    } else {
+        $reply = Read-Host "$Question [$Default]"
+    }
+    $reply = $reply.Trim()
+    if ($reply -eq '') { return $Default }
+    return $reply
 }
 
 function Existing-Backend {
@@ -275,8 +291,59 @@ if (Current 'api' 'executor_command') {
     Write-Host ''
 }
 
-# 6. start now
-$start = Ask '6. Start the node when the set-up is done? (yes/no)' 'yes' @('yes', 'no')
+# 6. the wallet (the package's credits-wallet.exe): an account now, with a profile for this node
+$walletBin = '.\credits-wallet.exe'
+$wallet = 'none'; $walletName = ''; $walletFile = ''
+$walletHome = if ($env:CREDITS_WALLET_HOME) { $env:CREDITS_WALLET_HOME } else { Join-Path $env:APPDATA 'credits-wallet' }
+if (Test-Path -LiteralPath $walletBin) {
+    Write-Host '6. Wallet'
+    Write-Host '   credits-wallet.exe, in this folder, is a terminal wallet: it keeps your keys on this machine,'
+    Write-Host '   encrypted, and sends through this node. The user guide is wallet-guide.md.'
+    $accDir = Join-Path $walletHome 'accounts'
+    if ((Test-Path -LiteralPath $accDir) -and @(Get-ChildItem -LiteralPath $accDir).Count -gt 0) {
+        Write-Host "   The wallet in $walletHome has accounts already."
+    }
+    Write-Host '   create: a new account: you write its 24-word recovery phrase on paper (in this terminal).'
+    Write-Host "   import: a key you have: the node's NodePrivate.txt, a 24-word phrase, or the keys JSON of"
+    Write-Host '           the official wallet.'
+    Write-Host '   no:     not now (later: credits-wallet.exe).'
+    $wallet = Ask '   Create a wallet account now? (no/create/import)' 'no' @('no', 'create', 'import')
+    if ($wallet -ne 'no') {
+        while ($true) {
+            $walletName = Ask-Text '   Account name' 'main'
+            if ($walletName -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$' -and -not $walletName.EndsWith('.')) { break }
+            Write-Host "  An account name has 1 to 32 letters, digits, '.', '_' or '-'."
+            if ($Defaults) { break }
+        }
+        if (Test-Path -LiteralPath (Join-Path $accDir "$walletName.json")) {
+            Write-Host "   The wallet has an account named $walletName already: nothing will be created."
+            $wallet = 'no'
+        } elseif ($wallet -eq 'import') {
+            $walletFile = Ask-Text '   File holding the key (Enter: paste or type it when the wallet asks)' ''
+            if ($walletFile -and -not (Test-Path -LiteralPath $walletFile -PathType Leaf)) {
+                Write-Host "   $walletFile is not a file: the wallet will ask for the key."
+                $walletFile = ''
+            }
+        }
+    }
+    Write-Host ''
+}
+
+# 7. the token cache: the node's API lists the tokens of every wallet ([api] tokens_cache)
+$curTokens = Current 'api' 'tokens_cache'
+$tokensDefault = if ($curTokens -eq 'true') { 'yes' } else { 'no' }
+Write-Host '7. Token cache'
+Write-Host "   With it, the node's API lists every token a wallet holds, and the wallet shows them all."
+Write-Host "   Without it, the wallet finds an account's tokens in its own history (it may miss some)."
+Write-Host '   Cost: at its first start with the cache, the node looks for tokens among all deployed contracts'
+Write-Host '   and their transactions (it takes a while), then reads token balances in the background after'
+Write-Host '   each token call. A pruned node, or one started from a snapshot, knows only the tokens and'
+Write-Host '   holders whose transactions are in the blocks it holds: older ones can be missing.'
+$tokens = Ask '   Keep a token cache? (yes/no)' $tokensDefault @('yes', 'no')
+Write-Host ''
+
+# 8. start now
+$start = Ask '8. Start the node when the set-up is done? (yes/no)' 'yes' @('yes', 'no')
 Write-Host ''
 
 Write-Host 'Summary'
@@ -298,6 +365,12 @@ if ($executorChoice -ne 'none') {
         'manual'   { Write-Host "  executor:     $executorChoice, to copy by hand (see below)" }
     }
 }
+switch ($wallet) {
+    'create' { Write-Host "  wallet:       create the account $walletName" }
+    'import' { Write-Host ("  wallet:       import the account $walletName" + $(if ($walletFile) { " from $walletFile" } else { '' })) }
+    'no'     { Write-Host '  wallet:       no account now' }
+}
+Write-Host "  token cache:  $tokens"
 Write-Host "  start now:    $start"
 if (-not $Defaults) {
     if ((Ask 'Write config.ini? (yes/no)' 'yes' @('yes', 'no')) -ne 'yes') { Write-Host 'Nothing changed.'; exit 0 }
@@ -401,6 +474,13 @@ if ($executorChoice -ne 'none') {
     $executorNotes.Add('Copy node.exe, contract-executor.jar and sc-api-support.jar together, then run the set-up again.')
 }
 
+# the token cache
+if ($tokens -eq 'yes' -and $curTokens -ne 'true') {
+    Set-ApiKey $out 'tokens_cache' 'true'; $executorNotes.Add('config.ini: tokens_cache=true')
+} elseif ($tokens -eq 'no' -and $curTokens -and $curTokens -ne 'false') {
+    Set-ApiKey $out 'tokens_cache' 'false'; $executorNotes.Add('config.ini: tokens_cache=false')
+}
+
 # ASCII without a byte-order mark, as the package ships it
 [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot $config), $out, (New-Object System.Text.ASCIIEncoding))
 Write-Host "config.ini written; the previous one is $backup"
@@ -413,6 +493,73 @@ if ($first -eq 'github') {
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'The download did not finish. Run setup.bat again, or start the node: it can get the snapshot from other nodes.'
         exit 1
+    }
+}
+
+# the wallet: its profile of this node (wallet.toml), then the account
+if ($wallet -ne 'none') {
+    $apiPort = Current 'api' 'port'
+    if (-not $apiPort) { $apiPort = '9090' }
+    $diagPort = Current 'api' 'diag_port'
+    # the diag port tells the wallet the node's network; the set-up never turns it on (the node
+    # listens on it on every interface): without it the profile decides alone
+    $diag = if ($diagPort -and $diagPort -ne '0') { "127.0.0.1:$diagPort" } else { 'off' }
+    # this package runs mainnet; a network declared in an earlier wallet.toml, and the settings
+    # added there by hand, are kept
+    $walletNetwork = 'mainnet'
+    $kept = @()
+    if (Test-Path 'wallet.toml') {
+        foreach ($l in @(Get-Content -LiteralPath 'wallet.toml')) {
+            if ($l -match '^network *= *"(testnet|private)"') { $walletNetwork = $Matches[1] }
+            if ($l -match '^(history_node|network_uuid|require_network_uuid) *=') { $kept += $l }
+        }
+    }
+    $toml = New-Object System.Collections.Generic.List[string]
+    $toml.Add("# written by setup.bat on $(Get-Date -Format 'yyyy-MM-dd HH:mm'): the wallet profile of the node in this folder")
+    $toml.Add('# (credits-wallet.exe --config wallet.toml; see wallet-guide.md, section 4)')
+    $toml.Add('node = "local"')
+    $toml.Add('')
+    $toml.Add('[nodes.local]')
+    $toml.Add("address = `"127.0.0.1:$apiPort`"")
+    $toml.Add("network = `"$walletNetwork`"")
+    $toml.Add("diag = `"$diag`"")
+    foreach ($l in $kept) { $toml.Add($l) }
+    [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot 'wallet.toml'), $toml, (New-Object System.Text.ASCIIEncoding))
+    Write-Host ''
+    Write-Host "wallet.toml written: node 127.0.0.1:$apiPort, $walletNetwork, diag port $diag"
+    if ($apiPort -eq '0') { Write-Host "The node's API is off ([api] port=0): the wallet needs it. Set port=9090 in config.ini." }
+    if ($wallet -ne 'no') {
+        $homeConfig = Join-Path $walletHome 'config.toml'
+        if (-not (Test-Path -LiteralPath $homeConfig)) {
+            New-Item -ItemType Directory -Force -Path $walletHome | Out-Null
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'wallet.toml') -Destination $homeConfig
+            Write-Host "It is the wallet's configuration too: $homeConfig."
+        } elseif ((Get-Content -LiteralPath $homeConfig -Raw) -ne (Get-Content -LiteralPath 'wallet.toml' -Raw)) {
+            Write-Host "$homeConfig is kept; this node's profile: credits-wallet.exe --config wallet.toml"
+        }
+        if ($wallet -eq 'create') {
+            $walletArgs = @('--config', 'wallet.toml', 'account', 'new', $walletName)
+        } else {
+            $walletArgs = @('--config', 'wallet.toml', 'account', 'import', $walletName)
+            if ($walletFile) { $walletArgs += $walletFile }
+        }
+        $walletCmd = 'credits-wallet.exe ' + (($walletArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
+        if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+            Write-Host ''
+            if ($wallet -eq 'create') {
+                Write-Host 'The wallet now shows the 24-word recovery phrase of the new account ONCE. Write it on paper:'
+                Write-Host 'anyone who has it owns the account, and nobody can recover the account without it.'
+            }
+            & $walletBin @walletArgs
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Open the wallet with: cd `"$PSScriptRoot`" ; credits-wallet.exe"
+            } else {
+                Write-Host "The wallet did not finish; run it again later: cd `"$PSScriptRoot`" ; $walletCmd"
+            }
+        } else {
+            Write-Host 'Creating or importing an account needs a terminal: run it in one with'
+            Write-Host "  cd `"$PSScriptRoot`" ; $walletCmd"
+        }
     }
 }
 

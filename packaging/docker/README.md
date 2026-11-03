@@ -21,12 +21,29 @@ The node also serves its own snapshots to its neighbours (`CREDITS_SERVE_SNAPSHO
 | `keys/` | The node's identity. **Back it up.** The keys never go into `.env`, the logs or a snapshot. |
 | `db/`, `caches/`, `qs/`, `*.dat` | Blocks, caches and checkpoints. |
 | `log/` | Node logs (10 × 50 MB) and executor logs (kept 7 days). |
+| `wallet/` | The wallet's key files (encrypted), configuration and lists. **Back it up**, with the 24-word phrases on paper. |
 | `snapshot.json`, `snapshot.verified` | The snapshot this node started from, and its digest check at the first start. |
 | `snapshot.mismatch` | The restored state did not match the snapshot: the node does not start until it is removed (set `CREDITS_RESET=1` once to start over). |
 | `snapshot/` | The snapshots this node builds and serves to its neighbours. |
 | `snapshot-download/` | A download in progress; the next first start resumes it. |
 
 The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid.
+
+## The wallet
+
+The image has the terminal wallet, `credits-wallet`, on the `PATH`. Its keys and configuration go
+to `/data/wallet` (`~/.credits/wallet` on the host): back that folder up with `keys/`. The wallet
+talks to the node's API, so set `CREDITS_API=on`; `CREDITS_TOKENS_CACHE=on` lets it list every
+token an account holds (both are written to `config.ini` on the first start only: later, edit
+`port` and `tokens_cache` in its `[api]` section). Then:
+
+```sh
+docker compose exec node credits-wallet            # the terminal interface
+docker compose exec node credits-wallet status
+```
+
+On mainnet every transfer is real. The user guide is `/opt/credits/wallet-guide.md` in the image,
+and [docs/guide.md](https://github.com/CreditsCommunity/wallet/blob/main/docs/guide.md) of the wallet.
 
 ## Changing the storage
 

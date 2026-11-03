@@ -12,7 +12,11 @@ RUN apt-get update \
     && mkdir -p /data && chown credits:credits /data
 
 COPY package/ /opt/credits/
-RUN mv /opt/credits/config.ini /opt/credits/config.ini.template
+# the terminal wallet on the PATH (docker exec -it <container> credits-wallet), its keys and
+# configuration on the volume, so that they outlive the container
+RUN mv /opt/credits/config.ini /opt/credits/config.ini.template \
+    && ln -s /opt/credits/credits-wallet /usr/local/bin/credits-wallet
+ENV CREDITS_WALLET_HOME=/data/wallet
 COPY docker/entrypoint.sh docker/keygen.py docker/healthcheck.sh docker/snapshot-restore.sh /opt/credits/
 
 USER credits

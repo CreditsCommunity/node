@@ -60,6 +60,28 @@ Indicative requirements:
 
 See [docs/storage.md](docs/storage.md) for the storage options.
 
+## The wallet
+From release community.17 on, every package and the Docker image ship
+[credits-wallet](https://github.com/CreditsCommunity/wallet), a terminal wallet that runs next to the
+node: keys kept on the machine (encrypted), transfers, delegations, tokens, history and smart
+contracts, signed in the wallet and sent through the node's API. It opens no port.
+
+- In the package: `csnode/credits-wallet` (`credits-wallet.exe` on Windows), with its user guide
+  `wallet-guide.md` (in Italian `wallet-guide.it.md`). In Docker: `credits-wallet` on the `PATH`, its
+  data in `/data/wallet` (set `CREDITS_API=on`; see [packaging/docker/README.md](packaging/docker/README.md)).
+- The guided set-up asks whether to create or import an account and writes `wallet.toml`, the
+  wallet profile of the node it configured (its API port, its diag port, mainnet). It also offers the
+  token cache (`[api] tokens_cache=true`, [docs/tokens.md](docs/tokens.md)), with which the wallet
+  lists every token an account holds.
+- The wallet asks the node's diagnostic API (`[api] diag_port`, 9088) which network it is on, and
+  refuses to send when that contradicts its profile. The node listens on that port, as on the API
+  port, on every interface: keep 9088 and 9090 closed to other hosts. The set-up never turns the diag
+  port on: with `diag_port=0` the wallet works without that confirmation.
+- The package ships the wallet release named in [packaging/wallet-tag](packaging/wallet-tag),
+  downloaded from its public release and checked against its `SHA256SUMS`
+  ([packaging/fetch-wallet.sh](packaging/fetch-wallet.sh)). A node release ships a final wallet
+  release: tag the wallet first, then bump `packaging/wallet-tag`, then release the node.
+
 ## Building from source
 The builds that CI runs on every change are the reference:
 [build.yml](.github/workflows/build.yml) (Linux) and

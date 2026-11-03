@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Guided set-up of the node in this folder: storage (pruned or full), database, how the first start
 # gets the chain, whether a full node fetches the older blocks in the background (backfill), whether
-# to share snapshots, which contract executor to run. Writes the [snapshot]
-# and [storage] sections of config.ini and the executor builds it accepts (the previous file is
-# kept as config.ini.bak-<date>), can replace the executor jars, and can start the node.
+# to share snapshots, which contract executor to run, a wallet account, the token cache. Writes the
+# [snapshot] and [storage] sections of config.ini, the executor builds it accepts and tokens_cache
+# (the previous file is kept as config.ini.bak-<date>), can replace the executor jars, writes
+# wallet.toml (the wallet profile of this node), can create or import a wallet account with
+# credits-wallet, and can start the node.
 #
 #   ./setup.sh            asks, showing each default: Enter keeps it
 #   ./setup.sh --defaults takes every default without asking
@@ -44,6 +46,20 @@ ask() {
         done
         echo "  Please answer one of: $*"
     done
+}
+
+# ask_text "question" default -> sets $answer to the reply, trimmed (the default for an empty one)
+ask_text() {
+    local question=$1 default=$2 reply
+    if [ "$defaults" = yes ]; then
+        answer=$default
+        echo "$question [$default]: $default"
+        return
+    fi
+    printf '%s [%s]: ' "$question" "$default"
+    read -r reply || reply=
+    reply=$(printf '%s' "$reply" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    answer=${reply:-$default}
 }
 
 # the backend of an existing database (as the node recognises it), empty when there is none
@@ -311,8 +327,65 @@ if [ -n "$(current api executor_command)" ]; then
     echo
 fi
 
-# 6. start now
-ask "6. Start the node when the set-up is done? (yes/no)" yes yes no
+# 6. the wallet (the package's credits-wallet): an account now, with a profile for this node
+wallet_bin=./credits-wallet
+wallet=none
+wallet_name=
+wallet_file=
+wallet_home=${CREDITS_WALLET_HOME:-$HOME/.credits-wallet}
+if [ -x "$wallet_bin" ]; then
+    echo "6. Wallet"
+    echo "   credits-wallet, in this folder, is a terminal wallet: it keeps your keys on this machine,"
+    echo "   encrypted, and sends through this node. The user guide is wallet-guide.md."
+    if [ -d "$wallet_home/accounts" ] && [ -n "$(ls "$wallet_home/accounts" 2>/dev/null)" ]; then
+        echo "   The wallet in $wallet_home has accounts already."
+    fi
+    echo "   create: a new account: you write its 24-word recovery phrase on paper (in this terminal)."
+    echo "   import: a key you have: the node's NodePrivate.txt, a 24-word phrase, or the keys JSON of"
+    echo "           the official wallet."
+    echo "   no:     not now (later: ./credits-wallet)."
+    ask "   Create a wallet account now? (no/create/import)" no no create import
+    wallet=$answer
+    if [ "$wallet" != no ]; then
+        while :; do
+            ask_text "   Account name" main
+            printf '%s' "$answer" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$' && [ "${answer%.}" = "$answer" ] && break
+            echo "  An account name has 1 to 32 letters, digits, '.', '_' or '-'."
+            [ "$defaults" = no ] || break
+        done
+        wallet_name=$answer
+        if [ -e "$wallet_home/accounts/$wallet_name.json" ]; then
+            echo "   The wallet has an account named $wallet_name already: nothing will be created."
+            wallet=no
+        elif [ "$wallet" = import ]; then
+            ask_text "   File holding the key (Enter: paste or type it when the wallet asks)" ""
+            wallet_file=$answer
+            if [ -n "$wallet_file" ] && [ ! -f "$wallet_file" ]; then
+                echo "   $wallet_file is not a file: the wallet will ask for the key."
+                wallet_file=
+            fi
+        fi
+    fi
+    echo
+fi
+
+# 7. the token cache: the node's API lists the tokens of every wallet ([api] tokens_cache)
+cur_tokens=$(current api tokens_cache)
+tokens_default=no
+[ "$cur_tokens" != true ] || tokens_default=yes
+echo "7. Token cache"
+echo "   With it, the node's API lists every token a wallet holds, and the wallet shows them all."
+echo "   Without it, the wallet finds an account's tokens in its own history (it may miss some)."
+echo "   Cost: at its first start with the cache, the node looks for tokens among all deployed contracts"
+echo "   and their transactions (it takes a while), then reads token balances in the background after"
+echo "   each token call. A pruned node, or one started from a snapshot, knows only the tokens and"
+echo "   holders whose transactions are in the blocks it holds: older ones can be missing."
+ask "   Keep a token cache? (yes/no)" "$tokens_default" yes no
+tokens=$answer
+echo
+
+# 8. start now
+ask "8. Start the node when the set-up is done? (yes/no)" yes yes no
 start=$answer
 echo
 
@@ -334,6 +407,12 @@ case "$executor_choice/$executor_action" in
     */restore)         echo "  executor:     official, the jars set aside before are put back" ;;
     */manual)          echo "  executor:     $executor_choice, to copy by hand (see below)" ;;
 esac
+case "$wallet" in
+    create) echo "  wallet:       create the account $wallet_name" ;;
+    import) echo "  wallet:       import the account $wallet_name${wallet_file:+ from $wallet_file}" ;;
+    no)     echo "  wallet:       no account now" ;;
+esac
+echo "  token cache:  $tokens"
 echo "  start now:    $start"
 if [ "$defaults" = no ]; then
     ask "Write config.ini? (yes/no)" yes yes no
@@ -378,6 +457,13 @@ awk '
 } >> "$tmp"
 mv "$tmp" "$config"
 echo "config.ini written; the previous one is $backup"
+if [ "$tokens" = yes ] && [ "$cur_tokens" != true ]; then
+    set_api_key tokens_cache true
+    echo "config.ini: tokens_cache=true"
+elif [ "$tokens" = no ] && [ -n "$cur_tokens" ] && [ "$cur_tokens" != false ]; then
+    set_api_key tokens_cache false
+    echo "config.ini: tokens_cache=false"
+fi
 
 # the executor: put the chosen jars in place, then make config.ini accept their build
 if [ "$executor_choice" != none ]; then
@@ -444,6 +530,75 @@ if [ "$first" = github ]; then
     if ! "$node" --config-file "$config" --download-snapshot; then
         echo "The download did not finish. Run ./setup.sh again, or start the node: it can get the snapshot from other nodes."
         exit 1
+    fi
+fi
+
+# the wallet: its profile of this node (wallet.toml), then the account
+if [ "$wallet" != none ]; then
+    api_port=$(current api port)
+    [ -n "$api_port" ] || api_port=9090
+    diag_port=$(current api diag_port)
+    # the diag port tells the wallet the node's network; the set-up never turns it on (the node
+    # listens on it on every interface): without it the profile decides alone
+    diag=off
+    [ -z "$diag_port" ] || [ "$diag_port" = 0 ] || diag="127.0.0.1:$diag_port"
+    # this package runs mainnet; a network declared in an earlier wallet.toml, and the settings
+    # added there by hand, are kept
+    wallet_network=mainnet
+    kept=
+    if [ -f wallet.toml ]; then
+        n=$(grep -E '^network *= *"(testnet|private)"' wallet.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        [ -z "$n" ] || wallet_network=$n
+        kept=$(grep -E '^(history_node|network_uuid|require_network_uuid) *=' wallet.toml || true)
+    fi
+    {
+        echo "# written by setup.sh on $(date '+%Y-%m-%d %H:%M'): the wallet profile of the node in this folder"
+        echo "# (./credits-wallet --config wallet.toml; see wallet-guide.md, section 4)"
+        echo 'node = "local"'
+        echo
+        echo '[nodes.local]'
+        echo "address = \"127.0.0.1:$api_port\""
+        echo "network = \"$wallet_network\""
+        echo "diag = \"$diag\""
+        [ -z "$kept" ] || echo "$kept"
+    } > wallet.toml
+    echo
+    echo "wallet.toml written: node 127.0.0.1:$api_port, $wallet_network, diag port $diag"
+    if [ "$api_port" = 0 ]; then
+        echo "The node's API is off ([api] port=0): the wallet needs it. Set port=9090 in config.ini."
+    fi
+    if [ "$wallet" != no ]; then
+        if [ ! -f "$wallet_home/config.toml" ]; then
+            mkdir -p "$wallet_home" && chmod 700 "$wallet_home"
+            cp wallet.toml "$wallet_home/config.toml" && chmod 600 "$wallet_home/config.toml"
+            echo "It is the wallet's configuration too: $wallet_home/config.toml."
+        elif ! cmp -s wallet.toml "$wallet_home/config.toml"; then
+            echo "$wallet_home/config.toml is kept; this node's profile: ./credits-wallet --config wallet.toml"
+        fi
+        if [ "$wallet" = create ]; then
+            set -- --config wallet.toml account new "$wallet_name"
+        else
+            set -- --config wallet.toml account import "$wallet_name"
+            [ -z "$wallet_file" ] || set -- "$@" "$wallet_file"
+        fi
+        wallet_cmd="$wallet_bin --config wallet.toml account $wallet $wallet_name"
+        [ -z "$wallet_file" ] || wallet_cmd="$wallet_cmd '$wallet_file'"
+        [ "$wallet" != create ] || wallet_cmd="$wallet_bin --config wallet.toml account new $wallet_name"
+        if [ -t 0 ] && [ -t 1 ]; then
+            echo
+            if [ "$wallet" = create ]; then
+                echo "The wallet now shows the 24-word recovery phrase of the new account ONCE. Write it on paper:"
+                echo "anyone who has it owns the account, and nobody can recover the account without it."
+            fi
+            if "$wallet_bin" "$@"; then
+                echo "Open the wallet with: cd \"$(pwd)\" && $wallet_bin"
+            else
+                echo "The wallet did not finish; run it again later: cd \"$(pwd)\" && $wallet_cmd"
+            fi
+        else
+            echo "Creating or importing an account needs a terminal: run it in one with"
+            echo "  cd \"$(pwd)\" && $wallet_cmd"
+        fi
     fi
 fi
 

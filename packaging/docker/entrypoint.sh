@@ -28,6 +28,7 @@ SERVE=${CREDITS_SERVE_SNAPSHOT:-on}
 MIN_SOURCES=${CREDITS_SNAPSHOT_MIN_SOURCES:-}
 P2P_PORT=${CREDITS_P2P_PORT:-9510}
 API=${CREDITS_API:-off}
+TOKENS_CACHE=${CREDITS_TOKENS_CACHE:-off}
 EXECUTOR=${CREDITS_EXECUTOR:-on}
 RESET=${CREDITS_RESET:-0}
 BACKFILL=${CREDITS_BACKFILL:-on}
@@ -43,7 +44,7 @@ refuse() {
 }
 case "$BACKEND" in berkeleydb|lmdb|rocksdb) ;; *) log "CREDITS_DB_BACKEND must be berkeleydb, lmdb or rocksdb"; exit 2 ;; esac
 case "$SNAPSHOT" in github|p2p|off) ;; *) log "CREDITS_SNAPSHOT must be github, p2p or off"; exit 2 ;; esac
-for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL"; do case "$v" in on|off) ;; *) log "CREDITS_API, CREDITS_EXECUTOR, CREDITS_SERVE_SNAPSHOT and CREDITS_BACKFILL must be on or off"; exit 2 ;; esac; done
+for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL" "$TOKENS_CACHE"; do case "$v" in on|off) ;; *) log "CREDITS_API, CREDITS_EXECUTOR, CREDITS_SERVE_SNAPSHOT, CREDITS_BACKFILL and CREDITS_TOKENS_CACHE must be on or off"; exit 2 ;; esac; done
 [ -z "$MIN_SOURCES" ] || [[ "$MIN_SOURCES" =~ ^[0-9]+$ ]] || { log "CREDITS_SNAPSHOT_MIN_SOURCES must be a number"; exit 2; }
 [[ "$P2P_PORT" =~ ^[0-9]+$ ]] || { log "CREDITS_P2P_PORT must be a number"; exit 2; }
 
@@ -65,11 +66,15 @@ write_config() {
         apiexec=9070
         command="$OPT/ojdkbuild/java-11-openjdk-11.0.4/bin/java -Xmx768m -XX:MaxMetaspaceSize=256m -jar $OPT/contract-executor.jar"
     fi
-    awk -v p2p="$P2P_PORT" -v api="$api_port" -v apiexec="$apiexec" -v cmd="$command" '
+    # tokens_cache: the API's token methods (the wallet lists every token held), CREDITS_TOKENS_CACHE
+    local tokens=""
+    [ "$TOKENS_CACHE" = off ] || tokens=true
+    awk -v p2p="$P2P_PORT" -v api="$api_port" -v apiexec="$apiexec" -v cmd="$command" -v tokens="$tokens" '
         /^\[/ { section = $0 }
         section == "[storage]" || section == "[snapshot]" { next }
         section == "[host_input]" && /^port=/ { print "port=" p2p; next }
-        section == "[api]" && /^port=/ { print "port=" api; next }
+        section == "[api]" && /^tokens_cache=/ { next }
+        section == "[api]" && /^port=/ { print "port=" api; if (tokens != "") print "tokens_cache=" tokens; next }
         section == "[api]" && /^apiexec_port=/ { print "apiexec_port=" apiexec; next }
         section == "[api]" && /^executor_command=/ { print "executor_command=" cmd; next }
         section == "[api]" && /^executor_multi_instance=/ { print "executor_multi_instance=true"; next }
@@ -90,7 +95,7 @@ write_config() {
         [ "$BACKFILL" = on ] || printf 'backfill=off\n' >> config.ini.new
     fi
     mv config.ini.new config.ini
-    log "config.ini written: $STORAGE storage on $BACKEND, p2p port $P2P_PORT, API $API, executor $EXECUTOR, snapshots: serve $SERVE, fetch $fetch"
+    log "config.ini written: $STORAGE storage on $BACKEND, p2p port $P2P_PORT, API $API, executor $EXECUTOR, token cache $TOKENS_CACHE, snapshots: serve $SERVE, fetch $fetch"
 }
 
 # what config.ini asks for: "<pruned|full> <backend>"
