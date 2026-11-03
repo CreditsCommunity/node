@@ -1,0 +1,119 @@
+name: Sample API clients
+
+# Builds every example client of samples/clients and checks, offline, that each one signs a
+# transfer exactly as the node expects (samples/clients/testdata/check.sh: `sign` against the
+# expected bytes, `transfer` against a fake node). No job calls a real node.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'samples/**'
+      - '.github/workflows/samples.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  client:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Python, lang: python }
+          - { name: Go, lang: go }
+          - { name: Java, lang: java }
+          - { name: Rust, lang: rust }
+          - { name: 'C#', lang: csharp }
+          - { name: JavaScript, lang: javascript }
+    defaults:
+      run:
+        working-directory: samples/clients
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Thrift IDL
+        working-directory: .
+        run: git submodule update --init --depth 1 third-party/thrift-interface-definitions
+
+      - name: Thrift compiler 0.19.0 and the fake node's Python packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q thrift-compiler
+          thrift --version
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q -r python/requirements.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Python
+        if: matrix.lang == 'python'
+        run: |
+          python3 python/credits_client.py --help
+          testdata/check.sh python3 python/credits_client.py
+
+      - uses: actions/setup-go@v5
+        if: matrix.lang == 'go'
+        with:
+          go-version-file: samples/clients/go/go.mod
+          cache-dependency-path: samples/clients/go/go.sum
+      - name: Go
+        if: matrix.lang == 'go'
+        run: |
+          cd go
+          go generate
+          go vet .
+          test -z "$(gofmt -l main.go)"
+          go build -o credits-client .
+          cd ..
+          NODE_FLAG=-node testdata/check.sh go/credits-client
+
+      - uses: actions/setup-java@v4
+        if: matrix.lang == 'java'
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: samples/clients/java/pom.xml
+      - name: Java
+        if: matrix.lang == 'java'
+        run: |
+          mvn -B -q -f java/pom.xml package
+          testdata/check.sh java -jar java/target/credits-client.jar
+
+      - name: Rust
+        if: matrix.lang == 'rust'
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo --version
+          cargo build --release --locked --manifest-path rust/Cargo.toml
+          testdata/check.sh rust/target/release/credits-client
+
+      - uses: actions/setup-dotnet@v4
+        if: matrix.lang == 'csharp'
+        with:
+          dotnet-version: '8.0.x'
+      - name: 'C#'
+        if: matrix.lang == 'csharp'
+        run: |
+          dotnet build -c Release csharp/CreditsClient.csproj
+          testdata/check.sh dotnet csharp/bin/Release/net8.0/credits-client.dll
+
+      - uses: actions/setup-node@v4
+        if: matrix.lang == 'javascript'
+        with:
+          node-version: '20'
+      - name: JavaScript
+        if: matrix.lang == 'javascript'
+        run: |
+          (cd javascript && npm ci --no-audit --no-fund)
+          testdata/check.sh node javascript/credits-client.js

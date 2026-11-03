@@ -109,7 +109,6 @@ option(ENABLE_TESTS "Enable tests" OFF)
 # Test-network builds only: genesis and starter keys come from CS_TESTNET_GENESIS_KEY /
 # CS_TESTNET_STARTER_KEY. Never enable for binaries meant for mainnet.
 option(CREDITS_TESTNET "Build for a private test network" OFF)
-option(SKIP_SAMPLES "Skip samples" ON)
 option(WITH_BOOST_STATIC "" ON)
 option(BUILD_TESTING "" OFF)
 option(BUILD_TUTORIALS "" OFF)
@@ -237,10 +236,6 @@ add_subdirectory(csdb)
 add_subdirectory(solver)
 add_subdirectory(client)
 add_subdirectory(lmdbxx)
-
-if(NOT ${SKIP_SAMPLES})
-    add_subdirectory(samples)
-endif()
 
 if (${ENABLE_TESTS})
     enable_testing()

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>credits-client</AssemblyName>
+    <RootNamespace>CreditsClient</RootNamespace>
+    <!-- the Thrift compiler (0.19.0, as the ApacheThrift package) and the node's IDL -->
+    <Thrift Condition="'$(Thrift)' == ''">thrift</Thrift>
+    <CreditsIdl Condition="'$(CreditsIdl)' == ''">$(MSBuildProjectDirectory)/../../../third-party/thrift-interface-definitions</CreditsIdl>
+    <ThriftOut>$(BaseIntermediateOutputPath)thrift</ThriftOut>
+    <NoWarn>$(NoWarn);CS0618;CS8981</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ApacheThrift" Version="0.19.0" />
+    <!-- ed25519: .NET has none built in -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+  </ItemGroup>
+
+  <!-- generate the Thrift classes from the IDL before compiling. The IDL declares no netstd
+       namespace, and api and general in one namespace clash (both define the same DeepCopy
+       extensions): copies of the two files get "namespace netstd" lines first. -->
+  <Target Name="ThriftGenerate" BeforeTargets="CoreCompile">
+    <RemoveDir Directories="$(ThriftOut)" />
+    <MakeDir Directories="$(ThriftOut)/idl;$(ThriftOut)/cs" />
+    <WriteLinesToFile File="$(ThriftOut)/idl/general.thrift" Overwrite="true"
+                      Lines="namespace netstd Credits.General;$([MSBuild]::Escape($([System.IO.File]::ReadAllText('$(CreditsIdl)/general.thrift'))))" />
+    <WriteLinesToFile File="$(ThriftOut)/idl/api.thrift" Overwrite="true"
+                      Lines="namespace netstd Credits.Api;$([MSBuild]::Escape($([System.IO.File]::ReadAllText('$(CreditsIdl)/api.thrift'))))" />
+    <Exec Command="&quot;$(Thrift)&quot; -r --gen netstd -out &quot;$(ThriftOut)/cs&quot; &quot;$(ThriftOut)/idl/api.thrift&quot;" />
+    <ItemGroup>
+      <Compile Include="$(ThriftOut)/cs/**/*.cs" />
+    </ItemGroup>
+  </Target>
+
+</Project>
