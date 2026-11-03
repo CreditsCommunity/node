@@ -40,7 +40,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #157 | client: at start the console and the log show a banner, the CREDITS logo with "community" under it, the release from `VERSION`, the protocol, the build commit, the storage, snapshot serving and the backfill; `[params] banner=off` keeps the text lines only (the start used to log nothing about the version) |
 
 ## community.16 — 2026-11-03
 

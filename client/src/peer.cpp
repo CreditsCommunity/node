@@ -5,6 +5,8 @@
 #include <net/transport.hpp>
 #include <csnode/configholder.hpp>
 #include <cmdlineargs.hpp>
+#include <banner.hpp>
+#include <version.hpp>
 
 #ifdef WIN32
 #include <csignal>
@@ -108,6 +110,20 @@ bool Peer::onInit(const char*) {
 #endif
 
     logger::initialize(config_.getLoggerSettings());
+    {
+        // which node wrote this log: the community release, its build and the main settings
+        cs::BannerInfo info;
+        info.version = cs::packageVersion(Config::getNodeVersion(), Config::getMinorNodeVersion());
+        info.protocol = Config::getNodeVersion();
+        info.build = client::Version::GIT_SHA1;
+        info.pruned = config_.getStorageSettings().pruneKeepBlocks > 0;
+        info.backend = config_.getStorageSettings().dbBackend;
+        info.serve = config_.getSnapshotSettings().serve;
+        info.backfill = config_.getStorageSettings().backfill;
+        for (const auto& line : cs::startupBanner(info, config_.startupBanner())) {
+            cslog() << line;
+        }
+    }
     observer_ = std::make_unique<config::Observer>(config_, vm_);
     cs::ConfigHolder::instance().setConfig(config_);
     cs::Connector::connect(

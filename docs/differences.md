@@ -107,6 +107,12 @@ rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md
 
 ## Start-up behaviour
 
+- **A banner names the release.** At start the console and the log show the CREDITS logo with
+  "community" under it, then the release (`4.2.532-community.N` from the `VERSION` file), the
+  protocol, the build commit, the storage (pruned or full, database), whether snapshots are served,
+  and for a full node whether it backfills. `[params] banner=off` keeps the text lines only, for
+  log collectors.
+
 - **Database check.** Before opening the block database, the node looks at `db/`. It writes the
   backend's name in `db/.backend`, and holds `db/.lock` so that two node processes cannot use the
   same folder. It stops with exit code 3, changing nothing, in these cases:
