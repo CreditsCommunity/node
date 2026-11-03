@@ -21,16 +21,11 @@ endif()
 
 option(LEVELDB_BUILD_TESTS "" OFF)
 option(LEVELDB_AUTORUN_TESTS "" OFF)
-option(DBSQL "Enable PostgeSQL server connection" OFF)
 
 # The node binary always carries both DB backends; runtime selection is via
 # config.ini `db_backend` (berkeleydb default, rocksdb opt-in).
 set(CSDB_BACKEND "both" CACHE INTERNAL "csdb storage backend (locked to 'both')")
 message(STATUS "csdb backend: both (locked)")
-
-IF(DBSQL)
-    ADD_DEFINITIONS(-DDBSQL)
-ENDIF(DBSQL)
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -235,9 +230,6 @@ add_subdirectory(third-party)
 add_subdirectory(api)
 add_subdirectory(lib)
 add_subdirectory(net)
-if(DBSQL)
-  add_subdirectory(dbsql)
-endif()
 add_subdirectory(p2p)
 add_subdirectory(csnode)
 add_subdirectory(cscrypto)
@@ -252,6 +244,5 @@ endif()
 
 if (${ENABLE_TESTS})
     enable_testing()
-    add_subdirectory(benchmark)
     add_subdirectory(tests)
 endif()
