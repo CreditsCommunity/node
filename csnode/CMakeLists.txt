@@ -153,9 +153,6 @@ else()
 endif()
 
 target_link_libraries (csnode net csdb solver lib csconnector cscrypto base58 lz4 lmdbxx config ${Boost_LIBRARIES} ${FSLIBRARY})
-if(DBSQL)
-target_link_libraries (csnode dbsql)
-endif()
 
 target_include_directories(${PROJECT_NAME} PUBLIC
                                          ${CMAKE_CURRENT_SOURCE_DIR}/include

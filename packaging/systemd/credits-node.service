@@ -1,0 +1,24 @@
+# systemd unit for a community node on Linux. Copy it to /etc/systemd/system/, set User= and the
+# csnode folder of the package in WorkingDirectory= and ExecStart=, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now credits-node
+#   journalctl -u credits-node -f        # the console output; the node's own log is in csnode/log/
+# The node stops cleanly on SIGTERM (it saves its checkpoint): give it time to do so.
+[Unit]
+Description=Credits community node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=credits
+WorkingDirectory=/opt/credits/csnode
+ExecStart=/opt/credits/csnode/node --db-path db --config-file config.ini
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=300
+KillSignal=SIGTERM
+LimitNOFILE=65536
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target

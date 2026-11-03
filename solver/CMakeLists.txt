@@ -7,9 +7,6 @@ configure_msvc_no_optimization()
 
 add_definitions(-D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
 
-# set next option to ON to create solver_tests project (also install googletest, not tested outside Windows platform yet)
-option(SLV2_BUILD_TESTS "Build unit tests" OFF)
-option(SLV2_AUTORUN_TESTS "Automatically run unit tests after build" OFF)
 
 add_library(${PROJECT_NAME} STATIC
     include/solver/consensus.hpp
@@ -79,6 +76,3 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)
 
 configure_msvc_flags()
 
-if(SLV2_BUILD_TESTS)
-    add_subdirectory(tests)
-endif()
