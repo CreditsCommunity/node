@@ -48,6 +48,7 @@ lines under the new release.
 | #160 | packaging: the Docker health check read the last written block from the older of the two newest log files after a log rotation, so a node at the head was reported unhealthy; it now reads the newest file last |
 | #161 | samples: smart-contract examples (`samples/contracts/`: Counter, the test token CTT, the payable TipJar, a Faucet that reads its own balance, with a README on writing, deploying and calling contracts, getters, fees and payable) and the commands `deploy`, `call`, `get` and `methods` in every sample client (arguments in the declared types), checked offline against the fake node (`samples.yml`); ci: `testnet.yml` input `sample_contracts` deploys and calls the examples with the Python and Java clients on the private network and checks the token API (`ci/testnet/sample_contracts.sh`) |
 | #163 | ci: the testnet script stops at the start when a pruned node is in the run and `TARGET_SEQ` is below 2100: a pruned node prunes first at the checkpoint of block 2000, so a lower target only failed after the whole run with "never pruned its storage" |
+| #164 | api: `ContractAllMethodsGet` now returns the annotations the executor reports for each method and argument (`@Getter`, `@UsingContract`, `@ContractAddress`, `@ContractMethod`, in the IDL fields `MethodDescription.annotations` and `MethodArgument.annotations` that were always left empty), so a client can tell a getter; ci: `contracts.py` checks the `@Getter` methods of `samples/contracts/Counter.java` |
 
 ## community.16 — 2026-11-03
 
