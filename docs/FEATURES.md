@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.15 or earlier.
+Everything listed here is in release 4.2.532-community.16 or earlier.
 
 ## Storage
 
@@ -32,9 +32,10 @@ Everything listed here is in release 4.2.532-community.15 or earlier.
 - **A full node in minutes, the history in the background.** A full node on lmdb or rocksdb starts
   from the snapshot and then fetches the older blocks from its neighbours down to block 0, checking
   each against the hash chain and its signatures; the API serves every block and history as it
-  arrives. Consensus comes first: the backfill gets a bounded share of the processor thread, less
-  while the node is a confidant. A pruned node switched to full fetches what it pruned the same way.
-  [#122](https://github.com/CreditsCommunity/node/pull/122), [#123](https://github.com/CreditsCommunity/node/pull/123), [#125](https://github.com/CreditsCommunity/node/pull/125), [#129](https://github.com/CreditsCommunity/node/pull/129), [#130](https://github.com/CreditsCommunity/node/pull/130), [#133](https://github.com/CreditsCommunity/node/pull/133), [#140](https://github.com/CreditsCommunity/node/pull/140), [#145](https://github.com/CreditsCommunity/node/pull/145), [#146](https://github.com/CreditsCommunity/node/pull/146), [#147](https://github.com/CreditsCommunity/node/pull/147)
+  arrives. Consensus comes first: the signatures are checked on verifier threads and the storing
+  gets a bounded share of the processor thread, less while the node is a confidant (about 1,000
+  blocks/s on mainnet). A pruned node switched to full fetches what it pruned the same way.
+  [#122](https://github.com/CreditsCommunity/node/pull/122), [#123](https://github.com/CreditsCommunity/node/pull/123), [#125](https://github.com/CreditsCommunity/node/pull/125), [#129](https://github.com/CreditsCommunity/node/pull/129), [#130](https://github.com/CreditsCommunity/node/pull/130), [#133](https://github.com/CreditsCommunity/node/pull/133), [#140](https://github.com/CreditsCommunity/node/pull/140), [#145](https://github.com/CreditsCommunity/node/pull/145), [#146](https://github.com/CreditsCommunity/node/pull/146), [#147](https://github.com/CreditsCommunity/node/pull/147), [#148](https://github.com/CreditsCommunity/node/pull/148), [#151](https://github.com/CreditsCommunity/node/pull/151), [#152](https://github.com/CreditsCommunity/node/pull/152)
 
 ## Starting a node in minutes: snapshots
 
@@ -156,8 +157,9 @@ limits in the p2p layer (a fork of the p2p library), and two races in the cache 
 - **Drop-in upgrade.** An official node's folder upgrades to the community node and back.
   [#43](https://github.com/CreditsCommunity/node/pull/43), [#44](https://github.com/CreditsCommunity/node/pull/44)
 - **Guided set-up** in every package (`setup.sh`, `setup.bat`): pruned or full, database, how the
-  first start gets the chain, snapshot sharing and the contract executor.
-  [#131](https://github.com/CreditsCommunity/node/pull/131)
+  first start gets the chain, the history of a full node (backfill), snapshot sharing and the
+  contract executor.
+  [#131](https://github.com/CreditsCommunity/node/pull/131), [#154](https://github.com/CreditsCommunity/node/pull/154)
 
 ## Tested on every change
 

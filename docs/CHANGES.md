@@ -40,6 +40,10 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.16 — 2026-11-03
+
 | PR | Change |
 |---|---|
 | #151 | csnode: every backfill progress line (each 100,000 blocks) is followed by the average cost of a block per phase (verify, store, confirmations), the transactions per block and the share of the processor thread the backfill took |
@@ -47,6 +51,11 @@ lines under the new release.
 | #153 | docs: the README links the guided set-up (`packaging/setup/`, `csnode/setup.sh` / `setup.bat` in every package) |
 | #154 | packaging: the guided set-up knows the backfill: a full node on lmdb or rocksdb starts from a snapshot by default and is asked whether to fetch the older blocks in the background (`backfill=on/off`, kept when not asked, `backfill_*` keys set by hand kept); a pruned folder can switch to full and fetches the blocks it removed (the set-up used to say a full node from a snapshot holds only the snapshot's blocks and defaulted full nodes to a sync from block 0) |
 | #155 | the project moved to the GitHub organisation [CreditsCommunity](https://github.com/CreditsCommunity) (node, p2p, contract-executor, thrift-api-client; the old EnzinoBB addresses redirect): the default snapshot address, the p2p submodule, the workflows, the set-up's executor download, the packages' README and the Docker files use the new addresses; the Docker image is `ghcr.io/creditscommunity/credits-node`, and the release also pushes `ghcr.io/enzinobb/credits-node` for the nodes that still pull it |
+| — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 16; the first release from the CreditsCommunity organisation |
+
+Backfill (#151, #152). The signatures of the fetched blocks are checked on verifier threads: on the
+mainnet test node the backfill went from about 380 to about 980 blocks/s while the share of the
+processor thread it takes fell from 98 % to about 40 %. The guided set-up asks about it (#154).
 
 ## community.15 — 2026-11-01
 
