@@ -33,7 +33,15 @@ java -jar target/credits-client.jar tx u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq
 java -jar target/credits-client.jar sign ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5 7
 # SPENDS REAL CS ON MAINNET: try it on a test network or the fake node first
 java -jar target/credits-client.jar --node 127.0.0.1:19090 transfer ../testdata/test-key.txt u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w 12.5
+# smart contracts: deploy and call SPEND REAL CS ON MAINNET too; get and methods are free
+java -jar target/credits-client.jar --node 127.0.0.1:19090 deploy ../testdata/test-key.txt ../../contracts/Counter.java
+java -jar target/credits-client.jar --node 127.0.0.1:19090 call ../testdata/test-key.txt <contract> add 5
+java -jar target/credits-client.jar --node 127.0.0.1:19090 get <contract> isOpen
+java -jar target/credits-client.jar --node 127.0.0.1:19090 methods <contract>
 ```
+
+Contract arguments are given as text and converted to the type the method declares; see
+[../README.md](../README.md#smart-contracts). The contract address is blake2s from Bouncy Castle.
 
 `--node` defaults to `127.0.0.1:9090`. The generated packages are the IDL's:
 `com.credits.client.node.thrift.generated` (api) and `com.credits.general.thrift.generated`.

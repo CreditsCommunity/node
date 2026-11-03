@@ -22,7 +22,8 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 | Every change, pull request by pull request | [docs/CHANGES.md](docs/CHANGES.md) |
 | Block database, pruned storage, conversion | [docs/storage.md](docs/storage.md) |
 | Tokens, the token API and the token tests | [docs/tokens.md](docs/tokens.md) |
-| Example API clients (Go, Java, Rust, Python, C#, JavaScript): status, balance, blocks, transactions, a signed transfer | [samples/clients/](samples/clients/) |
+| Example API clients (Go, Java, Rust, Python, C#, JavaScript): status, balance, blocks, transactions, a signed transfer, deploying and calling contracts | [samples/clients/](samples/clients/) |
+| Smart contract examples (a counter, a test token, a payable tip jar, a faucet that reads its own balance): how they are written, deployed and called | [samples/contracts/](samples/contracts/) |
 | Docker (pruned node from a snapshot, or a full node from a snapshot that fetches the older blocks in the background) | [packaging/docker/README.md](packaging/docker/README.md) |
 | A full node from a snapshot without Docker (backward sync) | [docs/storage.md](docs/storage.md#a-full-node-from-a-snapshot) |
 | Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/CreditsCommunity/node/releases) |
