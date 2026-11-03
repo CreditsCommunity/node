@@ -1,6 +1,8 @@
 #!/bin/sh
 # Healthy while the last written block advances: fails when it has not changed for 10 minutes.
-seq=$(cat $(ls -t /data/log/log_*.txt 2>/dev/null | head -2) 2>/dev/null \
+# the two newest log files, the older first: with the newest first, a rotated log made the last line
+# come from the old file, a block of hours ago (unhealthy while the node was at the head)
+seq=$(cat $(ls -tr /data/log/log_*.txt 2>/dev/null | tail -2) 2>/dev/null \
       | grep -a 'Last written sequence = ' | tail -1 | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'")
 [ -n "$seq" ] || exit 0  # still starting
 state=/tmp/credits-health
