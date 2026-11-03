@@ -2,7 +2,10 @@ name: Sample API clients
 
 # Builds every example client of samples/clients and checks, offline, that each one signs a
 # transfer exactly as the node expects (samples/clients/testdata/check.sh: `sign` against the
-# expected bytes, `transfer` against a fake node). No job calls a real node.
+# expected bytes, `transfer` against a fake node), and that its contract commands (`deploy`, `call`,
+# `get`) derive the contract address, sign the invocation and type the arguments as a node expects
+# (the same fake node, CONTRACTS=1). No job calls a real node; the contract examples run on a
+# private network in testnet.yml (input sample_contracts).
 
 on:
   pull_request:
@@ -37,6 +40,8 @@ jobs:
     defaults:
       run:
         working-directory: samples/clients
+    env:
+      CONTRACTS: '1'
 
     steps:
       - name: Checkout
