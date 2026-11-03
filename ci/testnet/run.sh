@@ -89,7 +89,7 @@
 #        must keep running with its memory flat (Linux: at most +64 MiB per step) and stay in consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
-#        the restarted node, and end with the same state digest
+#        the restarted node, and end with the same state digest (any pruned node needs TARGET_SEQ >= 2100)
 #        NODE_STORAGE (optional): the storage of every node in order, comma separated, each
 #        <berkeleydb|lmdb|rocksdb>[:pruned] (pruned: a checkpoint every 1'000 blocks and every minute,
 #        prune_keep_blocks=300); the entry after the last initial node is the joining node's. It takes
@@ -395,6 +395,12 @@ fi
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
     if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
+# a pruned node prunes at a periodic checkpoint past checkpoint_every + prune_keep_blocks (1'300):
+# the first one is #2000, and the removal needs a few more blocks; a lower target can only fail
+if [ -n "${PRUNED_NODES// /}" ] && [ "$TARGET_SEQ" -lt 2100 ]; then
+    echo "pruned nodes (${PRUNED_NODES% }) prune from block 2000 on: TARGET_SEQ=$TARGET_SEQ must be at least 2100"
+    exit 1
+fi
 # the full nodes whose storage starts above block 0 and run this build: they backfill the older
 # blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
 # storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
