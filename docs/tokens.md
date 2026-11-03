@@ -76,6 +76,19 @@ mismatches are refused: with types other than `String`, `BigDecimal`, `boolean`,
   deployed contracts and their transactions. The log has `API: token cache is empty, looking for
   tokens among N contracts`, then `tokens loaded!`.
 
+- **Pruned nodes and snapshots.** The cache is complete only if it was on while the node read
+  every block. Pruning never touches it, and every checkpoint stores it (`tokens.dat`), so a node
+  that kept the cache from block 0 and pruned later keeps every holder; a snapshot carries the
+  `tokens.dat` of the node that built it. When the cache is turned on later, on a pruned node or
+  one started from a snapshot without tokens (the published snapshot is built without the cache),
+  the rebuild finds every token (the contract list and the deploys are in the checkpoint) and
+  the balances it reads are correct, but it learns holders only from the calls in the blocks the
+  node still stores: a wallet whose last use of a token is older is not a holder, and
+  `TokenBalancesGet` does not list the token for it until it uses the token again. The transfer
+  and transaction counters miss the same calls. For a complete token API (wallets, explorers), run
+  a full node with `tokens_cache=true` from the start. The community wallet then also looks for
+  tokens in the account's own history and lets the user add one by its address.
+
 ## Contract calls through the API after a restart
 
 `TransactionFlow` waits for the result of a contract call and returns its return value. A node

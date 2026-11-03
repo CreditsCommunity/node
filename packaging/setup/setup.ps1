@@ -337,8 +337,10 @@ Write-Host "   With it, the node's API lists every token a wallet holds, and the
 Write-Host "   Without it, the wallet finds an account's tokens in its own history (it may miss some)."
 Write-Host '   Cost: at its first start with the cache, the node looks for tokens among all deployed contracts'
 Write-Host '   and their transactions (it takes a while), then reads token balances in the background after'
-Write-Host '   each token call. A pruned node, or one started from a snapshot, knows only the tokens and'
-Write-Host '   holders whose transactions are in the blocks it holds: older ones can be missing.'
+Write-Host '   each token call. It is complete only if it was on while the node read every block: a pruned'
+Write-Host '   node, or one started from the published snapshot, lists every token with correct balances but'
+Write-Host '   may miss wallets whose last use of a token is older than its oldest block (the wallet then'
+Write-Host "   finds the token in the account's history, or you add it there)."
 $tokens = Ask '   Keep a token cache? (yes/no)' $tokensDefault @('yes', 'no')
 Write-Host ''
 

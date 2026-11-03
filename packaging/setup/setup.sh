@@ -378,8 +378,10 @@ echo "   With it, the node's API lists every token a wallet holds, and the walle
 echo "   Without it, the wallet finds an account's tokens in its own history (it may miss some)."
 echo "   Cost: at its first start with the cache, the node looks for tokens among all deployed contracts"
 echo "   and their transactions (it takes a while), then reads token balances in the background after"
-echo "   each token call. A pruned node, or one started from a snapshot, knows only the tokens and"
-echo "   holders whose transactions are in the blocks it holds: older ones can be missing."
+echo "   each token call. It is complete only if it was on while the node read every block: a pruned"
+echo "   node, or one started from the published snapshot, lists every token with correct balances but"
+echo "   may miss wallets whose last use of a token is older than its oldest block (the wallet then"
+echo "   finds the token in the account's history, or you add it there)."
 ask "   Keep a token cache? (yes/no)" "$tokens_default" yes no
 tokens=$answer
 echo
