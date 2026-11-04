@@ -262,8 +262,11 @@ consensus rules.
   version cannot be opened by older community nodes or by the official node until they read the
   new format (they stop with a crash when they try to open it), so to go back to one of them keep
   the plain key (or the seed phrase), or encrypt the plain key again with that node. An encrypted
-  file of any other length is refused before decryption (older versions crashed on one longer than
-  88 bytes), and a failed encryption no longer writes an empty key file.
+  file of any other length stops the node at once with `Bad private key file in ... (N bytes)`
+  (older versions asked for the password and crashed on one longer than 88 bytes). A failed
+  encryption no longer writes an empty key file, and the key file is replaced atomically
+  (`NodePrivate.txt.tmp`, flushed, then renamed over it): a crash or a full disk leaves the previous
+  file, and the log says the write failed instead of reporting success.
 
 ## Consensus fixes
 
