@@ -180,6 +180,12 @@ rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md
   as `qs/<sequence>/state_digest.bin`, and logs it (`STATE DIGEST #<sequence> ... checkpoint`). A
   quick start recomputes it from the loaded caches, logs `... checkpoint loaded`, and moves a
   checkpoint whose caches do not match it aside to `qs/<sequence>.bad`.
+- **Stage-3 diagnostics.** A trusted node logs at info level what it signed in stage 3 (sequence,
+  previous hash, timestamp, reward, a hash of the transactions and fees, the three signed hashes),
+  why a peer's stage 3 failed (another block/round hash, or a key/message mismatch), the
+  agree/disagree split among the confidants, and which keys a round package gray-lists, with
+  `OWN KEY` when this node is one of them. Logging only: see
+  [consensus-diagnostics.md](consensus-diagnostics.md) to tell from these lines which input differed.
 - **Stopping on errors.** Some errors that the official node can survive in an inconsistent
   state now stop the node, and are logged with `cserror`:
   - a block that cannot be stored;

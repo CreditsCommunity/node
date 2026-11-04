@@ -4171,7 +4171,7 @@ void Node::setCurrentRP(const cs::RoundPackage& rp) {
     currentRoundPackage_ = rp;
 }
 
-void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& /*sender*/, bool updateRound) {
+void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& sender, bool updateRound) {
     csdebug() << __func__;
 
     // got round package in any way, reset default round table flag
@@ -4182,10 +4182,28 @@ void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& 
     if (ptrRT != nullptr) {
         const cs::ConfidantsKeys& prevConfidants = ptrRT->confidants;
         if (!prevConfidants.empty() && realTrusted.size() == prevConfidants.size()) {
+            // diagnostics only: which previous confidants this package gray-lists, and whether we are one
+            std::string grayKeys;
+            size_t grayCount = 0;
+            bool ownKey = false;
             for (size_t i = 0; i < realTrusted.size(); ++i) {
                 if (realTrusted[i] == cs::ConfidantConsts::InvalidConfidantIndex) {
                     solver_->addToGraylist(prevConfidants[i], Consensus::GrayListPunishment);
+                    const cs::PublicKey& grayKey = prevConfidants[i];
+                    grayKeys += (grayCount ? " T" : "T") + std::to_string(i) + ':' + EncodeBase58(grayKey.data(), grayKey.data() + grayKey.size()).substr(0, 8);
+                    ++grayCount;
+                    if (grayKey == nodeIdKey_) {
+                        ownKey = true;
+                        grayKeys += "(OWN KEY)";
+                    }
                 }
+            }
+            if (grayCount > 0) {
+                cslog() << "NODE> round package R-" << rPackage.roundTable().round << " from "
+                    << EncodeBase58(sender.data(), sender.data() + sender.size()).substr(0, 8)
+                    << " gray-lists " << grayCount << " of " << prevConfidants.size() << " confidants of R-" << rPackage.roundTable().round - 1
+                    << " for " << Consensus::GrayListPunishment << " rounds: [" << grayKeys << "]"
+                    << (ownKey ? " - OWN KEY gray-listed" : "");
             }
         }
     }

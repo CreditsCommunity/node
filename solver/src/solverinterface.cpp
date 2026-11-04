@@ -10,8 +10,43 @@
 #include <csdb/currency.hpp>
 #include <lib/system/logger.hpp>
 
+#include <base58.h>
+
 #include <chrono>
 #include <algorithm>
+#include <sstream>
+
+namespace {
+// stage-3 final-check failure pattern bits (diagnostics only)
+constexpr uint8_t kS3FailBlock = 0x01;
+constexpr uint8_t kS3FailRound = 0x02;
+constexpr uint8_t kS3FailTrusted = 0x04;
+constexpr uint8_t kS3FailMask = 0x08;
+constexpr uint8_t kS3FailWriter = 0x10;
+constexpr uint8_t kS3FailUntrusted = 0x20;
+// above this many failures in one iteration the split is not logged any more
+constexpr size_t kS3SplitMaxFailures = 10;
+
+std::string shortKey(const cs::PublicKey& key) {
+    return EncodeBase58(key.data(), key.data() + key.size()).substr(0, 8);
+}
+
+std::string patternToString(uint8_t pattern) {
+    static const std::pair<uint8_t, const char*> names[] = {
+        {kS3FailUntrusted, "untrusted"}, {kS3FailBlock, "block"}, {kS3FailRound, "round"},
+        {kS3FailTrusted, "trusted"}, {kS3FailMask, "mask"}, {kS3FailWriter, "writer"}};
+    std::string result;
+    for (const auto& [bit, name] : names) {
+        if (pattern & bit) {
+            if (!result.empty()) {
+                result += '+';
+            }
+            result += name;
+        }
+    }
+    return result.empty() ? std::string("none") : result;
+}
+}  // namespace
 
 namespace cs {
 void SolverCore::init(
@@ -166,6 +201,7 @@ void SolverCore::nextRound(bool updateRound) {
     stageTwoStorage.clear();
     stageThreeStorage.clear();
     trueStageThreeStorage.clear();
+    stage3Failures_.clear();
     trusted_candidates.clear();
     realTrustedChanged_ = false;
     tempRealTrusted_.clear();
@@ -328,6 +364,9 @@ void SolverCore::gotStageThree(const cs::StageThree& stage, const uint8_t flagg)
 
         if (markedUntrusted || invalidBlockSignatures || invalidRoundSignatures || invalidTrustedSignatures || invalidRealTrustedMask || invalidWriter){
 			cswarning() << "Stage3 from T[" << static_cast<int>(stageFrom.sender) << "] - final check ... NOT PASSED! This problem will be resolved automatically.";
+            logStage3Failure(stageFrom, static_cast<uint8_t>((markedUntrusted ? kS3FailUntrusted : 0) | (invalidBlockSignatures ? kS3FailBlock : 0) |
+                (invalidRoundSignatures ? kS3FailRound : 0) | (invalidTrustedSignatures ? kS3FailTrusted : 0) |
+                (invalidRealTrustedMask ? kS3FailMask : 0) | (invalidWriter ? kS3FailWriter : 0)));
 			csdebug() << "The stage below has next problems:";
 			if (markedUntrusted) {
 				csdebug() << "--> The node, that sent this stage was marked as untrusted";
@@ -441,6 +480,91 @@ void SolverCore::addRoundSignature(const cs::StageThree& st3) {
 
 }
 
+void SolverCore::logStage3Failure(const cs::StageThree& stageFrom, uint8_t pattern) {
+    // Diagnostics only: reads the stage storages, verifies nothing new on the success path and
+    // changes no consensus state. Stage-3 messages carry signatures but no hashes, so the hash a
+    // failing sender signed cannot be recovered; the best we can show is who agreed with our hashes
+    // and which senders failed with the same pattern (the majority/minority split).
+    const cs::Conveyer& conveyer = cs::Conveyer::instance();
+    const std::string key = conveyer.isConfidantExists(stageFrom.sender) ? shortKey(conveyer.confidantByIndex(stageFrom.sender)) : std::string("?");
+
+    const char* verdict = nullptr;
+    if (pattern & kS3FailUntrusted) {
+        verdict = "already marked untrusted in our mask";
+    }
+    else if (pattern & kS3FailTrusted) {
+        verdict = "key or message mismatch (trusted signature fails too)";
+    }
+    else if (pattern & (kS3FailBlock | kS3FailRound)) {
+        verdict = "signed another block/round hash (key ok, trusted hash agreed)";
+    }
+    else {
+        verdict = "signatures ok, mask or writer differs";
+    }
+    // the outer message signature was verified on receipt (Node::getStageThree), so it passed
+    cslog() << kLogPrefix_ << "stage3 check failed T[" << static_cast<int>(stageFrom.sender) << "] " << key
+        << " iter=" << static_cast<int>(stageFrom.iteration) << " msg=ok failed=" << patternToString(pattern)
+        << " -> " << verdict;
+
+    for (const auto& it : stage3Failures_) {
+        if (it.first == stageFrom.sender) {
+            return;  // already counted in this iteration
+        }
+    }
+    stage3Failures_.emplace_back(stageFrom.sender, pattern);
+    if (stage3Failures_.size() > kS3SplitMaxFailures) {
+        if (stage3Failures_.size() == kS3SplitMaxFailures + 1) {
+            cslog() << kLogPrefix_ << "stage3 split: more than " << kS3SplitMaxFailures << " failures, not logged any more in this iteration";
+        }
+        return;
+    }
+
+    auto member = [&conveyer](uint8_t idx) {
+        std::string s = "T" + std::to_string(static_cast<int>(idx)) + ':';
+        s += conveyer.isConfidantExists(idx) ? shortKey(conveyer.confidantByIndex(idx)) : std::string("?");
+        return s;
+    };
+
+    // agree = stage-3s whose signatures verified against our hashes, plus ourselves
+    std::vector<uint8_t> agree;
+    agree.reserve(trueStageThreeStorage.size() + 1);
+    const uint8_t own = pnode->getConfidantNumber();
+    agree.push_back(own);
+    for (const auto& st : trueStageThreeStorage) {
+        if (st.iteration == stageFrom.iteration && std::find(agree.cbegin(), agree.cend(), st.sender) == agree.cend()) {
+            agree.push_back(st.sender);
+        }
+    }
+    std::sort(agree.begin(), agree.end());
+
+    std::ostringstream os;
+    os << "stage3 split iter=" << static_cast<int>(stageFrom.iteration) << ": agree(" << agree.size() << ")=[";
+    for (size_t i = 0; i < agree.size(); ++i) {
+        os << (i ? " " : "") << member(agree[i]) << (agree[i] == own ? "(own)" : "");
+    }
+    os << ']';
+
+    // group the failing senders by pattern, at most kS3SplitMaxFailures entries
+    std::vector<std::pair<uint8_t, uint8_t>> failures = stage3Failures_;
+    std::sort(failures.begin(), failures.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second < b.second : a.first < b.first;
+    });
+    for (size_t i = 0; i < failures.size();) {
+        size_t j = i;
+        while (j < failures.size() && failures[j].second == failures[i].second) {
+            ++j;
+        }
+        os << " | " << patternToString(failures[i].second) << '(' << (j - i) << ")=[";
+        for (size_t k = i; k < j; ++k) {
+            os << (k > i ? " " : "") << member(failures[k].first);
+        }
+        os << ']';
+        i = j;
+    }
+    os << " of " << conveyer.confidants().size();
+    cslog() << kLogPrefix_ << os.str();
+}
+
 void SolverCore::adjustStageThreeStorage() {
     std::vector<cs::StageThree> tmpStageThreeStorage;
     for (auto& it : stageThreeStorage) {
@@ -451,6 +575,7 @@ void SolverCore::adjustStageThreeStorage() {
     stageThreeStorage.clear();
     stageThreeStorage = tmpStageThreeStorage;
     trueStageThreeStorage.clear();  // how to put the realTrusted value to the on-stage3
+    stage3Failures_.clear();
     pnode->adjustStageThreeStorage();
 }
 
