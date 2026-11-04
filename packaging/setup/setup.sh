@@ -700,6 +700,18 @@ if [ "$wallet" != none ]; then
         elif ! cmp -s wallet.toml "$wallet_home/config.toml"; then
             echo "$wallet_home/config.toml is kept; this node's profile: ./credits-wallet --config wallet.toml"
         fi
+        # the wallet uses the node's key only from a folder and a file nobody else can write to
+        # (a umask of 002 leaves them group-writable)
+        if [ "$wallet" = node ]; then
+            case "$(ls -ld . | cut -c6,9)" in
+                *w*) chmod go-w . && echo "This folder was writable by other users: chmod go-w done (the wallet refuses such a node folder)." ;;
+            esac
+            if [ -f NodePrivate.txt ] && [ ! -L NodePrivate.txt ]; then
+                case "$(ls -l NodePrivate.txt | cut -c6,9)" in
+                    *w*) chmod go-w NodePrivate.txt && echo "NodePrivate.txt was writable by other users: chmod go-w done." ;;
+                esac
+            fi
+        fi
         case "$wallet" in
             create) set -- --config wallet.toml account new "$wallet_name" ;;
             import) set -- --config wallet.toml account import "$wallet_name"
