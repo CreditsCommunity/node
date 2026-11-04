@@ -22,6 +22,7 @@
 
 #include <cscrypto/cscrypto.hpp>
 #include "config.hpp"
+#include "keyfilecrypt.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -449,8 +450,8 @@ static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint
         pGood = true;
     }
 
-    skBytes = sk.getEncrypted(pass.data(), std::strlen(pass.data()));
-    return true;
+    skBytes = cs::keyfile::encrypt(sk, pass.data(), std::strlen(pass.data()));
+    return !skBytes.empty();  // a failed derivation (e.g. no memory) never writes an empty key file
 }
 
 static bool getBufFromFile(std::string& buf) {
@@ -481,8 +482,8 @@ static bool encryptWithFile(const cscrypto::PrivateKey& sk, std::vector<uint8_t>
     if (!getBufFromFile(buf)) {
         return false;
     }
-    skBytes = sk.getEncrypted(buf.data(), buf.size());
-    return true;
+    skBytes = cs::keyfile::encrypt(sk, buf.data(), buf.size());
+    return !skBytes.empty();  // a failed derivation (e.g. no memory) never writes an empty key file
 }
 
 static bool usePassword() {
@@ -654,14 +655,14 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                         return false;
                     }
                     std::cout << "Trying to open file..." << std::endl;
-                    privateKey_ = cscrypto::PrivateKey::readFromEncrypted(sk, pass.data(), std::strlen(pass.data()));
+                    privateKey_ = cs::keyfile::decrypt(sk, pass.data(), std::strlen(pass.data()));
                 }
                 else {
                     std::string buf;
                     if (!getBufFromFile(buf)) {
                         return false;
                     }
-                    privateKey_ = cscrypto::PrivateKey::readFromEncrypted(sk, buf.data(), buf.size());
+                    privateKey_ = cs::keyfile::decrypt(sk, buf.data(), buf.size());
                 }
 
                 if (!privateKey_) {

@@ -7,6 +7,7 @@ file(GLOB SRCS *.cpp)
 list(APPEND SRCS
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/config.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/banner.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/keyfilecrypt.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/src/dbcheck.cpp"
 )
 

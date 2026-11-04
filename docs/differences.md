@@ -253,6 +253,15 @@ consensus rules.
   - the rewards of an uncertain block kept when the trusted mask differs;
   - the revert of a timed delegation;
   - uninitialised consensus settings.
+- **Encrypted key file.** The key file encryption (`--encryptkey`, the "[1] Encrypt with password"
+  choice at the first start, and the change of password offered at start) now uses a random salt
+  per file: `NodePrivate.txt` is base58 of the salt (16 bytes), the nonce (8 bytes) and the
+  encrypted key with its tag (80 bytes), 104 bytes once decoded, with the same Argon2id parameters
+  and cipher as before. Files encrypted by older versions (88 bytes) are read as before and are
+  never rewritten by themselves; a plain key (64 bytes) is unchanged. A file encrypted by this
+  version cannot be opened by older community nodes or by the official node until they read the
+  new format, so to go back to one of them keep the plain key (or the seed phrase), or encrypt the
+  plain key again with that node. A failed encryption no longer writes an empty key file.
 
 ## Consensus fixes
 

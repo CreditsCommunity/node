@@ -12,6 +12,8 @@ add_library(${PROJECT_NAME}
     "config.cpp"
     "banner.hpp"
     "banner.cpp"
+    "keyfilecrypt.hpp"
+    "keyfilecrypt.cpp"
 )
 
 target_link_libraries (${PROJECT_NAME} csnode lib)
