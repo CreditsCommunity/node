@@ -42,6 +42,12 @@ docker compose exec node credits-wallet            # the terminal interface
 docker compose exec node credits-wallet status
 ```
 
+The node's own key, `keys/NodePrivate.txt`, is the wallet's account `node` (marked NODE KEY, the
+default): the address of the node's rewards and of the delegations to it. The wallet reads it in
+place (`CREDITS_WALLET_NODE_KEY`), without copying or encrypting it: it is in clear on the volume,
+as the node needs it, so keep on it only what the node needs and savings in a separate account
+(`credits-wallet account new NAME`).
+
 On mainnet every transfer is real. The user guide is `/opt/credits/wallet-guide.md` in the image,
 and [docs/guide.md](https://github.com/CreditsCommunity/wallet/blob/main/docs/guide.md) of the wallet.
 

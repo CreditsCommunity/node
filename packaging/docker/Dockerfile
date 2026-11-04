@@ -16,7 +16,8 @@ COPY package/ /opt/credits/
 # configuration on the volume, so that they outlive the container
 RUN mv /opt/credits/config.ini /opt/credits/config.ini.template \
     && ln -s /opt/credits/credits-wallet /usr/local/bin/credits-wallet
-ENV CREDITS_WALLET_HOME=/data/wallet
+# the node's own key (keys/NodePrivate.txt, made at the first start) is the wallet's account "node"
+ENV CREDITS_WALLET_HOME=/data/wallet CREDITS_WALLET_NODE_KEY=/data/keys/NodePrivate.txt
 COPY docker/entrypoint.sh docker/keygen.py docker/healthcheck.sh docker/snapshot-restore.sh /opt/credits/
 
 USER credits

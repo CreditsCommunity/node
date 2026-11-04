@@ -43,7 +43,7 @@ for _ in $(seq 1 "${STUB_SECONDS:-3}"); do sleep 1; done
 STUB
 chmod +x "$pkg/node"
 # stub wallet: prints its data folder and arguments
-printf '#!/bin/sh\necho "wallet home=$CREDITS_WALLET_HOME args=$*"\n' > "$pkg/credits-wallet"
+printf '#!/bin/sh\necho "wallet home=$CREDITS_WALLET_HOME node_key=$CREDITS_WALLET_NODE_KEY args=$*"\n' > "$pkg/credits-wallet"
 chmod +x "$pkg/credits-wallet"
 "$here/build.sh" "$pkg" "$image" > "$work/build.log" 2>&1 || { tail -20 "$work/build.log"; fail "image build"; }
 
@@ -72,7 +72,7 @@ pass "first start"
 
 # 1b. the wallet: on the PATH, its data on the volume; the token cache on request
 out=$(docker run --rm --label credits-entrypoint-test --entrypoint credits-wallet "$image" status 2>&1)
-[ "$out" = "wallet home=/data/wallet args=status" ] || { echo "$out"; fail "credits-wallet on the PATH with CREDITS_WALLET_HOME=/data/wallet"; }
+[ "$out" = "wallet home=/data/wallet node_key=/data/keys/NodePrivate.txt args=status" ] || { echo "$out"; fail "credits-wallet on the PATH with CREDITS_WALLET_HOME=/data/wallet and the node's key"; }
 d=$(newdata 1b)
 run "$d" -e CREDITS_SNAPSHOT=off -e CREDITS_API=on -e CREDITS_TOKENS_CACHE=on >/dev/null
 grep -q '^tokens_cache=true' "$d/config.ini" && grep -q '^port=9090' "$d/config.ini" || fail "CREDITS_TOKENS_CACHE=on, CREDITS_API=on"

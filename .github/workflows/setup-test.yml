@@ -6,7 +6,8 @@ name: Set-up script test
 # answer first. The wallet of packaging/wallet-tag is added to the package (downloaded from its public
 # release and checked, packaging/fetch-wallet.sh): the set-up writes its profile (wallet.toml) and
 # the token cache, the wallet reads the synced node through that profile (status, the network check,
-# the token list from the cache) and imports the node's key.
+# the token list from the cache, the node's own key as the account "node"); on a terminal the set-up
+# makes the node's key of a folder that has none from a 24-word phrase, and the node starts with it.
 on:
   push:
     tags: ['setup-test-*']
@@ -57,6 +58,14 @@ jobs:
 
       - name: Checkout submodules
         run: git submodule update --init -- third-party/thrift-interface-definitions
+
+      - name: The PowerShell set-up parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/packaging/setup/setup.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+          'setup.ps1 parses'
 
       - uses: actions/setup-python@v5
         with:
@@ -119,23 +128,29 @@ jobs:
 
       - name: First set-up (pruned, lmdb, snapshot from GitHub, share, a wallet account, token cache, do not start)
         run: |
-          # storage, database, first start, share, executor, wallet (create), account name, token
-          # cache (yes), start, write
+          # storage, database, first start, share, executor, wallet (create: a separate account; the
+          # default is the node's key), account name, token cache (yes), start, write
           bash setup-run.sh csnode '\n\n\n\n\ncreate\nmain\nyes\nno\n\n' 2>&1 | tee setup1.txt | grep -av '^download-snapshot: .*%' | tail -40
+          grep -a "The wallet's account? (node/create/import/no) \[node\]" setup1.txt
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
             storage "db_backend=lmdb checkpoint_every=100000 checkpoint_keep=2 prune_keep_blocks=1000"
           grep -q '^tokens_cache=true' csnode/config.ini && echo "tokens_cache=true"
           # the wallet: its profile of this node, copied to its data folder; no terminal here, so the
           # account is left to the user with the command to run
-          grep -a "Creating or importing an account needs a terminal" setup1.txt
+          grep -a "Creating or importing an account, or the node's key, needs a terminal" setup1.txt
           grep -a "account new main" setup1.txt
           python - <<'EOF'
           import tomllib, os
           w = tomllib.load(open("csnode/wallet.toml", "rb"))
           assert w["node"] == "local", w
-          assert w["nodes"]["local"] == {"address": "127.0.0.1:9090", "network": "mainnet", "diag": "127.0.0.1:9088"}, w
-          home = os.environ["CREDITS_WALLET_HOME"]
-          assert open(os.path.join(home, "config.toml")).read() == open("csnode/wallet.toml").read()
+          assert w["nodes"]["local"] == {"address": "127.0.0.1:9090", "network": "mainnet", "diag": "127.0.0.1:9088",
+                                         "node_key": "NodePrivate.txt"}, w
+          # the wallet's own config.toml: the same profile, the node's key by its full path
+          home = tomllib.load(open(os.path.join(os.environ["CREDITS_WALLET_HOME"], "config.toml"), "rb"))
+          key = home["nodes"]["local"].pop("node_key")
+          assert os.path.isabs(key) and os.path.samefile(key, "csnode/NodePrivate.txt"), key
+          w["nodes"]["local"].pop("node_key")
+          assert home == w, home
           print("wallet.toml and the wallet's config.toml: ok")
           EOF
           ls csnode/config.ini.bak-* && test "$(ls csnode/config.ini.bak-* | wc -l)" -eq 1
@@ -163,8 +178,17 @@ jobs:
           "$w" --config wallet.toml status
           "$w" --config wallet.toml status --json > ../wallet-status.json
           printf 'ci password\n' > ../pw && chmod 600 ../pw
-          # the node's own key file: the wallet must say to keep it (the node needs it)
-          "$w" --config wallet.toml account import node NodePrivate.txt --password-file ../pw 2> ../import.txt
+          # the node's own key is the account "node": marked, the default, read in place
+          "$w" --config wallet.toml account list | tee ../accounts.txt
+          grep -q "^node  *$(cat NodePublic.txt)  NODE KEY (default;" ../accounts.txt
+          test "$("$w" --config wallet.toml account address | tr -d '\r')" = "$(cat NodePublic.txt)"
+          "$w" --config wallet.toml account node-key | tee ../node-key.txt
+          grep -q "public file : .*matches" ../node-key.txt && grep -q "node        : running" ../node-key.txt
+          # never written while the node runs
+          if "$w" account node-key new --out . --words-file ../words.txt 2> ../refused.txt; then echo "node-key new while the node runs"; exit 1; fi
+          grep -q "the node is running" ../refused.txt && test ! -e ../words.txt
+          # an encrypted copy can still be imported (not the main path): the wallet says to keep the file
+          "$w" --config wallet.toml account import nodecopy NodePrivate.txt --password-file ../pw 2> ../import.txt
           cat ../import.txt
           grep -q "keep it, the node needs it" ../import.txt && test -f NodePrivate.txt
           "$w" --config wallet.toml balance node
@@ -279,8 +303,8 @@ jobs:
           grep -a "keeps its blocks and fetches the ones" setup8.txt
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" storage "db_backend=lmdb backfill=on"
 
-      # a user at a terminal: the account created by the set-up (the default when the wallet has
-      # none), then the node's key imported as the explicit second choice, with its warning
+      # a user at a terminal: the node's key as the account (the default), a separate account, then
+      # a folder without a key: the set-up makes it from 24 words, and the node starts with it
       - name: Wallet accounts through the set-up, on a terminal (Linux, macOS)
         if: matrix.os != 'windows'
         env:
@@ -291,17 +315,47 @@ jobs:
                   'How should the node get the chain\? \(github/network/sync\) \[\w+\]:=>sync'
                   'Share snapshots with other nodes\? \(yes/no\) \[\w+\]:=>no' 'Which executor\? \(community/official\) \[\w+\]:=>'
                   'Keep a token cache\? \(yes/no\) \[\w+\]:=>no' 'Start the node when the set-up is done\? \(yes/no\) \[yes\]:=>no'
-                  'Write config.ini\? \(yes/no\) \[yes\]:=>')
+                  'Write config.ini\? \(yes/no\) \[yes\]:=>' 'Save the 24 words to a file as well\? \[y/N\]=>')
+          # the folder has a key: Enter uses it as the account "node", nothing copied
           python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
-            'Create a wallet account now\? \(create/import/node/no\) \[create\]:=>' 'Account name \[main\]:=>' | tee setup-pty1.txt | tail -12
-          grep -a "type back three of the words" setup-pty1.txt
+            "The wallet's account\? \(node/create/import/no\) \[node\]:=>" | tee setup-pty1.txt | tail -14
+          grep -a "kept in clear on this server" setup-pty1.txt
+          grep -a "account     : node (NODE KEY, the default account)" setup-pty1.txt
+          grep -a "address     : $(cat csnode-pty/NodePublic.txt)" setup-pty1.txt
+          test ! -e "$CREDITS_WALLET_HOME/accounts" || test -z "$(ls "$CREDITS_WALLET_HOME/accounts")"
+          # a separate account as well ("no" is not "node")
+          python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
+            "The wallet's account\? \(node/create/import/no\) \[node\]:=>create" 'Account name \[main\]:=>' | tee setup-pty2.txt | tail -12
+          grep -a "type back three of the words" setup-pty2.txt
           test -f "$CREDITS_WALLET_HOME/accounts/main.json" && echo "account main created"
           python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
-            'Create a wallet account now\? \(create/import/node/no\) \[no\]:=>node' "Import the node's key anyway\? \(no/yes\) \[no\]:=>yes" \
-            'Account name \[node\]:=>' | tee setup-pty2.txt | tail -12
-          grep -a "Importing it makes it a spending key as well" setup-pty2.txt
-          grep -a "keep it, the node needs it" setup-pty2.txt
-          test -f "$CREDITS_WALLET_HOME/accounts/node.json" && test -f csnode-pty/NodePrivate.txt && echo "node key imported, NodePrivate.txt kept"
+            "The wallet's account\? \(node/create/import/no\) \[node\]:=>no" | tee setup-pty3.txt | tail -4
+          grep -a "wallet:       no account now" setup-pty3.txt
+          ./csnode-pty/credits-wallet --config csnode-pty/wallet.toml account list
+          # a folder without a key: Enter makes it from a new 24-word phrase, in the node's format
+          cp -a csnode-clean csnode-nokey && rm -f csnode-nokey/config.ini.bak-* csnode-nokey/wallet.toml csnode-nokey/Node*.txt
+          python ci/setup/pty_drive.py csnode-nokey ./setup.sh "${common[@]}" \
+            "The wallet's account\? \(node/create/import/no\) \[node\]:=>" | tee setup-pty4.txt | tail -16
+          grep -a "create the node's key now from a new 24-word phrase" setup-pty4.txt
+          grep -a "type back three of the words" setup-pty4.txt
+          key=$(cat csnode-nokey/NodePublic.txt)
+          grep -a "address : $key" setup-pty4.txt
+          mode() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
+          test "$(mode csnode-nokey/NodePrivate.txt)" = 600 && test "$(mode csnode-nokey/NodePublic.txt)" = 600
+          # the node starts with it, without a question about its key, and names it as its own
+          cd csnode-nokey
+          ( ./node --config-file config.ini </dev/null > stdout.log 2>&1 & echo $! > node.pid )
+          up=no
+          for _ in $(seq 1 60); do
+            if ./credits-wallet --config wallet.toml account node-key 2>/dev/null | grep -q "node        : running"; then up=yes; break; fi
+            sleep 2
+          done
+          kill "$(cat node.pid)" 2>/dev/null || true
+          sleep 5; pkill -f '[c]ontract-executor[.]jar' || true
+          if grep -a "No suitable keys\|Bad private key\|PUBLIC key file" stdout.log; then echo "the node asked about its key"; exit 1; fi
+          test "$up" = yes || { tail -n 30 stdout.log; echo "the node did not start"; exit 1; }
+          grep -ah "$key" log/log_*.txt stdout.log | head -3 || true
+          echo "the node started with the key the set-up made: $key"
 
       # a wallet.toml planted as a symlink is never written through; as root (sudo) in a folder the
       # runner's user owns, the set-up runs again as that user, so root writes nothing there
@@ -326,7 +380,7 @@ jobs:
         if: always()
         run: |
           mkdir -p result
-          cp setup*.txt import.txt csnode/config.ini csnode/wallet.toml wallet-*.json result/ 2>/dev/null || true
+          cp setup*.txt import.txt accounts.txt node-key.txt csnode/config.ini csnode/wallet.toml wallet-*.json result/ 2>/dev/null || true
           cp csnode-clean/config.ini result/config-full.ini 2>/dev/null || true
           tail -c 1000000 csnode/stdout.log > result/stdout.log 2>/dev/null || true
 
