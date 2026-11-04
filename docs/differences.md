@@ -260,8 +260,10 @@ consensus rules.
   and cipher as before. Files encrypted by older versions (88 bytes) are read as before and are
   never rewritten by themselves; a plain key (64 bytes) is unchanged. A file encrypted by this
   version cannot be opened by older community nodes or by the official node until they read the
-  new format, so to go back to one of them keep the plain key (or the seed phrase), or encrypt the
-  plain key again with that node. A failed encryption no longer writes an empty key file.
+  new format (they stop with a crash when they try to open it), so to go back to one of them keep
+  the plain key (or the seed phrase), or encrypt the plain key again with that node. An encrypted
+  file of any other length is refused before decryption (older versions crashed on one longer than
+  88 bytes), and a failed encryption no longer writes an empty key file.
 
 ## Consensus fixes
 
