@@ -759,6 +759,8 @@ start_node() {
         PIDS[$i]=$!
         return 0
     fi
+    # TEST ONLY (branch test/stage3-skew): these nodes sign blocks with a skewed timestamp
+    if [[ ",${STAGE3_SKEW_NODES:-3,5}," == *",$i,"* ]]; then touch "$WORK/n$i/stage3_skew"; fi
     (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
