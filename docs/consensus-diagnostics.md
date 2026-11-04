@@ -15,20 +15,24 @@ the next round table and the hash of the next confidant list, and sends the thre
 without the hashes. A receiver checks each signature against **its own** three hashes. When a
 signature fails, either the key or message is wrong, or the sender built a different block or
 round table. The lines below, at info level (no debug log needed), tell these cases apart and
-show which input differed. They are written only to the log: nothing is signed, sent or stored
+show which input differed. They appear only when something goes wrong (a failed check, a
+gray-listing, a missing majority): a node in a healthy network logs none of them. They are written only to the log: nothing is signed, sent or stored
 differently, and the consensus result is the same as without them.
 
 ## 1. What this node signed: `stage3 inputs`
 
-One line per stage 3 sent by this node:
+What this node put into the hashes it signed. It is logged at info level once per iteration, just
+before the first `stage3 check failed` line, so both sides of a split print it for the same round;
+at debug level it is logged for every stage 3:
 
 ```
-SolverCore: stage3 inputs: R-2215 iter=0 seq=2213 prev=3fa1c2d0 ts=1762245211000 reward=- tx=3
-  txIds=9b03e4a1 fees=4c2d0e11 charMask=77a10b3c/3 newWallets=1 smartSigs=0 conf=5/5 writer=2
-  block=a04f5e11 round=1d33c702 trusted=e0b2a6f4 mask=[0] [1] [2] [3] [4]
+info SolverCore: stage3 inputs: R-37 iter=0 seq=37 prev=7C839893 ts=1793783441147 reward=- tx=1
+  txIds=40E79CA6 fees=69F07B9F charMask=FC87F4F1/1 newWallets=0 smartSigs=0 conf=5/5 writer=2
+  block=BC24F874 round=44C9C6F6 trusted=D7B1BD25 mask=[3] [4] [0] [1] [2]
 ```
 
-(one line in the log; wrapped here.) Hashes are shortened to their first 8 hex characters.
+(one line in the log; wrapped here.) Hashes are shortened to their first 8 hex characters; `-` means
+empty (no transactions, no reward field).
 
 | Field | Meaning | Goes into |
 |---|---|---|
@@ -44,6 +48,16 @@ SolverCore: stage3 inputs: R-2215 iter=0 seq=2213 prev=3fa1c2d0 ts=1762245211000
 | `writer`, `mask` | writer index and real-trusted mask of this iteration (`X` = excluded) | compared directly |
 | `block`, `round`, `trusted` | the three hashes this node signed | signatures |
 
+For example, in a test network where two nodes were made to build their block with the timestamp
+1 ms later, the same round printed on a majority node and on a skewed one:
+
+```
+stage3 inputs: R-1 iter=0 seq=1 prev=C0541961 ts=1793784561704 ... newWallets=7 ... block=2E6353D9 round=A5256CC5 trusted=CA0A93D1
+stage3 inputs: R-1 iter=0 seq=1 prev=C0541961 ts=1793784561705 ... newWallets=7 ... block=9876C3C4 round=7B1677FB trusted=CA0A93D1
+```
+
+`prev` and every other input agree, `ts` differs, and so do `block` and `round`; `trusted` is equal.
+
 **How to use it.** Collect this line for the same round (`R-`) and iteration from several
 confidants (or ask the operators). Nodes that agree print the same `block`/`round` hashes. On the
 nodes that differ, the first field that differs is the cause:
@@ -54,15 +68,20 @@ nodes that differ, the first field that differs is the cause:
   between the nodes; compare their `STATE DIGEST` lines;
 - `txIds`, `fees`, `newWallets` or `charMask` differ: the block content differs;
 - `conf` differs: the nodes hold different round confirmations;
-- all of these equal but `round` differs: the round table differs (hashes of the next round's
-  packets, confidants).
+- all of these equal but `round` differs: the round table differs (the next confidants, the
+  packet hashes chosen for the next round, the sub-round or the iteration).
+
+The round table also signs the timestamp, reward, characteristic, sequence and previous hash, so a
+difference in one of them makes both `block` and `round` fail (`failed=block+round` below); only
+`block` failing points to the block-only inputs (`txIds`, `fees`, `newWallets`, `conf`,
+`smartSigs`).
 
 ## 2. Why a peer failed: `stage3 check failed`
 
 One line per failing peer:
 
 ```
-R-2215 SolverCore> stage3 check failed T[4] 7xQm2Bd1 iter=0 msg=ok failed=block+round -> signed another block/round hash (key ok, trusted hash agreed)
+info R-1 SolverCore> stage3 check failed T[4] EJGNJj2S iter=0 msg=ok failed=block+round -> signed another block/round hash (key ok, trusted hash agreed)
 ```
 
 `T[4]` is the confidant index, followed by the first 8 base58 characters of its public key.
@@ -80,10 +99,18 @@ or `untrusted` (the sender was already excluded in our mask). The verdict:
 
 ## 3. Who is in the majority: `stage3 split`
 
-After each failure (at most 10 per iteration) the node logs the split it sees:
+After each failure (at most 10 per iteration) the node logs the split it sees. When the node's
+own stage 3 arrives after its peers', the early lines list only the peers checked so far: read the
+last `stage3 split` line of the iteration.
 
 ```
-R-2215 SolverCore> stage3 split iter=0: agree(2)=[T0:5Hj8Kd2a T3:9aZx1Lp0(own)] | block+round(3)=[T1:Fq3n8Yt2 T2:2bWc7Xe4 T4:7xQm2Bd1] of 5
+info R-1 SolverCore> stage3 split iter=0: agree(5)=[T0:KasmLeQs T1:7gZ4BWYh T2:B9XbBZUD(own) T3:Br6U154N T6:HhovRb4b] | block+round(2)=[T4:EJGNJj2S T5:GqamRj6f] of 7
+```
+
+and on one of the two skewed nodes, the same round seen from the minority:
+
+```
+info R-1 SolverCore> stage3 split iter=0: agree(1)=[T4:EJGNJj2S(own)] | block+round(5)=[T0:KasmLeQs T1:7gZ4BWYh T2:B9XbBZUD T3:Br6U154N T6:HhovRb4b] of 7
 ```
 
 `agree` lists the confidants whose signatures matched our hashes, ourselves marked `(own)`; the
@@ -95,10 +122,10 @@ the larger group.
 
 ## 4. After the round
 
-- `not enough active confidants to make a decision, Bootstrap required (active 2 of 5, need 3, mask ...)`
+- `not enough active confidants to make a decision, Bootstrap required (active 2 of 7, need 4, mask [X] [X] [X] [X] [1] [2] [X] )`
   (warning): too many peers were excluded in this iteration, so no writer can be chosen.
-- `NODE> round package R-2216 from 5Hj8Kd2a gray-lists 1 of 5 confidants of R-2215 for 1000 rounds: [T3:9aZx1Lp0(OWN KEY)] - OWN KEY gray-listed`
-  (info): the round package from the writer `5Hj8Kd2a` excluded these confidants of the previous
+- `NODE> round package R-2 from Br6U154N gray-lists 2 of 7 confidants of R-1 for 1000 rounds: [T4:EJGNJj2S T5:GqamRj6f(OWN KEY)] - OWN KEY gray-listed`
+  (info): the round package from `Br6U154N` excluded these confidants of the previous
   round; every node gray-lists them, and they are not chosen as confidants for that many rounds.
   `OWN KEY` means this node is among them: the majority did not accept its stage 3.
 - `the signatures of the block are insufficient or incorrect: #<seq> hash <hex> prev <hex>`

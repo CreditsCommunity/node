@@ -202,6 +202,7 @@ void SolverCore::nextRound(bool updateRound) {
     stageThreeStorage.clear();
     trueStageThreeStorage.clear();
     stage3Failures_.clear();
+    stage3InputsLine_.clear();
     trusted_candidates.clear();
     realTrustedChanged_ = false;
     tempRealTrusted_.clear();
@@ -510,6 +511,10 @@ void SolverCore::logStage3Failure(const cs::StageThree& stageFrom, uint8_t patte
         if (it.first == stageFrom.sender) {
             return;  // already counted in this iteration
         }
+    }
+    if (stage3Failures_.empty() && !stage3InputsLine_.empty()) {
+        // the first failure of the iteration: what we signed, to compare with the other side's line
+        cslog() << kLogPrefix_ << stage3InputsLine_;
     }
     stage3Failures_.emplace_back(stageFrom.sender, pattern);
     if (stage3Failures_.size() > kS3SplitMaxFailures) {

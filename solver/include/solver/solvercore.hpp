@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 // forward declarations
@@ -332,6 +333,9 @@ private:
     // diagnostics only (never sent or stored): stage-3 final-check failures of the current
     // iteration as (sender index, failure pattern bits), used to log the agree/disagree split
     std::vector<std::pair<uint8_t, uint8_t>> stage3Failures_;
+    // diagnostics only: the "stage3 inputs" line of our last stage 3, logged at info level only when
+    // a peer's stage 3 fails the final check (at debug level every round)
+    std::string stage3InputsLine_;
     bool realTrustedChanged_;
     cs::Bytes tempRealTrusted_;
 
