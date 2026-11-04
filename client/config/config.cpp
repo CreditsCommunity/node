@@ -29,6 +29,9 @@
 #else
 #include <termios.h>
 #include <unistd.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
 #endif
 
 const NodeVersion NODE_VERSION = 532;
@@ -204,14 +207,42 @@ static inline void writeFile(const std::string name, const std::string data) {
     file.close();
 }
 
+// the private key file (in clear, or encrypted by the node) and the keys JSON: readable by their
+// owner only, mode 0600 on POSIX whatever the umask, also when the file existed with a wider mode.
+// Same content and path as writeFile (no temporary file, a link is followed as before); Windows
+// keeps the folder's ACL.
+static inline void writeKeyFile(const std::string& name, const std::string& data) {
+#ifndef _WIN32
+    const int fd = ::open(name.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        ::fchmod(fd, 0600);
+        size_t done = 0;
+        while (done < data.size()) {
+            const ssize_t n = ::write(fd, data.data() + done, data.size() - done);
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n <= 0) {
+                break;
+            }
+            done += static_cast<size_t>(n);
+        }
+        ::close(fd);
+        return;
+    }
+#endif
+    writeFile(name, data);
+}
+
 void Config::dumpJSONKeys(const std::string& fName) const {
     auto sk = privateKey_.access();
 
     auto pk58 = EncodeBase58(publicKey_.data(), publicKey_.data() + publicKey_.size());
     auto sk58 = EncodeBase58(sk.data(), sk.data() + sk.size());
 
-    std::ofstream f(fName);
-    f << "{\"key\":{\"public\":\"" << pk58 << "\",\"private\":\"" << sk58 << "\"}}";
+    std::string json = "{\"key\":{\"public\":\"" + pk58 + "\",\"private\":\"" + sk58 + "\"}}";
+    writeKeyFile(fName, json);
+    cscrypto::fillWithZeros(const_cast<char*>(json.data()), json.size());
 
     cscrypto::fillWithZeros(const_cast<char*>(pk58.data()), pk58.size());
     cscrypto::fillWithZeros(const_cast<char*>(sk58.data()), sk58.size());
@@ -573,7 +604,7 @@ void Config::changePasswordOption(const std::string& pathToSk) {
                 const bool encSucc = getEncryptedPrivateBytes(privateKey_, skBytes);
                 if (encSucc) {
                     std::string sk58tmp = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
-                    writeFile(pathToSk, sk58tmp);
+                    writeKeyFile(pathToSk, sk58tmp);
                     cscrypto::fillWithZeros(const_cast<char*>(sk58tmp.data()), sk58tmp.size());
                     cslog() << "Key in " << pathToSk << " has been encrypted successfully";
                 } else {
@@ -657,7 +688,7 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                 const bool encSucc = getEncryptedPrivateBytes(privateKey_, skBytes);
                 if (encSucc) {
                     std::string sk58tmp = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
-                    writeFile(pathToSk, sk58tmp);
+                    writeKeyFile(pathToSk, sk58tmp);
                     cscrypto::fillWithZeros(const_cast<char*>(sk58tmp.data()), sk58tmp.size());
                     cslog() << "Key in " << pathToSk << " has been encrypted successfully";
                 }
@@ -722,7 +753,7 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                 std::string sk58 = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
 
                 writeFile(pathToPk, pk58);
-                writeFile(pathToSk, sk58);
+                writeKeyFile(pathToSk, sk58);
 
                 // Just in case...
                 cscrypto::fillWithZeros(const_cast<char*>(sk58.data()), sk58.size());
