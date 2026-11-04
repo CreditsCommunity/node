@@ -19,6 +19,7 @@
 #include <string>
 #include <list>
 #include <iomanip>
+#include <fstream>
 
 namespace
 {
@@ -437,6 +438,12 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
     // only for new consensus
     cs::PoolMetaInfo poolMetaInfo;
     std::string timeStamp = conveyer.currentRoundNumber() == 1 ? currentTimeStamp : chooseTimeStamp(stage3.realTrustedMask);
+    // TEST ONLY (branch test/stage3-skew, never merged): a node with a file stage3_skew in its working
+    // directory builds its block with the timestamp + 1 ms, to exercise the stage-3 diagnostics
+    static const bool testStage3Skew = std::ifstream("stage3_skew").good();
+    if (testStage3Skew && !timeStamp.empty()) {
+        try { timeStamp = std::to_string(std::stoull(timeStamp) + 1); } catch (...) {}
+    }
     poolMetaInfo.sequenceNumber = pnode->getBlockChain().getLastSeq() + 1;
     poolMetaInfo.timestamp = std::move(timeStamp);
     auto ptr = conveyer.characteristic(conveyer.currentRoundNumber());
