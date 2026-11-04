@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #endif
 
@@ -209,30 +210,71 @@ static inline void writeFile(const std::string name, const std::string data) {
 }
 
 // the private key file (in clear, or encrypted by the node) and the keys JSON: readable by their
-// owner only, mode 0600 on POSIX whatever the umask, also when the file existed with a wider mode.
-// Same content and path as writeFile (no temporary file, a link is followed as before); Windows
-// keeps the folder's ACL.
-static inline void writeKeyFile(const std::string& name, const std::string& data) {
+// owner only (mode 0600 on POSIX whatever the umask; Windows keeps the folder's ACL), and replaced
+// atomically: the data goes to NAME.tmp, is flushed to disk, then renamed over NAME (a link named
+// NAME is followed, its target replaced), and the folder is flushed where the system allows it. On
+// any failure NAME is left as it was and false is returned.
+static bool writeKeyFile(const std::string& name, const std::string& data) {
 #ifndef _WIN32
-    const int fd = ::open(name.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd >= 0) {
-        ::fchmod(fd, 0600);
-        size_t done = 0;
-        while (done < data.size()) {
-            const ssize_t n = ::write(fd, data.data() + done, data.size() - done);
-            if (n < 0 && errno == EINTR) {
-                continue;
-            }
-            if (n <= 0) {
-                break;
-            }
-            done += static_cast<size_t>(n);
-        }
-        ::close(fd);
-        return;
+    std::string target = name;
+    if (char* resolved = ::realpath(name.c_str(), nullptr)) {
+        target = resolved;
+        ::free(resolved);
     }
+    const std::string tmp = target + ".tmp";
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = ::fchmod(fd, 0600) == 0;
+    size_t done = 0;
+    while (ok && done < data.size()) {
+        const ssize_t n = ::write(fd, data.data() + done, data.size() - done);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            ok = false;
+            break;
+        }
+        done += static_cast<size_t>(n);
+    }
+    ok = ok && ::fsync(fd) == 0;
+    ok = (::close(fd) == 0) && ok;
+    if (!ok || ::rename(tmp.c_str(), target.c_str()) != 0) {
+        ::unlink(tmp.c_str());
+        return false;
+    }
+    const auto slash = target.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? std::string(".") : (slash == 0 ? std::string("/") : target.substr(0, slash));
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) {  // best effort: the rename is done either way
+        ::fsync(dfd);
+        ::close(dfd);
+    }
+    return true;
+#else
+    const std::string tmp = name + ".tmp";
+    HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    bool ok = true;
+    size_t done = 0;
+    while (ok && done < data.size()) {
+        DWORD n = 0;
+        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(data.size() - done, 1u << 20));
+        ok = ::WriteFile(h, data.data() + done, chunk, &n, nullptr) && n > 0;
+        done += n;
+    }
+    ok = ok && ::FlushFileBuffers(h);
+    ok = ::CloseHandle(h) && ok;
+    if (!ok || !::MoveFileExA(tmp.c_str(), name.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        ::DeleteFileA(tmp.c_str());
+        return false;
+    }
+    return true;
 #endif
-    writeFile(name, data);
 }
 
 void Config::dumpJSONKeys(const std::string& fName) const {
@@ -242,7 +284,9 @@ void Config::dumpJSONKeys(const std::string& fName) const {
     auto sk58 = EncodeBase58(sk.data(), sk.data() + sk.size());
 
     std::string json = "{\"key\":{\"public\":\"" + pk58 + "\",\"private\":\"" + sk58 + "\"}}";
-    writeKeyFile(fName, json);
+    if (!writeKeyFile(fName, json)) {
+        cserror() << "Could not write " << fName;
+    }
     cscrypto::fillWithZeros(const_cast<char*>(json.data()), json.size());
 
     cscrypto::fillWithZeros(const_cast<char*>(pk58.data()), pk58.size());
@@ -471,10 +515,27 @@ static bool getBufFromFile(std::string& buf) {
             }
         }
     }
-    std::stringstream ss;
-    ss << f.rdbuf();
-    buf = ss.str();
+    // read straight into buf (no intermediate copy), which the caller wipes after use
+    f.seekg(0, std::ios::end);
+    const auto size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    if (size < 0 || !f.good()) {
+        return false;
+    }
+    buf.resize(static_cast<size_t>(size));
+    if (!buf.empty() && !f.read(&buf[0], static_cast<std::streamsize>(buf.size()))) {
+        sodium_memzero(&buf[0], buf.size());
+        buf.clear();
+        return false;
+    }
     return true;
+}
+
+static void wipe(std::string& buf) {
+    if (!buf.empty()) {
+        sodium_memzero(&buf[0], buf.size());
+    }
+    buf.clear();
 }
 
 static bool encryptWithFile(const cscrypto::PrivateKey& sk, std::vector<uint8_t>& skBytes) {
@@ -483,6 +544,7 @@ static bool encryptWithFile(const cscrypto::PrivateKey& sk, std::vector<uint8_t>
         return false;
     }
     skBytes = cs::keyfile::encrypt(sk, buf.data(), buf.size());
+    wipe(buf);
     return !skBytes.empty();  // a failed derivation (e.g. no memory) never writes an empty key file
 }
 
@@ -605,9 +667,14 @@ void Config::changePasswordOption(const std::string& pathToSk) {
                 const bool encSucc = getEncryptedPrivateBytes(privateKey_, skBytes);
                 if (encSucc) {
                     std::string sk58tmp = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
-                    writeKeyFile(pathToSk, sk58tmp);
+                    const bool written = writeKeyFile(pathToSk, sk58tmp);
                     cscrypto::fillWithZeros(const_cast<char*>(sk58tmp.data()), sk58tmp.size());
-                    cslog() << "Key in " << pathToSk << " has been encrypted successfully";
+                    if (written) {
+                        cslog() << "Key in " << pathToSk << " has been encrypted successfully";
+                    }
+                    else {
+                        cserror() << "Could not write " << pathToSk << ": the key file was left as it was";
+                    }
                 } else {
                     cslog() << "Not encrypting the private key file due to errors";
                 }
@@ -638,6 +705,10 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
             return false;
         }
         else if (sk.size() > cscrypto::kPrivateKeySize) {
+            if (sk.size() != cs::keyfile::kLegacyEncryptedSize && sk.size() != cs::keyfile::kSaltedEncryptedSize) {
+                cserror() << "Bad private key file in " << pathToSk << " (" << sk.size() << " bytes)";
+                return false;
+            }
             encFlag = true;
             callShowKeys = true;
         }
@@ -663,6 +734,7 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                         return false;
                     }
                     privateKey_ = cs::keyfile::decrypt(sk, buf.data(), buf.size());
+                    wipe(buf);
                 }
 
                 if (!privateKey_) {
@@ -689,9 +761,14 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                 const bool encSucc = getEncryptedPrivateBytes(privateKey_, skBytes);
                 if (encSucc) {
                     std::string sk58tmp = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
-                    writeKeyFile(pathToSk, sk58tmp);
+                    const bool written = writeKeyFile(pathToSk, sk58tmp);
                     cscrypto::fillWithZeros(const_cast<char*>(sk58tmp.data()), sk58tmp.size());
-                    cslog() << "Key in " << pathToSk << " has been encrypted successfully";
+                    if (written) {
+                        cslog() << "Key in " << pathToSk << " has been encrypted successfully";
+                    }
+                    else {
+                        cserror() << "Could not write " << pathToSk << ": the key file was left as it was";
+                    }
                 }
                 else {
                     cslog() << "Not encrypting the private key file due to errors";
@@ -754,11 +831,16 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
                 std::string sk58 = EncodeBase58(skBytes.data(), skBytes.data() + skBytes.size());
 
                 writeFile(pathToPk, pk58);
-                writeKeyFile(pathToSk, sk58);
+                const bool written = writeKeyFile(pathToSk, sk58);
 
                 // Just in case...
                 cscrypto::fillWithZeros(const_cast<char*>(sk58.data()), sk58.size());
                 cscrypto::fillWithZeros(const_cast<uint8_t*>(skBytes.data()), skBytes.size());
+
+                if (!written) {
+                    cserror() << "Could not write " << pathToSk << ": keep the seed phrase above to restore the key";
+                    return false;
+                }
 
                 cslog() << "Keys generated";
                 break;
