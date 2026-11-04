@@ -253,6 +253,16 @@ consensus rules.
   - the rewards of an uncertain block kept when the trusted mask differs;
   - the revert of a timed delegation;
   - uninitialised consensus settings.
+- **Encrypted key file.** Safer handling of the encrypted key file (atomic re-encryption, no empty
+  file on failure, clear errors); the file format is unchanged and stays compatible with the
+  official node. When the node encrypts or re-encrypts `NodePrivate.txt` (`--encryptkey`, the
+  change of password offered at start, a new key at the first start) it writes
+  `NodePrivate.txt.tmp`, flushes it and renames it over the key file, so a crash or a full disk
+  leaves the previous file, and the log says the write failed instead of reporting success. A
+  failed encryption never writes an empty key file, a key file of an unexpected length stops the
+  node with `Bad private key file in ... (N bytes)` instead of asking for a password, a failed key
+  derivation is an error instead of a crash, and a file used as password is wiped from memory
+  after use.
 
 ## Consensus fixes
 

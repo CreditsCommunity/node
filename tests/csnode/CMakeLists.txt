@@ -7,6 +7,7 @@ file(GLOB SRCS *.cpp)
 list(APPEND SRCS
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/config.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/banner.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../client/config/keyfilecrypt.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../client/src/dbcheck.cpp"
 )
 
@@ -36,6 +37,9 @@ target_link_libraries(${TEST_NAME} ${LINKER_START_GROUP} csdb csconnector solver
         )
 
 add_test(NAME ${TEST_NAME}
-        COMMAND ${TEST_NAME})
+        COMMAND ${TEST_NAME} --gtest_filter=-KeyFileCrypt.*)
+# the key file encryption runs Argon2id with 1 GiB a few times: its own entry, its own timeout
+add_test(NAME keyfilecrypt_tests
+        COMMAND ${TEST_NAME} --gtest_filter=KeyFileCrypt.*)
 
 configure_msvc_flags()
