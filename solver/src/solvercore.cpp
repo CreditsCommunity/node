@@ -626,6 +626,61 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
     }
 
     csdebug() << "NODE> StageThree prepared:" << std::endl << cs::StageThree::toString(stage3);
+
+    // Diagnostics only (one info line per stage 3): the inputs that went into our block/round hashes.
+    // Stage-3 carries signatures but no hashes, so a receiver that fails "Block/Round Signatures are
+    // not valid" cannot see what the sender signed; comparing this line between nodes for the same
+    // round shows which input differed. Read-only: nothing below is signed, sent or stored.
+    {
+        const csdb::Pool& blk = deferredBlock_;
+        const auto& trxs = blk.transactions();
+        cs::Bytes txSigs;
+        cs::Bytes txFees;
+        txSigs.reserve(trxs.size() * sizeof(cs::Signature));
+        txFees.reserve(trxs.size() * 2);
+        for (const auto& t : trxs) {
+            const cs::Signature& sig = t.signature();
+            txSigs.insert(txSigs.end(), sig.cbegin(), sig.cend());
+            auto fee = t.counted_fee();
+            const uint16_t rawFee = fee.get_raw();
+            txFees.push_back(static_cast<uint8_t>(rawFee & 0xFF));
+            txFees.push_back(static_cast<uint8_t>(rawFee >> 8));
+        }
+        auto short8 = [](const cs::Byte* data, size_t size) -> std::string {
+            if (size == 0) {
+                return "-";
+            }
+            return cs::Utils::byteStreamToHex(data, std::min<size_t>(size, 4));
+        };
+        auto hash8 = [&short8](const cs::Bytes& bytes) -> std::string {
+            if (bytes.empty()) {
+                return "-";
+            }
+            const cs::Hash h = cscrypto::calculateHash(bytes.data(), bytes.size());
+            return short8(h.data(), h.size());
+        };
+        const cs::Bytes prevHash = blk.previous_hash().to_binary();
+        const cs::PoolMetaInfo& meta = justCreatedRoundPackage_.poolMetaInfo();
+
+        cslog() << log_prefix << "stage3 inputs: R-" << conveyer.currentRoundNumber()
+            << " iter=" << static_cast<int>(stage3.iteration)
+            << " seq=" << seq
+            << " prev=" << short8(prevHash.data(), prevHash.size())
+            << " ts=" << meta.timestamp
+            << " reward=" << (meta.reward.empty() ? std::string("-") : cs::Utils::byteStreamToHex(meta.reward.data(), meta.reward.size()))
+            << " tx=" << trxs.size()
+            << " txIds=" << hash8(txSigs)
+            << " fees=" << hash8(txFees)
+            << " charMask=" << hash8(block_characteristic->mask) << '/' << block_characteristic->mask.size()
+            << " newWallets=" << blk.newWallets().size()
+            << " smartSigs=" << blk.smartSignatures().size()
+            << " conf=" << static_cast<int>(blk.numberConfirmations()) << '/' << blk.roundConfirmations().size()
+            << " writer=" << static_cast<int>(stage3.writer)
+            << " block=" << short8(stage3.blockHash.data(), stage3.blockHash.size())
+            << " round=" << short8(stage3.roundHash.data(), stage3.roundHash.size())
+            << " trusted=" << short8(stage3.trustedHash.data(), stage3.trustedHash.size())
+            << " mask=" << cs::TrustedMask::toString(stage3.realTrustedMask);
+    }
 }
 
 void SolverCore::uploadNewStates([[maybe_unused]] std::vector<csdb::Transaction> newStates) {
