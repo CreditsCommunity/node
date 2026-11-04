@@ -15,12 +15,15 @@ the next round table and the hash of the next confidant list, and sends the thre
 without the hashes. A receiver checks each signature against **its own** three hashes. When a
 signature fails, either the key or message is wrong, or the sender built a different block or
 round table. The lines below, at info level (no debug log needed), tell these cases apart and
-show which input differed. They are written only to the log: nothing is signed, sent or stored
+show which input differed. They appear only when something goes wrong (a failed check, a
+gray-listing, a missing majority): a node in a healthy network logs none of them. They are written only to the log: nothing is signed, sent or stored
 differently, and the consensus result is the same as without them.
 
 ## 1. What this node signed: `stage3 inputs`
 
-One line per stage 3 sent by this node:
+What this node put into the hashes it signed. It is logged at info level once per iteration, just
+before the first `stage3 check failed` line, so both sides of a split print it for the same round;
+at debug level it is logged for every stage 3:
 
 ```
 info SolverCore: stage3 inputs: R-37 iter=0 seq=37 prev=7C839893 ts=1793783441147 reward=- tx=1

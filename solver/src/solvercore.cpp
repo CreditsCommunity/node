@@ -627,10 +627,12 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
 
     csdebug() << "NODE> StageThree prepared:" << std::endl << cs::StageThree::toString(stage3);
 
-    // Diagnostics only (one info line per stage 3): the inputs that went into our block/round hashes.
-    // Stage-3 carries signatures but no hashes, so a receiver that fails "Block/Round Signatures are
-    // not valid" cannot see what the sender signed; comparing this line between nodes for the same
-    // round shows which input differed. Read-only: nothing below is signed, sent or stored.
+    // Diagnostics only: the inputs that went into our block/round hashes. Stage-3 carries signatures
+    // but no hashes, so a receiver that fails "Block/Round Signatures are not valid" cannot see what
+    // the sender signed; comparing this line between nodes for the same round shows which input
+    // differed. Kept for the round and logged at info level only when a peer's stage 3 fails the
+    // final check (logStage3Failure), at debug level every round. Read-only: nothing below is
+    // signed, sent or stored.
     {
         const csdb::Pool& blk = deferredBlock_;
         const auto& trxs = blk.transactions();
@@ -662,7 +664,8 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
         const cs::Bytes prevHash = blk.previous_hash().to_binary();
         const cs::PoolMetaInfo& meta = justCreatedRoundPackage_.poolMetaInfo();
 
-        cslog() << log_prefix << "stage3 inputs: R-" << conveyer.currentRoundNumber()
+        std::ostringstream line;
+        line << "stage3 inputs: R-" << conveyer.currentRoundNumber()
             << " iter=" << static_cast<int>(stage3.iteration)
             << " seq=" << seq
             << " prev=" << short8(prevHash.data(), prevHash.size())
@@ -680,6 +683,8 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
             << " round=" << short8(stage3.roundHash.data(), stage3.roundHash.size())
             << " trusted=" << short8(stage3.trustedHash.data(), stage3.trustedHash.size())
             << " mask=" << cs::TrustedMask::toString(stage3.realTrustedMask);
+        stage3InputsLine_ = line.str();
+        csdebug() << log_prefix << stage3InputsLine_;
     }
 }
 
