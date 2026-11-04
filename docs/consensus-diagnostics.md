@@ -66,10 +66,12 @@ nodes that differ, the first field that differs is the cause:
 - `txIds`, `fees`, `newWallets` or `charMask` differ: the block content differs;
 - `conf` differs: the nodes hold different round confirmations;
 - all of these equal but `round` differs: the round table differs (the next confidants, the
-  packet hashes chosen for the next round, the sub-round or the iteration);
-- `block` equal but `round` differs while `ts` and `reward` differ too is still a block-input
-  difference: the round table signs the timestamp, reward, characteristic, sequence and previous
-  hash as well, so a different timestamp makes both `block` and `round` fail.
+  packet hashes chosen for the next round, the sub-round or the iteration).
+
+The round table also signs the timestamp, reward, characteristic, sequence and previous hash, so a
+difference in one of them makes both `block` and `round` fail (`failed=block+round` below); only
+`block` failing points to the block-only inputs (`txIds`, `fees`, `newWallets`, `conf`,
+`smartSigs`).
 
 ## 2. Why a peer failed: `stage3 check failed`
 
