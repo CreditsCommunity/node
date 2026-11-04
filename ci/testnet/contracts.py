@@ -18,6 +18,8 @@ mainnet node and executor: the node refuses methods declaring @UsingContract
 (Violations::SubsequentCall), and executor build 1518 fails an undeclared invokeExternalContract
 with an AccessControlException (its configuration is created lazily inside the contract sandbox).
 
+ContractAllMethodsGet must report the @Getter annotations of samples/contracts/Counter.java.
+
 It deploys samples/contracts/TipJar.java and pays it with plain CS transfers: SmartContractsListGet
 must still list, for the payers, exactly the contracts they deployed, and TransactionsGet must show
 the payments as contract replenishes.
@@ -200,6 +202,50 @@ public class CallerDeclared extends SmartContract {
 
 # the examples of samples/contracts, read by the checks below
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "samples", "contracts")
+GETTER = "com.credits.scapi.annotations.Getter"
+
+
+def check_getter_annotations(client):
+    """ContractAllMethodsGet passes on the annotations the executor reports: the @Getter methods of
+    samples/contracts/Counter.java carry it and its state-changing methods do not, so a client can
+    tell what it may run as a free getter. Returns the number of failures."""
+    with open(os.path.join(SAMPLES, "Counter.java")) as f:
+        source = f.read()
+    compiled = client.SmartContractCompile(source)
+    if compiled.status.code != 0:
+        print(f"ContractAllMethodsGet annotations: FAILED, compile: {compiled.status.message}", flush=True)
+        return 1
+    got = client.ContractAllMethodsGet(compiled.byteCodeObjects)
+    if got.code != 0:
+        print(f"ContractAllMethodsGet annotations: FAILED, {got.message}", flush=True)
+        return 1
+    annotated = sorted(m.name for m in got.methods if any(a.name == GETTER for a in (m.annotations or [])))
+    getters, others = {"getValue", "getNote", "getOwner"}, {"increment", "add", "setNote"}
+    ok = getters <= set(annotated) and not (others & set(annotated))
+    print(f"ContractAllMethodsGet annotations: {'ok' if ok else 'FAILED'} (@Getter on {annotated}, "
+          f"expected {sorted(getters)} and not {sorted(others)})", flush=True)
+    return 0 if ok else 1
+
+
+def report_compile_errors(client_for, nodes):
+    """With mixed executors (EXECUTOR_JAR_ALT, testnet.yml input executor_ref): SmartContractCompile
+    of a source with two errors (lines 11 and 12) on the even nodes, which run the executor under
+    test. Reported, not checked. An executor with CreditsCommunity/contract-executor#13 returns the
+    compiler's errors with their line numbers; the release executor (build 1555 and before) fails
+    with "Internal error processing compileSourceCode", and the node then drops and reopens its
+    executor connection, so the nodes running it are left out."""
+    if not os.environ.get("EXECUTOR_JAR_ALT"):
+        return
+    broken = COUNTER.replace("value += 1;", "value += missingA;\n        value += missingB;")
+    for i in range(2, nodes + 1, 2):
+        try:
+            got = client_for(i).SmartContractCompile(broken)
+            lines = [l for l in (got.status.message or "").splitlines() if not l.lstrip().startswith("at ")][:4]
+            print(f"SmartContractCompile with errors on n{i} (reported): status {got.status.code}, {' | '.join(lines)!r}", flush=True)
+        except Exception as e:
+            print(f"SmartContractCompile with errors on n{i} (reported): {type(e).__name__}: {e}", flush=True)
+
+
 TT_CONTRACT_REPLENISH = 4  # api.TransactionType: a CS transfer that ran a contract's payable()
 
 
@@ -610,6 +656,8 @@ def main():
     call_callers("before restart", 1)
 
     failures = 0
+    failures += check_getter_annotations(client_for(1))
+    report_compile_errors(client_for, args.nodes)
     tipjar, tipjar_failures = tipjar_payments(client_for, master, [counter, ledger, caller, declared] + ([dice] if dice else []))
     failures += tipjar_failures
     calls = 0

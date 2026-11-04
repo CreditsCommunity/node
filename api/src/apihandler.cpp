@@ -2507,10 +2507,15 @@ void APIHandler::ContractAllMethodsGet(ContractAllMethodsGetResult& _return, con
         ::general::MethodDescription method;
         method.name = met.name;
         method.returnType = met.returnType;
+        // the annotations the executor reports (e.g. @Getter on a method, @ContractAddress on an
+        // argument): a client tells a getter, which it may run for free, from a method that
+        // changes the state only through them
+        method.annotations = met.annotations;
         for (auto arg : met.arguments) {
             ::general::MethodArgument argument;
             argument.type = arg.type;
             argument.name = arg.name;
+            argument.annotations = arg.annotations;
             method.arguments.push_back(argument);
         }
         _return.methods.push_back(method);

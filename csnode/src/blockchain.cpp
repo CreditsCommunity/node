@@ -1852,7 +1852,12 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
     }
 
     if (!finalizeBlock(pool, isTrusted, lastConfidants)) {
-        csdebug() << kLogPrefix << "the signatures of the block are insufficient or incorrect";
+        // an invalid pool has no hash: do not let hash() compute one from its empty binary
+        const auto finalizeHash = pool.is_valid() ? pool.hash().to_binary() : cs::Bytes{};
+        const auto finalizePrev = pool.previous_hash().to_binary();
+        cswarning() << kLogPrefix << "the signatures of the block are insufficient or incorrect: #" << pool.sequence()
+            << " hash " << (finalizeHash.empty() ? std::string("-") : cs::Utils::byteStreamToHex(finalizeHash.data(), finalizeHash.size()))
+            << " prev " << (finalizePrev.empty() ? std::string("-") : cs::Utils::byteStreamToHex(finalizePrev.data(), finalizePrev.size()));
         setBlocksToBeRemoved(1U);
         return std::nullopt;
     }
