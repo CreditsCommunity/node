@@ -13,7 +13,8 @@ if (-not (Test-Path $node) -or -not (Test-Path $config)) {
     exit 1
 }
 
-function Ask([string]$Question, [string]$Default, [string[]]$Choices) {
+# the choices in $Whole must be typed in full (the first letters are enough for the others)
+function Ask([string]$Question, [string]$Default, [string[]]$Choices, [string[]]$Whole = @()) {
     while ($true) {
         if ($Defaults) { Write-Host "$Question [$Default]: $Default"; return $Default }
         if ([Console]::IsInputRedirected) {
@@ -28,9 +29,18 @@ function Ask([string]$Question, [string]$Default, [string[]]$Choices) {
         if ($reply -eq '') { return $Default }
         # a whole answer first ("no" is not "node"), then the first one it begins
         foreach ($c in $Choices) { if ($c -eq $reply) { return $c } }
-        foreach ($c in $Choices) { if ($c.StartsWith($reply)) { return $c } }
-        Write-Host "  Please answer one of: $($Choices -join ' ')"
+        foreach ($c in $Choices) { if ($Whole -notcontains $c -and $c.StartsWith($reply)) { return $c } }
+        Write-Host ("  Please answer one of: $($Choices -join ' ')" + $(if ($Whole.Count) { " ($($Whole -join ' ') in full)" } else { '' }))
     }
+}
+
+# restricts a node's key file to its owner (this user) and SYSTEM: no inherited entries
+function Restrict-KeyAcl([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Write-Host "NodePrivate.txt: access for its owner only (and SYSTEM), the key is in clear."
+    & icacls $Path /inheritance:r /grant:r "*${me}:(F)" '*S-1-5-18:(F)' | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "  icacls failed: restrict NodePrivate.txt yourself (Properties > Security)." }
 }
 
 # a free-text answer, trimmed (the default for an empty one)
@@ -335,7 +345,9 @@ if (Test-Path -LiteralPath $walletBin) {
     Write-Host '   account.'
     # -Defaults cannot show and check 24 words: the node's key is then made later
     $walletDefault = if ($nodeKey -eq 'missing' -and $Defaults) { 'no' } else { 'node' }
-    $wallet = Ask "   The wallet's account? (node/create/import/no)" $walletDefault @('node', 'create', 'import', 'no')
+    # making the node's key is never chosen by a stray "n": "node" in full (or Enter)
+    $whole = if ($nodeKey -eq 'missing') { @('node') } else { @() }
+    $wallet = Ask "   The wallet's account? (node/create/import/no)" $walletDefault @('node', 'create', 'import', 'no') $whole
     if ($wallet -eq 'import') {
         $walletFile = Ask-Text '   File holding the key (Enter: paste or type it when the wallet asks)' ''
         if ($walletFile -and -not (Test-Path -LiteralPath $walletFile -PathType Leaf)) {
@@ -564,9 +576,15 @@ if ($wallet -ne 'none') {
     $toml.Add("address = `"127.0.0.1:$apiPort`"")
     $toml.Add("network = `"$walletNetwork`"")
     $toml.Add("diag = `"$diag`"")
-    # the node's key (NodePrivate.txt here) is the wallet's account "node"; a node_key set by hand
-    # before ("off", another file) is kept
-    if (-not ($kept | Where-Object { $_ -match '^node_key' })) { $toml.Add('node_key = "NodePrivate.txt"') }
+    # the node's key (NodePrivate.txt here) is the wallet's account "node" only when the answer was
+    # node; otherwise off. A node_key already in wallet.toml (set by hand, or by an earlier run) is
+    # kept, unless the answer is node.
+    if ($wallet -eq 'node') {
+        $toml.Add('node_key = "NodePrivate.txt"')
+        $kept = @($kept | Where-Object { $_ -notmatch '^node_key' })
+    } elseif (-not ($kept | Where-Object { $_ -match '^node_key' })) {
+        $toml.Add('node_key = "off"')
+    }
     foreach ($l in $kept) { $toml.Add($l) }
     # never written through a link (a symlink or junction planted there) or over anything but a
     # regular file: a new file, then moved over; UTF-8 without a byte-order mark (TOML)
@@ -598,6 +616,8 @@ if ($wallet -ne 'none') {
         } elseif ((Get-Content -LiteralPath $homeConfig -Raw) -ne (Get-Content -LiteralPath 'wallet.toml' -Raw)) {
             Write-Host "$homeConfig is kept; this node's profile: credits-wallet.exe --config wallet.toml"
         }
+        # the node's key, in clear, for its owner only (and SYSTEM: the node may run as a service)
+        if ($wallet -eq 'node') { Restrict-KeyAcl (Join-Path $PSScriptRoot 'NodePrivate.txt') }
         switch ($wallet) {
             'create' { $walletArgs = @('--config', 'wallet.toml', 'account', 'new', $walletName) }
             'import' {
@@ -619,7 +639,9 @@ if ($wallet -ne 'none') {
                 Write-Host 'anyone who has it owns the account, and nobody can recover the account without it.'
             }
             & $walletBin @walletArgs
-            if ($LASTEXITCODE -eq 0) {
+            $walletRc = $LASTEXITCODE
+            if ($wallet -eq 'node' -and $nodeKey -eq 'missing') { Restrict-KeyAcl (Join-Path $PSScriptRoot 'NodePrivate.txt') }
+            if ($walletRc -eq 0) {
                 Write-Host "Open the wallet with: cd `"$PSScriptRoot`" ; .\credits-wallet.exe --config wallet.toml"
                 if ($wallet -eq 'node') { Write-Host 'Keep NodePrivate.txt: the node needs it. Keep savings in a separate account.' }
             } else {

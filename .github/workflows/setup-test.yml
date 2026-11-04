@@ -143,13 +143,10 @@ jobs:
           import tomllib, os
           w = tomllib.load(open("csnode/wallet.toml", "rb"))
           assert w["node"] == "local", w
+          # the answer was create: the node's key is not the wallet's account
           assert w["nodes"]["local"] == {"address": "127.0.0.1:9090", "network": "mainnet", "diag": "127.0.0.1:9088",
-                                         "node_key": "NodePrivate.txt"}, w
-          # the wallet's own config.toml: the same profile, the node's key by its full path
+                                         "node_key": "off"}, w
           home = tomllib.load(open(os.path.join(os.environ["CREDITS_WALLET_HOME"], "config.toml"), "rb"))
-          key = home["nodes"]["local"].pop("node_key")
-          assert os.path.isabs(key) and os.path.samefile(key, "csnode/NodePrivate.txt"), key
-          w["nodes"]["local"].pop("node_key")
           assert home == w, home
           print("wallet.toml and the wallet's config.toml: ok")
           EOF
@@ -178,11 +175,14 @@ jobs:
           "$w" --config wallet.toml status
           "$w" --config wallet.toml status --json > ../wallet-status.json
           printf 'ci password\n' > ../pw && chmod 600 ../pw
-          # the node's own key is the account "node": marked, the default, read in place
-          "$w" --config wallet.toml account list | tee ../accounts.txt
+          # the node's own key as the account "node" (--node-key: this wallet.toml says off, the answer
+          # was create): marked, the default, read in place, its address and file said once
+          "$w" --config wallet.toml --node-key NodePrivate.txt account list 2> ../accounts-err.txt | tee ../accounts.txt
+          cat ../accounts-err.txt
           grep -q "^node  *$(cat NodePublic.txt)  NODE KEY (default;" ../accounts.txt
-          test "$("$w" --config wallet.toml account address | tr -d '\r')" = "$(cat NodePublic.txt)"
-          "$w" --config wallet.toml account node-key | tee ../node-key.txt
+          grep -q "node key account node: $(cat NodePublic.txt), read from " ../accounts-err.txt
+          test "$("$w" --config wallet.toml account address --node-key NodePrivate.txt | tr -d '\r')" = "$(cat NodePublic.txt)"
+          "$w" --config wallet.toml --node-key NodePrivate.txt account node-key | tee ../node-key.txt
           grep -q "public file : .*matches" ../node-key.txt && grep -q "node        : running" ../node-key.txt
           # never written while the node runs
           if "$w" account node-key new --out . --words-file ../words.txt 2> ../refused.txt; then echo "node-key new while the node runs"; exit 1; fi
@@ -191,7 +191,7 @@ jobs:
           "$w" --config wallet.toml account import nodecopy NodePrivate.txt --password-file ../pw 2> ../import.txt
           cat ../import.txt
           grep -q "keep it, the node needs it" ../import.txt && test -f NodePrivate.txt
-          "$w" --config wallet.toml balance node
+          "$w" --config wallet.toml --node-key NodePrivate.txt balance node
           for _ in $(seq 1 30); do
             "$w" --config wallet.toml tokens node --json > ../wallet-tokens.json && break
             sleep 20   # the cache is read in the background after the first start
@@ -261,6 +261,16 @@ jobs:
           print("the rest of config.ini is unchanged")
           EOF
 
+      - name: A stray "n" never makes the node's key
+        run: |
+          cp -a csnode-clean csnode-n && rm -f csnode-n/config.ini.bak-* csnode-n/wallet.toml csnode-n/Node*.txt
+          # storage, database, first start (sync), share, executor, wallet ("n": no, "node" must be
+          # typed in full when it would make the key), token cache, start, write
+          bash setup-run.sh csnode-n 'pruned\nlmdb\nsync\nno\n\nn\n\nno\n\n' 2>&1 | tee setup-n.txt | tail -6
+          grep -a "wallet:       no account now" setup-n.txt
+          test ! -e csnode-n/NodePrivate.txt
+          grep -q '^node_key = "off"' csnode-n/wallet.toml
+
       - name: Executor of a folder upgraded by copying the node only
         run: |
           build=$(python -c "import re, zipfile; print(re.search(r'git.total.commit.count=(\d+)', zipfile.ZipFile('csnode-clean/contract-executor.jar').read('git.properties').decode()).group(1))")
@@ -322,6 +332,11 @@ jobs:
           grep -a "kept in clear on this server" setup-pty1.txt
           grep -a "account     : node (NODE KEY, the default account)" setup-pty1.txt
           grep -a "address     : $(cat csnode-pty/NodePublic.txt)" setup-pty1.txt
+          # the key, in clear, made private; the profile names it
+          grep -a "chmod 600 NodePrivate.txt" setup-pty1.txt
+          mode() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
+          test "$(mode csnode-pty/NodePrivate.txt)" = 600
+          grep -q '^node_key = "NodePrivate.txt"' csnode-pty/wallet.toml
           test ! -e "$CREDITS_WALLET_HOME/accounts" || test -z "$(ls "$CREDITS_WALLET_HOME/accounts")"
           # a separate account as well ("no" is not "node")
           python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
@@ -331,6 +346,7 @@ jobs:
           python ci/setup/pty_drive.py csnode-pty ./setup.sh "${common[@]}" \
             "The wallet's account\? \(node/create/import/no\) \[node\]:=>no" | tee setup-pty3.txt | tail -4
           grep -a "wallet:       no account now" setup-pty3.txt
+          grep -q '^node_key = "NodePrivate.txt"' csnode-pty/wallet.toml   # kept by create and no
           ./csnode-pty/credits-wallet --config csnode-pty/wallet.toml account list
           # a folder without a key: Enter makes it from a new 24-word phrase, in the node's format
           cp -a csnode-clean csnode-nokey && rm -f csnode-nokey/config.ini.bak-* csnode-nokey/wallet.toml csnode-nokey/Node*.txt
@@ -340,7 +356,6 @@ jobs:
           grep -a "type back three of the words" setup-pty4.txt
           key=$(cat csnode-nokey/NodePublic.txt)
           grep -a "address : $key" setup-pty4.txt
-          mode() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
           test "$(mode csnode-nokey/NodePrivate.txt)" = 600 && test "$(mode csnode-nokey/NodePublic.txt)" = 600
           # the node starts with it, without a question about its key, and names it as its own
           cd csnode-nokey

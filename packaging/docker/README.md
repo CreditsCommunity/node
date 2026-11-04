@@ -46,7 +46,9 @@ The node's own key, `keys/NodePrivate.txt`, is the wallet's account `node` (mark
 default): the address of the node's rewards and of the delegations to it. The wallet reads it in
 place (`CREDITS_WALLET_NODE_KEY`), without copying or encrypting it: it is in clear on the volume,
 as the node needs it, so keep on it only what the node needs and savings in a separate account
-(`credits-wallet account new NAME`).
+(`credits-wallet account new NAME`). The wallet uses the key only if it and `keys/` belong to the
+container's user (uid 1000) and nobody else can write to them: with a bind mount, `sudo chown -R
+1000 ~/.credits` (above), and keep `keys/NodePrivate.txt` at mode 600.
 
 On mainnet every transfer is real. The user guide is `/opt/credits/wallet-guide.md` in the image,
 and [docs/guide.md](https://github.com/CreditsCommunity/wallet/blob/main/docs/guide.md) of the wallet.

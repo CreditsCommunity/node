@@ -47,7 +47,9 @@ config=config.ini
 [ -x "$node" ] || { echo "No node binary here: run setup.sh from the csnode folder of the package."; exit 1; }
 [ -f "$config" ] || { echo "No $config here: run setup.sh from the csnode folder of the package."; exit 1; }
 
-# ask "question" default choice... -> sets $answer to one of the choices (the first letters are enough)
+# ask "question" default choice... -> sets $answer to one of the choices (the first letters are enough,
+# except for the choices listed in $ask_whole, which must be typed whole)
+ask_whole=
 ask() {
     local question=$1 default=$2 reply c
     shift 2
@@ -66,9 +68,10 @@ ask() {
             [ "$c" != "$reply" ] || { answer=$c; return; }
         done
         for c in "$@"; do
+            case " $ask_whole " in *" $c "*) continue ;; esac
             case "$c" in "$reply"*) answer=$c; return ;; esac
         done
-        echo "  Please answer one of: $*"
+        echo "  Please answer one of: $*${ask_whole:+ ($ask_whole in full)}"
     done
 }
 
@@ -429,7 +432,10 @@ if [ -x "$wallet_bin" ]; then
             wallet_default=node
             # --defaults cannot show and check 24 words: the node's key is then made later
             [ "$node_key" = present ] || [ "$defaults" = no ] || wallet_default=no
+            # making the node's key is never chosen by a stray "n": "node" in full (or Enter)
+            [ "$node_key" = present ] || ask_whole=node
             ask "   The wallet's account? (node/create/import/no)" "$wallet_default" node create import no
+            ask_whole=
         else
             wallet_default=create
             [ "$have_accounts" = no ] && [ "$defaults" = no ] || wallet_default=no
@@ -670,9 +676,15 @@ if [ "$wallet" != none ]; then
         echo "address = \"127.0.0.1:$api_port\""
         echo "network = \"$wallet_network\""
         echo "diag = \"$diag\""
-        # the node's key (NodePrivate.txt here) is the wallet's account "node"; a node_key set by
-        # hand before ("off", another file) is kept
-        printf '%s\n' "$kept" | grep -q '^node_key' || echo 'node_key = "NodePrivate.txt"'
+        # the node's key (NodePrivate.txt here) is the wallet's account "node" only when the answer
+        # was node; otherwise off. A node_key already in wallet.toml (set by hand, or by an earlier
+        # run) is kept, unless the answer is node.
+        if [ "$wallet" = node ]; then
+            echo 'node_key = "NodePrivate.txt"'
+            kept=$(printf '%s\n' "$kept" | grep -v '^node_key' || true)
+        elif ! printf '%s\n' "$kept" | grep -q '^node_key'; then
+            echo 'node_key = "off"'
+        fi
         [ -z "$kept" ] || echo "$kept"
     } > "$wallet_tmp"
     chmod 644 "$wallet_tmp"
@@ -700,16 +712,17 @@ if [ "$wallet" != none ]; then
         elif ! cmp -s wallet.toml "$wallet_home/config.toml"; then
             echo "$wallet_home/config.toml is kept; this node's profile: ./credits-wallet --config wallet.toml"
         fi
-        # the wallet uses the node's key only from a folder and a file nobody else can write to
-        # (a umask of 002 leaves them group-writable)
+        # the wallet uses the node's key only from a folder nobody else can write to (a umask of 002
+        # leaves it group-writable), and the key, in clear, is for its owner only: the node writes it
+        # readable by everyone (0644)
         if [ "$wallet" = node ]; then
             case "$(ls -ld . | cut -c6,9)" in
-                *w*) chmod go-w . && echo "This folder was writable by other users: chmod go-w done (the wallet refuses such a node folder)." ;;
+                *w*) echo "This folder can be written by other users: chmod go-w on it (the wallet refuses such a node folder)."
+                     chmod go-w . ;;
             esac
-            if [ -f NodePrivate.txt ] && [ ! -L NodePrivate.txt ]; then
-                case "$(ls -l NodePrivate.txt | cut -c6,9)" in
-                    *w*) chmod go-w NodePrivate.txt && echo "NodePrivate.txt was writable by other users: chmod go-w done." ;;
-                esac
+            if [ -f NodePrivate.txt ] && [ ! -L NodePrivate.txt ] && [ "$(ls -l NodePrivate.txt | cut -c5-10)" != "------" ]; then
+                echo "NodePrivate.txt can be read or written by other users: chmod 600 NodePrivate.txt."
+                chmod 600 NodePrivate.txt
             fi
         fi
         case "$wallet" in
