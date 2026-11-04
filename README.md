@@ -60,6 +60,9 @@ Indicative requirements:
 
 See [docs/storage.md](docs/storage.md) for the storage options.
 
+If you encrypt the node key (`--encryptkey`, or the password choice at the first start), use a
+long, unique password.
+
 ## Building from source
 The builds that CI runs on every change are the reference:
 [build.yml](.github/workflows/build.yml) (Linux) and

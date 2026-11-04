@@ -253,20 +253,16 @@ consensus rules.
   - the rewards of an uncertain block kept when the trusted mask differs;
   - the revert of a timed delegation;
   - uninitialised consensus settings.
-- **Encrypted key file.** The key file encryption (`--encryptkey`, the "[1] Encrypt with password"
-  choice at the first start, and the change of password offered at start) now uses a random salt
-  per file: `NodePrivate.txt` is base58 of the salt (16 bytes), the nonce (8 bytes) and the
-  encrypted key with its tag (80 bytes), 104 bytes once decoded, with the same Argon2id parameters
-  and cipher as before. Files encrypted by older versions (88 bytes) are read as before and are
-  never rewritten by themselves; a plain key (64 bytes) is unchanged. A file encrypted by this
-  version cannot be opened by older community nodes or by the official node until they read the
-  new format (they stop with a crash when they try to open it), so to go back to one of them keep
-  the plain key (or the seed phrase), or encrypt the plain key again with that node. An encrypted
-  file of any other length stops the node at once with `Bad private key file in ... (N bytes)`
-  (older versions asked for the password and crashed on one longer than 88 bytes). A failed
-  encryption no longer writes an empty key file, and the key file is replaced atomically
-  (`NodePrivate.txt.tmp`, flushed, then renamed over it): a crash or a full disk leaves the previous
-  file, and the log says the write failed instead of reporting success.
+- **Encrypted key file.** Safer handling of the encrypted key file (atomic re-encryption, no empty
+  file on failure, clear errors); the file format is unchanged and stays compatible with the
+  official node. When the node encrypts or re-encrypts `NodePrivate.txt` (`--encryptkey`, the
+  change of password offered at start, a new key at the first start) it writes
+  `NodePrivate.txt.tmp`, flushes it and renames it over the key file, so a crash or a full disk
+  leaves the previous file, and the log says the write failed instead of reporting success. A
+  failed encryption never writes an empty key file, a key file of an unexpected length stops the
+  node with `Bad private key file in ... (N bytes)` instead of asking for a password, a failed key
+  derivation is an error instead of a crash, and a file used as password is wiped from memory
+  after use.
 
 ## Consensus fixes
 
