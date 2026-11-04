@@ -96,7 +96,9 @@ or `untrusted` (the sender was already excluded in our mask). The verdict:
 
 ## 3. Who is in the majority: `stage3 split`
 
-After each failure (at most 10 per iteration) the node logs the split it sees:
+After each failure (at most 10 per iteration) the node logs the split it sees. When the node's
+own stage 3 arrives after its peers', the early lines list only the peers checked so far: read the
+last `stage3 split` line of the iteration.
 
 ```
 info R-1 SolverCore> stage3 split iter=0: agree(5)=[T0:KasmLeQs T1:7gZ4BWYh T2:B9XbBZUD(own) T3:Br6U154N T6:HhovRb4b] | block+round(2)=[T4:EJGNJj2S T5:GqamRj6f] of 7
