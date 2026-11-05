@@ -420,8 +420,9 @@ if [ -x "$wallet_bin" ]; then
         else
             echo "   (The node's key belongs to the folder's owner: the wallet of $run_as cannot use it.)"
         fi
-        echo "   create: a separate account as well, encrypted with a password (for savings): you write"
-        echo "           its 24-word recovery phrase on paper, in this terminal."
+        echo "   create: a separate account as well, for savings: you write its 24-word recovery phrase"
+        echo "           on paper, in this terminal. It is encrypted with the wallet password (one for"
+        echo "           every account of the wallet, chosen with its first account)."
         echo "   import: a key you have, as a separate account: a 24-word phrase, a base58 key, or the"
         echo "           keys JSON of the official wallet."
         echo "   no:     not now (later: ./credits-wallet --config wallet.toml)."

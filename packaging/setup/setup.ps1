@@ -335,8 +335,9 @@ if (Test-Path -LiteralPath $walletBin) {
         Write-Host "           of the node's identity. You write the words on paper, in this terminal; the node"
         Write-Host "           uses the key at its first start, and it is the wallet's account `"node`"."
     }
-    Write-Host '   create: a separate account as well, encrypted with a password (for savings): you write'
-    Write-Host '           its 24-word recovery phrase on paper, in this terminal.'
+    Write-Host '   create: a separate account as well, for savings: you write its 24-word recovery phrase'
+    Write-Host '           on paper, in this terminal. It is encrypted with the wallet password (one for'
+    Write-Host '           every account of the wallet, chosen with its first account).'
     Write-Host '   import: a key you have, as a separate account: a 24-word phrase, a base58 key, or the'
     Write-Host '           keys JSON of the official wallet.'
     Write-Host '   no:     not now (later: credits-wallet.exe --config wallet.toml).'
@@ -629,8 +630,9 @@ if ($wallet -ne 'none') {
                               else { @('--config', 'wallet.toml', 'account', 'node-key', 'new') }
             }
         }
-        # the command to run later, every argument quoted for PowerShell
-        $walletCmd = '.\credits-wallet.exe ' + (($walletArgs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
+        # the command to run later: an argument with anything but letters, digits and _ . - is quoted
+        # for PowerShell (the account names are of those only; a file's path may need it)
+        $walletCmd = '.\credits-wallet.exe ' + (($walletArgs | ForEach-Object { if ($_ -cmatch '^[A-Za-z0-9_.-]+$') { $_ } else { "'" + ($_ -replace "'", "''") + "'" } }) -join ' ')
         if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
             Write-Host ''
             if ($wallet -eq 'create' -or ($wallet -eq 'node' -and $nodeKey -eq 'missing')) {

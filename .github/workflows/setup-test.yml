@@ -192,8 +192,10 @@ jobs:
           cat ../import.txt
           grep -q "keep it, the node needs it" ../import.txt && test -f NodePrivate.txt
           "$w" --config wallet.toml --node-key NodePrivate.txt balance node
+          # "node" needs --node-key here too: wallet.toml says off, and the wallet never takes the key
+          # from the current folder
           for _ in $(seq 1 30); do
-            "$w" --config wallet.toml tokens node --json > ../wallet-tokens.json && break
+            "$w" --config wallet.toml --node-key NodePrivate.txt tokens node --json > ../wallet-tokens.json && break
             sleep 20   # the cache is read in the background after the first start
           done
           cd ..
@@ -204,6 +206,7 @@ jobs:
           # a package from community.17 on reports the network; the one under test may not
           assert st.get("node_says_mainnet", True) is True, st
           t = json.load(open("wallet-tokens.json"))
+          assert "error" not in t, t
           assert t["source"] == "cache" and t["complete"] is True, t
           print("wallet: synced, mainnet, no mismatch; tokens from the node's cache:", len(t["tokens"]))
           EOF
