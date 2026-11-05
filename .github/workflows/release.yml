@@ -3,7 +3,9 @@ name: Release
 # Ready-to-run mainnet packages of the community node, one for full and pruned storage: config.ini
 # runs a full node (as the official release), config.pruned.ini a pruned one on LMDB. Each holds the node
 # built here, the contract executor of an CreditsCommunity/contract-executor release, the JDK the official
-# release ships, and the official configuration files kept in packaging/mainnet.
+# release ships, the official configuration files kept in packaging/mainnet, and the terminal wallet
+# of the CreditsCommunity/wallet release named in packaging/wallet-tag with its user guide (downloaded
+# from that public release and checked against its SHA256SUMS: packaging/fetch-wallet.sh).
 #
 # A tag community-v<version> publishes a release; a manual run builds the packages as workflow
 # artifacts and publishes only when asked. The Linux packages are published at once; the Windows and
@@ -23,6 +25,12 @@ on:
       executor_tag:
         description: 'Release tag of CreditsCommunity/contract-executor holding contract-executor.jar and sc-api-support.jar'
         required: true
+      wallet_tag:
+        description: 'Release tag of CreditsCommunity/wallet to ship (empty = packaging/wallet-tag and its pin packaging/wallet-sha256)'
+        default: ''
+      wallet_sums_sha256:
+        description: 'With wallet_tag: the SHA-256 of that release''s SHA256SUMS file (required to publish; without it the wallet is not pinned and nothing is published)'
+        default: ''
       publish:
         description: 'Create the GitHub release community-v<version> (false = artifacts only)'
         default: 'false'
@@ -63,6 +71,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
       executor_tag: ${{ steps.version.outputs.executor_tag }}
+      wallet_tag: ${{ steps.version.outputs.wallet_tag }}
+      wallet_sums_sha256: ${{ steps.version.outputs.wallet_sums_sha256 }}
+      wallet_unpinned: ${{ steps.version.outputs.wallet_unpinned }}
     env:
       GH_TOKEN: ${{ github.token }}
 
@@ -76,6 +87,8 @@ jobs:
         env:
           IN_VERSION: ${{ inputs.version }}
           IN_EXECUTOR_TAG: ${{ inputs.executor_tag }}
+          IN_WALLET_TAG: ${{ inputs.wallet_tag }}
+          IN_WALLET_SUMS: ${{ inputs.wallet_sums_sha256 }}
           IN_PUBLISH: ${{ inputs.publish }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
@@ -92,14 +105,50 @@ jobs:
             executor_tag="$IN_EXECUTOR_TAG"
             publish="$IN_PUBLISH"
           fi
+          # the wallet: packaging/wallet-tag pinned by packaging/wallet-sha256, or the manual run's
+          # wallet_tag pinned by wallet_sums_sha256 (the SHA-256 of its SHA256SUMS); a wallet_tag
+          # without it is not pinned and allowed only when nothing is published
+          file_tag=$(tr -d '[:space:]' < packaging/wallet-tag)
+          wallet_tag=${IN_WALLET_TAG:-$file_tag}
+          wallet_sums=${IN_WALLET_SUMS:-}
+          wallet_unpinned=0
+          if [ -n "$wallet_sums" ]; then
+            echo "$wallet_sums" | grep -qE '^[0-9a-f]{64}$' || { echo "bad wallet_sums_sha256 '$wallet_sums'"; exit 1; }
+          elif [ "$wallet_tag" != "$file_tag" ]; then
+            if [ "$publish" = true ]; then
+              echo "::error::wallet_tag $wallet_tag differs from packaging/wallet-tag: give wallet_sums_sha256 to publish"
+              exit 1
+            fi
+            wallet_unpinned=1
+            echo "::warning::wallet $wallet_tag is not pinned (test build only)"
+          else
+            packaging/check-wallet-pin.sh
+          fi
           # names that end up in file names, URLs and tags
           echo "$version" | grep -qE '^[0-9A-Za-z._-]+$' || { echo "bad version '$version'"; exit 1; }
           echo "$executor_tag" | grep -qE '^[0-9A-Za-z._/-]+$' || { echo "bad executor tag '$executor_tag'"; exit 1; }
+          echo "$wallet_tag" | grep -qE '^wallet-v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$' || { echo "bad wallet tag '$wallet_tag'"; exit 1; }
+          # a published release ships a final wallet release, never a release candidate
+          if [ "$publish" = true ] && [ "$wallet_tag" != "${wallet_tag%-rc*}" ]; then
+            echo "::error::packaging/wallet-tag names the pre-release $wallet_tag: tag the final wallet release and bump the file first"
+            exit 1
+          fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "EXECUTOR_TAG=$executor_tag" >> "$GITHUB_ENV"
+          echo "WALLET_TAG=$wallet_tag" >> "$GITHUB_ENV"
+          echo "WALLET_SUMS_SHA256=$wallet_sums" >> "$GITHUB_ENV"
+          echo "WALLET_UNPINNED=$wallet_unpinned" >> "$GITHUB_ENV"
+          printf 'wallet_sums_sha256=%s\nwallet_unpinned=%s\n' "$wallet_sums" "$wallet_unpinned" >> "$GITHUB_OUTPUT"
           echo "PUBLISH=$publish" >> "$GITHUB_ENV"
-          printf 'version=%s\npublish=%s\nexecutor_tag=%s\n' "$version" "$publish" "$executor_tag" >> "$GITHUB_OUTPUT"
-          echo "version $version, executor $executor_tag, publish $publish"
+          printf 'version=%s\npublish=%s\nexecutor_tag=%s\nwallet_tag=%s\n' "$version" "$publish" "$executor_tag" "$wallet_tag" >> "$GITHUB_OUTPUT"
+          echo "version $version, executor $executor_tag, wallet $wallet_tag, publish $publish"
+
+      # first, so that a missing or wrong wallet release fails before the long build. Anonymous
+      # download from the public release (the node's token cannot read another repository)
+      - name: Fetch the wallet
+        run: |
+          packaging/fetch-wallet.sh linux-amd64 wallet-linux
+          ./wallet-linux/credits-wallet version
 
       # the submodules the build needs, listed explicitly
       - name: Checkout submodules
@@ -193,6 +242,7 @@ jobs:
       - name: Packages
         run: |
           chmod +x compat/node
+          export WALLET_DIR=wallet-linux
           packaging/make-package.sh "$VERSION" build/client/node executor \
             jdk/java-11-openjdk-11.0.4 dist
           PACKAGE_PLATFORM=glibc2.31 \
@@ -218,6 +268,10 @@ jobs:
 
           - node: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
           - contract executor: CreditsCommunity/contract-executor release ${EXECUTOR_TAG}
+          - wallet: \`credits-wallet\` of CreditsCommunity/wallet release ${WALLET_TAG}, with its user guide (\`wallet-guide.md\`); in the Docker image on the PATH. The SHA-256 of its archives, pinned by this release (\`packaging/wallet-sha256\`) and checked before packaging:
+          EOF
+          sed 's/^/  - /' wallet-linux/wallet-pin.txt >> notes.md
+          cat >> notes.md <<EOF
           - JDK: ojdkbuild 11.0.4, the one the official release ships (Linux); Eclipse Temurin 11 (Windows, macOS)
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
@@ -251,6 +305,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.package.outputs.version }}
       EXECUTOR_TAG: ${{ needs.package.outputs.executor_tag }}
+      WALLET_TAG: ${{ needs.package.outputs.wallet_tag }}
+      WALLET_SUMS_SHA256: ${{ needs.package.outputs.wallet_sums_sha256 }}
+      WALLET_UNPINNED: ${{ needs.package.outputs.wallet_unpinned }}
       PUBLISH: ${{ needs.package.outputs.publish }}
     steps:
       - name: Checkout
@@ -268,6 +325,13 @@ jobs:
           for jar in contract-executor.jar sc-api-support.jar; do
             curl -sSfL -o "executor/$jar" "https://github.com/CreditsCommunity/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
           done
+
+      # the same tag and the same pin as the Linux packages (the job's outputs)
+      - name: Fetch the wallet
+        run: |
+          packaging/fetch-wallet.sh windows-amd64 wallet-windows
+          packaging/fetch-wallet.sh darwin-arm64 wallet-macos
+          cmp wallet-windows/wallet-pin.txt wallet-macos/wallet-pin.txt
 
       # the JDK without what the executor never uses (jmods for jlink, the sources)
       - name: Fetch JDKs
@@ -290,9 +354,9 @@ jobs:
       - name: Packages
         run: |
           chmod +x nodes/node-macos-arm64-*/node
-          PACKAGE_OS=windows PACKAGE_RUNS_ON="Windows 10 or later, x64" \
+          PACKAGE_OS=windows WALLET_DIR=wallet-windows PACKAGE_RUNS_ON="Windows 10 or later, x64" \
             packaging/make-package.sh "$VERSION" nodes/node-windows-x64-*/node.exe executor "$JDK_WIN" dist
-          PACKAGE_OS=macos PACKAGE_RUNS_ON="macOS 14 or later on Apple Silicon" \
+          PACKAGE_OS=macos WALLET_DIR=wallet-macos PACKAGE_RUNS_ON="macOS 14 or later on Apple Silicon" \
             packaging/make-package.sh "$VERSION" nodes/node-macos-arm64-*/node executor "$JDK_MAC" dist
           (cd dist && sha256sum * > SHA256SUMS-windows-macos && cat SHA256SUMS-windows-macos)
           ls -la dist
@@ -375,6 +439,9 @@ jobs:
           echo "$VERSION" > pkg/csnode/VERSION
           packaging/docker/build.sh pkg/csnode "$IMAGE:$VERSION"
           docker image ls "$IMAGE"
+          # the wallet is on the PATH, its data on the volume
+          docker run --rm --entrypoint credits-wallet "$IMAGE:$VERSION" version
+          docker run --rm --entrypoint sh "$IMAGE:$VERSION" -c 'test "$CREDITS_WALLET_HOME" = /data/wallet' 
 
       - name: Push image
         if: env.PUBLISH == 'true'

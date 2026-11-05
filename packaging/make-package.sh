@@ -10,6 +10,8 @@
 #                 goes to ojdkbuild/java-11-openjdk-11.0.4 on Linux as in the official package,
 #                 to jdk/ elsewhere, and executor_command points at it
 #   known_hosts:  optional peer list to ship instead of packaging/mainnet/known_hosts.txt
+#   WALLET_DIR:   required: the folder packaging/fetch-wallet.sh filled for this system
+#                 (credits-wallet or credits-wallet.exe, wallet-guide.md, wallet-guide.it.md)
 #
 # One package for full and pruned storage: config.ini runs a full node (as the official release),
 # config.pruned.ini the same with [storage] for pruned storage on LMDB. Compared with the official
@@ -21,6 +23,7 @@ version=$1 node=$2 executor=$3 jdk=$4 out=$5 hosts=${6:-}
 here=$(cd "$(dirname "$0")" && pwd)
 
 os=${PACKAGE_OS:-linux}
+wallet=${WALLET_DIR:?WALLET_DIR must name the folder packaging/fetch-wallet.sh filled}
 case "$os" in
     linux)   exe=node;     javadir=ojdkbuild/java-11-openjdk-11.0.4; java=./ojdkbuild/java-11-openjdk-11.0.4/bin/java
              start=./node; archive="linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}.tar.gz" ;;
@@ -38,6 +41,11 @@ mkdir -p "$dir/$(dirname "$javadir")"
 
 install -m 755 "$node" "$dir/$exe"
 install -m 644 "$executor/contract-executor.jar" "$executor/sc-api-support.jar" "$dir/"
+# the terminal wallet of CreditsCommunity/wallet (packaging/wallet-tag) and its user guide
+wexe=credits-wallet
+[ "$os" != windows ] || wexe=credits-wallet.exe
+install -m 755 "$wallet/$wexe" "$dir/$wexe"
+install -m 644 "$wallet/wallet-guide.md" "$wallet/wallet-guide.it.md" "$dir/"
 cp -a "$jdk" "$dir/$javadir"
 install -m 644 "$here/mainnet/settings.properties" "$here/mainnet/default_confidants.txt" "$dir/"
 # the node reads VERSION for the "node" field of the snapshots it builds; a package extracted over an
@@ -118,12 +126,23 @@ Changing the block database (db_backend)
   CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/CreditsCommunity/node/blob/master/docs/storage.md
 
 First time: cd csnode && $setup
-  asks a few questions (pruned or full, database, snapshot, sharing, contract executor; Enter keeps
-  each default), writes config.ini (the previous one is kept as config.ini.bak-<date>) and starts
-  the node.
+  asks a few questions (pruned or full, database, snapshot, sharing, contract executor, wallet and
+  token cache; Enter keeps each default), writes config.ini (the previous one is kept as
+  config.ini.bak-<date>), can create or import a wallet account, and starts the node.
+
+Wallet: $wexe, the terminal wallet of https://github.com/CreditsCommunity/wallet
+  (release ${WALLET_TAG:-$(tr -d '[:space:]' < "$here/wallet-tag")}). It keeps your keys on this machine, encrypted, signs every
+  transaction itself and sends it through this node's API (127.0.0.1:9090); it opens no port.
+  Start it with: cd csnode && $( [ "$os" = windows ] && echo "$wexe" || echo "./$wexe" )        (the terminal interface; "help" lists the commands)
+  The user guide is wallet-guide.md (in Italian: wallet-guide.it.md). The set-up writes wallet.toml,
+  the wallet profile of this node (mainnet, its API and diag ports). On mainnet every transfer is
+  real: write the 24-word recovery phrase on paper, never share it, and use other accounts on test
+  networks. The diag port (9088) and the API port (9090) listen on every interface: keep them
+  closed to other hosts.
 
 Upgrading an existing folder (an official one too): stop the node, copy $exe, contract-executor.jar,
-  sc-api-support.jar and $setup_files from this package into it, then run $setup there. Copying only
+  sc-api-support.jar, $setup_files, $wexe and the wallet guides from this package into it, then run
+  $setup there. Copying only
   $exe keeps the old executor. The node starts an executor only if its build is within
   executor_commit_min..executor_commit_max of config.ini: with the official config.ini (1518..1518)
   it stops the community executor (build $commits) and runs no smart contract. The set-up shows the

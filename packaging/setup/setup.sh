@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Guided set-up of the node in this folder: storage (pruned or full), database, how the first start
 # gets the chain, whether a full node fetches the older blocks in the background (backfill), whether
-# to share snapshots, which contract executor to run. Writes the [snapshot]
-# and [storage] sections of config.ini and the executor builds it accepts (the previous file is
-# kept as config.ini.bak-<date>), can replace the executor jars, and can start the node.
+# to share snapshots, which contract executor to run, a wallet account, the token cache. Writes the
+# [snapshot] and [storage] sections of config.ini, the executor builds it accepts and tokens_cache
+# (the previous file is kept as config.ini.bak-<date>), can replace the executor jars, writes
+# wallet.toml (the wallet profile of this node, whose account is the node's own key), can make the
+# node's key from a 24-word phrase or create or import a wallet account with credits-wallet, and
+# can start the node.
 #
 #   ./setup.sh            asks, showing each default: Enter keeps it
 #   ./setup.sh --defaults takes every default without asking
@@ -12,6 +15,25 @@
 set -eu
 
 cd "$(dirname "$0")"
+
+# Never work as root in a folder another user controls: every file the set-up writes here
+# (config.ini and its backup and temporary files, wallet.toml) could be a symlink planted by that
+# user, and root would write through it. As root in a folder owned by another user, the set-up runs
+# again as that user (sudo); in a root-owned folder that others can write to, it stops.
+if [ "$(id -u)" = 0 ]; then
+    owner_uid=$(ls -nd . | awk '{ print $3 }')
+    owner_name=$(ls -ld . | awk '{ print $3 }')
+    if [ "$owner_uid" != 0 ]; then
+        command -v sudo >/dev/null 2>&1 \
+            || { echo "This folder belongs to $owner_name: run the set-up as $owner_name, not as root."; exit 1; }
+        echo "This folder belongs to $owner_name: the set-up continues as $owner_name."
+        exec sudo -u "#$owner_uid" -H env CREDITS_SETUP_INVOKER="${SUDO_USER:-root}" \
+            ${CREDITS_WALLET_HOME:+CREDITS_WALLET_HOME="$CREDITS_WALLET_HOME"} "$(pwd)/$(basename "$0")" "$@"
+    fi
+    case "$(ls -ld . | cut -c6,9)" in
+        *w*) echo "This folder is owned by root but others can write to it: fix its permissions (chmod go-w) first."; exit 1 ;;
+    esac
+fi
 
 defaults=no
 case "${1:-}" in
@@ -25,7 +47,9 @@ config=config.ini
 [ -x "$node" ] || { echo "No node binary here: run setup.sh from the csnode folder of the package."; exit 1; }
 [ -f "$config" ] || { echo "No $config here: run setup.sh from the csnode folder of the package."; exit 1; }
 
-# ask "question" default choice... -> sets $answer to one of the choices (the first letters are enough)
+# ask "question" default choice... -> sets $answer to one of the choices (the first letters are enough,
+# except for the choices listed in $ask_whole, which must be typed whole)
+ask_whole=
 ask() {
     local question=$1 default=$2 reply c
     shift 2
@@ -39,11 +63,30 @@ ask() {
         read -r reply || reply=
         reply=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         [ -n "$reply" ] || { answer=$default; return; }
+        # a whole answer first ("no" is not "node"), then the first one it begins
         for c in "$@"; do
+            [ "$c" != "$reply" ] || { answer=$c; return; }
+        done
+        for c in "$@"; do
+            case " $ask_whole " in *" $c "*) continue ;; esac
             case "$c" in "$reply"*) answer=$c; return ;; esac
         done
-        echo "  Please answer one of: $*"
+        echo "  Please answer one of: $*${ask_whole:+ ($ask_whole in full)}"
     done
+}
+
+# ask_text "question" default -> sets $answer to the reply, trimmed (the default for an empty one)
+ask_text() {
+    local question=$1 default=$2 reply
+    if [ "$defaults" = yes ]; then
+        answer=$default
+        echo "$question [$default]: $default"
+        return
+    fi
+    printf '%s [%s]: ' "$question" "$default"
+    read -r reply || reply=
+    reply=$(printf '%s' "$reply" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    answer=${reply:-$default}
 }
 
 # the backend of an existing database (as the node recognises it), empty when there is none
@@ -311,8 +354,146 @@ if [ -n "$(current api executor_command)" ]; then
     echo
 fi
 
-# 6. start now
-ask "6. Start the node when the set-up is done? (yes/no)" yes yes no
+# 6. the wallet (the package's credits-wallet): an account now, with a profile for this node.
+# Run as root (sudo ./setup.sh) in a root-owned folder, the wallet's steps run as the user who
+# called sudo, in that user's home: a key store under /root would be the wrong place. Root without
+# sudo: no account. Started by sudo in another user's folder, the set-up runs as the folder's
+# owner (above): an account would then belong to the owner, so it is made only when the owner is
+# the user who called sudo.
+wallet_bin=./credits-wallet
+wallet=none
+wallet_name=
+wallet_file=
+node_key=
+run_as=
+if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    run_as=$SUDO_USER
+    user_home=$(sudo -u "$run_as" -H sh -c 'echo "$HOME"')
+else
+    user_home=$HOME
+fi
+wallet_home=${CREDITS_WALLET_HOME:-$user_home/.credits-wallet}
+# as_user CMD...: runs CMD as the user the wallet belongs to (CREDITS_WALLET_HOME passed on)
+as_user() {
+    if [ -n "$run_as" ]; then
+        sudo -u "$run_as" -H env ${CREDITS_WALLET_HOME:+CREDITS_WALLET_HOME="$CREDITS_WALLET_HOME"} "$@"
+    else
+        "$@"
+    fi
+}
+if [ -x "$wallet_bin" ]; then
+    echo "6. Wallet"
+    echo "   credits-wallet, in this folder, is a terminal wallet: it keeps keys on this machine, signs"
+    echo "   here and sends through this node. The user guide is wallet-guide.md."
+    me=$(id -un)
+    if [ "$(id -u)" = 0 ] && [ -z "$run_as" ]; then
+        echo "   The set-up runs as root, not through sudo: a wallet account is not created here (its keys"
+        echo "   would belong to root). Later, as the user who runs the node:"
+        echo "     cd $(printf '%q' "$(pwd)") && ./credits-wallet --config wallet.toml account new main"
+        wallet=no
+    elif [ -n "${CREDITS_SETUP_INVOKER:-}" ] && [ "$CREDITS_SETUP_INVOKER" != "$me" ]; then
+        echo "   The set-up runs as $me, who owns this folder, for $CREDITS_SETUP_INVOKER: an account made"
+        echo "   here would belong to $me. Later, as the user the wallet is for:"
+        echo "     cd $(printf '%q' "$(pwd)") && ./credits-wallet --config wallet.toml account new main"
+        wallet=no
+    else
+        [ -z "$run_as" ] || echo "   The account will belong to $run_as (who ran sudo), in $wallet_home."
+        have_accounts=no
+        if [ -d "$wallet_home/accounts" ] && [ -n "$(ls "$wallet_home/accounts" 2>/dev/null)" ]; then
+            echo "   The wallet in $wallet_home has accounts already."
+            have_accounts=yes
+        fi
+        # the node's own key as the wallet's account: used in place when the node has one, made now
+        # from a 24-word phrase when it has none. Not when the wallet runs as another user than the
+        # folder's owner (sudo in a root-owned folder): it could not read the key nor write it there.
+        node_ok=yes
+        [ -z "$run_as" ] || node_ok=no
+        if [ -e NodePrivate.txt ] || [ -L NodePrivate.txt ]; then node_key=present; else node_key=missing; fi
+        if [ "$node_ok" = yes ] && [ "$node_key" = present ]; then
+            echo "   node:   this node's own key (NodePrivate.txt) as the wallet's account \"node\" (default):"
+            echo "           the address of the node's rewards and of the delegations to it, where operators"
+            echo "           keep their stake. Nothing is copied: the wallet reads the key where the node does."
+        elif [ "$node_ok" = yes ]; then
+            echo "   node:   create the node's key now from a new 24-word phrase (default): your paper backup"
+            echo "           of the node's identity. You write the words on paper, in this terminal; the node"
+            echo "           uses the key at its first start, and it is the wallet's account \"node\"."
+        else
+            echo "   (The node's key belongs to the folder's owner: the wallet of $run_as cannot use it.)"
+        fi
+        echo "   create: a separate account as well, for savings: you write its 24-word recovery phrase"
+        echo "           on paper, in this terminal. It is encrypted with the wallet password (one for"
+        echo "           every account of the wallet, chosen with its first account)."
+        echo "   import: a key you have, as a separate account: a 24-word phrase, a base58 key, or the"
+        echo "           keys JSON of the official wallet."
+        echo "   no:     not now (later: ./credits-wallet --config wallet.toml)."
+        if [ "$node_ok" = yes ]; then
+            echo "   The node's key is kept in clear on this server, because the node needs it: CS on it are"
+            echo "   as exposed as the server. Keep on it only what the node needs, and savings in a separate"
+            echo "   account."
+            wallet_default=node
+            # --defaults cannot show and check 24 words: the node's key is then made later
+            [ "$node_key" = present ] || [ "$defaults" = no ] || wallet_default=no
+            # making the node's key is never chosen by a stray "n": "node" in full (or Enter)
+            [ "$node_key" = present ] || ask_whole=node
+            ask "   The wallet's account? (node/create/import/no)" "$wallet_default" node create import no
+            ask_whole=
+        else
+            wallet_default=create
+            [ "$have_accounts" = no ] && [ "$defaults" = no ] || wallet_default=no
+            ask "   Create a wallet account now? (create/import/no)" "$wallet_default" create import no
+        fi
+        wallet=$answer
+        if [ "$wallet" = import ]; then
+            ask_text "   File holding the key (Enter: paste or type it when the wallet asks)" ""
+            wallet_file=$answer
+            if [ -n "$wallet_file" ] && [ ! -f "$wallet_file" ]; then
+                echo "   $wallet_file is not a file: the wallet will ask for the key."
+                wallet_file=
+            fi
+            # this node's own key file: used in place, not imported
+            if [ "$node_ok" = yes ] && [ -n "$wallet_file" ] && [ "$(cd "$(dirname "$wallet_file")" && pwd -P)/$(basename "$wallet_file")" = "$(pwd -P)/NodePrivate.txt" ]; then
+                echo "   That is this node's key: the wallet uses it in place as the account \"node\"; nothing is imported."
+                wallet=node
+                wallet_file=
+            fi
+        fi
+        if [ "$wallet" = create ] || [ "$wallet" = import ]; then
+            while :; do
+                ask_text "   Account name" main
+                printf '%s' "$answer" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$' && [ "${answer%.}" = "$answer" ] \
+                    && [ "$answer" != node ] && break
+                echo "  An account name has 1 to 32 letters, digits, '.', '_' or '-' (and \"node\" is the node's key)."
+                [ "$defaults" = no ] || break
+            done
+            wallet_name=$answer
+            if [ -e "$wallet_home/accounts/$wallet_name.json" ]; then
+                echo "   The wallet has an account named $wallet_name already: nothing will be created."
+                wallet=no
+            fi
+        fi
+    fi
+    echo
+fi
+
+# 7. the token cache: the node's API lists the tokens of every wallet ([api] tokens_cache)
+cur_tokens=$(current api tokens_cache)
+tokens_default=no
+[ "$cur_tokens" != true ] || tokens_default=yes
+echo "7. Token cache"
+echo "   With it, the node's API lists every token a wallet holds, and the wallet shows them all."
+echo "   Without it, the wallet finds an account's tokens in its own history (it may miss some)."
+echo "   Cost: at its first start with the cache, the node looks for tokens among all deployed contracts"
+echo "   and their transactions (it takes a while), then reads token balances in the background after"
+echo "   each token call. It is complete only if it was on while the node read every block: a pruned"
+echo "   node, or one started from the published snapshot, lists every token with correct balances but"
+echo "   may miss wallets whose last use of a token is older than its oldest block (the wallet then"
+echo "   finds the token in the account's history, or you add it there)."
+ask "   Keep a token cache? (yes/no)" "$tokens_default" yes no
+tokens=$answer
+echo
+
+# 8. start now
+ask "8. Start the node when the set-up is done? (yes/no)" yes yes no
 start=$answer
 echo
 
@@ -334,6 +515,14 @@ case "$executor_choice/$executor_action" in
     */restore)         echo "  executor:     official, the jars set aside before are put back" ;;
     */manual)          echo "  executor:     $executor_choice, to copy by hand (see below)" ;;
 esac
+case "$wallet" in
+    create) echo "  wallet:       create the account $wallet_name${run_as:+ (for $run_as)}" ;;
+    import) echo "  wallet:       import the account $wallet_name${wallet_file:+ from $wallet_file}${run_as:+ (for $run_as)}" ;;
+    node)   if [ "$node_key" = present ]; then echo "  wallet:       this node's key as the account node (in place, not copied)"
+            else echo "  wallet:       the node's key made now from a 24-word phrase, as the account node"; fi ;;
+    no)     echo "  wallet:       no account now" ;;
+esac
+echo "  token cache:  $tokens"
 echo "  start now:    $start"
 if [ "$defaults" = no ]; then
     ask "Write config.ini? (yes/no)" yes yes no
@@ -378,6 +567,13 @@ awk '
 } >> "$tmp"
 mv "$tmp" "$config"
 echo "config.ini written; the previous one is $backup"
+if [ "$tokens" = yes ] && [ "$cur_tokens" != true ]; then
+    set_api_key tokens_cache true
+    echo "config.ini: tokens_cache=true"
+elif [ "$tokens" = no ] && [ -n "$cur_tokens" ] && [ "$cur_tokens" != false ]; then
+    set_api_key tokens_cache false
+    echo "config.ini: tokens_cache=false"
+fi
 
 # the executor: put the chosen jars in place, then make config.ini accept their build
 if [ "$executor_choice" != none ]; then
@@ -444,6 +640,122 @@ if [ "$first" = github ]; then
     if ! "$node" --config-file "$config" --download-snapshot; then
         echo "The download did not finish. Run ./setup.sh again, or start the node: it can get the snapshot from other nodes."
         exit 1
+    fi
+fi
+
+# the wallet: its profile of this node (wallet.toml), then the account
+if [ "$wallet" != none ]; then
+    api_port=$(current api port)
+    [ -n "$api_port" ] || api_port=9090
+    diag_port=$(current api diag_port)
+    # the diag port tells the wallet the node's network; the set-up never turns it on (the node
+    # listens on it on every interface): without it the profile decides alone
+    diag=off
+    [ -z "$diag_port" ] || [ "$diag_port" = 0 ] || diag="127.0.0.1:$diag_port"
+    # this package runs mainnet; a network declared in an earlier wallet.toml, and the settings
+    # added there by hand, are kept
+    wallet_network=mainnet
+    kept=
+    if [ -f wallet.toml ]; then
+        n=$(grep -E '^network *= *"(testnet|private)"' wallet.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        [ -z "$n" ] || wallet_network=$n
+        kept=$(grep -E '^(history_node|network_uuid|require_network_uuid|node_key) *=' wallet.toml || true)
+    fi
+    # never written through a symlink or over anything but a regular file: a new file, then renamed
+    if [ -L wallet.toml ] || { [ -e wallet.toml ] && [ ! -f wallet.toml ]; }; then
+        echo
+        echo "wallet.toml is a symlink or not a regular file: refused, nothing written. Remove it and run the set-up again."
+        exit 1
+    fi
+    wallet_tmp=$(mktemp wallet.toml.XXXXXX)
+    {
+        echo "# written by setup.sh on $(date '+%Y-%m-%d %H:%M'): the wallet profile of the node in this folder"
+        echo "# (./credits-wallet --config wallet.toml; see wallet-guide.md, section 4)"
+        echo 'node = "local"'
+        echo
+        echo '[nodes.local]'
+        echo "address = \"127.0.0.1:$api_port\""
+        echo "network = \"$wallet_network\""
+        echo "diag = \"$diag\""
+        # the node's key (NodePrivate.txt here) is the wallet's account "node" only when the answer
+        # was node; otherwise off. A node_key already in wallet.toml (set by hand, or by an earlier
+        # run) is kept, unless the answer is node.
+        if [ "$wallet" = node ]; then
+            echo 'node_key = "NodePrivate.txt"'
+            kept=$(printf '%s\n' "$kept" | grep -v '^node_key' || true)
+        elif ! printf '%s\n' "$kept" | grep -q '^node_key'; then
+            echo 'node_key = "off"'
+        fi
+        [ -z "$kept" ] || echo "$kept"
+    } > "$wallet_tmp"
+    chmod 644 "$wallet_tmp"
+    mv -f "$wallet_tmp" wallet.toml
+    echo
+    echo "wallet.toml written: node 127.0.0.1:$api_port, $wallet_network, diag port $diag"
+    if [ "$api_port" = 0 ]; then
+        echo "The node's API is off ([api] port=0): the wallet needs it. Set port=9090 in config.ini."
+    fi
+    if [ "$wallet" != no ]; then
+        if [ ! -f "$wallet_home/config.toml" ]; then
+            as_user mkdir -p "$wallet_home" && as_user chmod 700 "$wallet_home"
+            # there, node_key names this folder's key by its full path (off for another user: the
+            # key is the folder owner's)
+            node_key_abs="$(pwd)/NodePrivate.txt"
+            while IFS= read -r line; do
+                if [ "$line" = 'node_key = "NodePrivate.txt"' ]; then
+                    if [ -n "$run_as" ]; then echo 'node_key = "off"'
+                    else case "$node_key_abs" in *"'"*) ;; *) printf "node_key = '%s'\n" "$node_key_abs" ;; esac; fi
+                else
+                    printf '%s\n' "$line"
+                fi
+            done < wallet.toml | as_user sh -c 'umask 077 && cat > "$1"' sh "$wallet_home/config.toml"
+            echo "It is the wallet's configuration too: $wallet_home/config.toml."
+        elif ! cmp -s wallet.toml "$wallet_home/config.toml"; then
+            echo "$wallet_home/config.toml is kept; this node's profile: ./credits-wallet --config wallet.toml"
+        fi
+        # the wallet uses the node's key only from a folder nobody else can write to (a umask of 002
+        # leaves it group-writable), and the key, in clear, is for its owner only: the node writes it
+        # readable by everyone (0644)
+        if [ "$wallet" = node ]; then
+            case "$(ls -ld . | cut -c6,9)" in
+                *w*) echo "This folder can be written by other users: chmod go-w on it (the wallet refuses such a node folder)."
+                     chmod go-w . ;;
+            esac
+            if [ -f NodePrivate.txt ] && [ ! -L NodePrivate.txt ] && [ "$(ls -l NodePrivate.txt | cut -c5-10)" != "------" ]; then
+                echo "NodePrivate.txt can be read or written by other users: chmod 600 NodePrivate.txt."
+                chmod 600 NodePrivate.txt
+            fi
+        fi
+        case "$wallet" in
+            create) set -- --config wallet.toml account new "$wallet_name" ;;
+            import) set -- --config wallet.toml account import "$wallet_name"
+                    [ -z "$wallet_file" ] || set -- "$@" "$wallet_file" ;;
+            node)   if [ "$node_key" = present ]; then set -- --config wallet.toml account node-key
+                    else set -- --config wallet.toml account node-key new; fi ;;
+        esac
+        # the command to run later, each argument quoted for the shell
+        wallet_cmd=$(printf '%q ' "$wallet_bin" "$@")
+        wallet_cmd=${wallet_cmd% }
+        [ -z "$run_as" ] || wallet_cmd="sudo -u $(printf '%q' "$run_as") -H $wallet_cmd"
+        here_q=$(printf '%q' "$(pwd)")
+        if [ -t 0 ] && [ -t 1 ]; then
+            echo
+            if [ "$wallet" = create ] || { [ "$wallet" = node ] && [ "$node_key" = missing ]; }; then
+                echo "The wallet now shows the 24-word recovery phrase of the new $([ "$wallet" = node ] && echo "node's key" || echo account) ONCE. Write it on paper:"
+                echo "anyone who has it owns the account, and nobody can recover the account without it."
+            fi
+            if as_user "$wallet_bin" "$@"; then
+                echo "Open the wallet with: cd $here_q && ./credits-wallet --config wallet.toml"
+                [ "$wallet" != node ] || echo "Keep NodePrivate.txt: the node needs it. Keep savings in a separate account."
+            else
+                echo "The wallet did not finish; run it again later: cd $here_q && $wallet_cmd"
+            fi
+        elif [ "$wallet" = node ] && [ "$node_key" = present ]; then
+            echo "The node's key is the wallet's account \"node\": cd $here_q && ./credits-wallet --config wallet.toml"
+        else
+            echo "Creating or importing an account, or the node's key, needs a terminal: run it in one with"
+            echo "  cd $here_q && $wallet_cmd"
+        fi
     fi
 fi
 
