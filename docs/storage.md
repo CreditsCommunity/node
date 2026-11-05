@@ -87,8 +87,8 @@ restart.
   that is about 186 million blocks: about two to three days (measured on mainnet: about 1,000
   blocks/s, the `backfill_rate` default, with the signatures checked on verifier threads; slower on
   a node with few cores or a slow disk), and the disk of a full node: 400 GB or more with lmdb or
-  berkeleydb, about 200 to 250 GB with rocksdb (measured: 128 GB, transaction index included, for
-  the newest 75 million blocks; keep room to spare). Set `backfill=off` to keep only the blocks of the snapshot.
+  berkeleydb, about 250 to 300 GB with rocksdb (measured: 128 GB, transaction index included, for
+  the newest 75 million blocks, then about 1.4 to 1.5 KB per block in the 70 to 110 million range; keep room to spare). Set `backfill=off` to keep only the blocks of the snapshot.
 - Requests go out only while the node is in sync (not syncing forward, not in a bootstrap round,
   not fetching a snapshot); a trusted node keeps fetching, at most `backfill_store_per_turn` blocks
   per turn of the thread that also runs consensus.
