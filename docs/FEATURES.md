@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.16 or earlier.
+Everything listed here is in release 4.2.532-community.17 or earlier.
 
 ## Storage
 
@@ -104,6 +104,23 @@ Everything listed here is in release 4.2.532-community.16 or earlier.
   contract code that runs past its time limit, or whose caller has gone, is stopped. Contract results
   are the same as with the official build 1518.
   [#137](https://github.com/CreditsCommunity/node/pull/137)
+- **Executor community-3** (build 1558): a contract that does not compile reports the compiler's
+  errors with their line numbers instead of a bare failure.
+- **Contract API fixes.** `ContractAllMethodsGet` returns the annotations of each method and
+  argument, so a client can tell a getter; a CS payment to a payable contract is no longer listed
+  as a deploy, and the contract lists no longer fail on a page holding one.
+  [#164](https://github.com/CreditsCommunity/node/pull/164), [#165](https://github.com/CreditsCommunity/node/pull/165)
+- **Example clients and contracts** in Python, Go, Java, Rust, C# and JavaScript (status, balance,
+  transactions, signed transfers, deploy, call, get), and sample contracts (a counter, a token, a
+  payable tip jar, a faucet), checked in CI.
+  [#159](https://github.com/CreditsCommunity/node/pull/159), [#161](https://github.com/CreditsCommunity/node/pull/161)
+
+## Network identity
+
+- **Which network is this?** The diagnostic API's `GetNodeInfo` returns the network identifier (the
+  same on every node of a network, taken from block 1) and the community release, so that a wallet
+  can tell mainnet from a test network.
+  [#162](https://github.com/CreditsCommunity/node/pull/162)
 
 ## Consensus robustness
 
@@ -121,6 +138,13 @@ Everything listed here is in release 4.2.532-community.16 or earlier.
   neighbour would refuse as a duplicate, and asks another one instead: a node syncing among mostly
   pruned peers could otherwise wait for ever for its first blocks.
   [#136](https://github.com/CreditsCommunity/node/pull/136)
+
+## Diagnostics
+
+- **Stage-3 diagnostics.** When a node's signed stage 3 disagrees with its peers', the log shows
+  what the node signed and why a peer's stage failed, at info level only when a check fails; a
+  healthy node logs none of it. See [consensus-diagnostics.md](consensus-diagnostics.md).
+  [#167](https://github.com/CreditsCommunity/node/pull/167), [#168](https://github.com/CreditsCommunity/node/pull/168)
 
 ## Crash and safety fixes
 
@@ -158,8 +182,21 @@ limits in the p2p layer (a fork of the p2p library), and two races in the cache 
   [#43](https://github.com/CreditsCommunity/node/pull/43), [#44](https://github.com/CreditsCommunity/node/pull/44)
 - **Guided set-up** in every package (`setup.sh`, `setup.bat`): pruned or full, database, how the
   first start gets the chain, the history of a full node (backfill), snapshot sharing and the
-  contract executor.
+  contract executor, and the wallet (below).
   [#131](https://github.com/CreditsCommunity/node/pull/131), [#154](https://github.com/CreditsCommunity/node/pull/154)
+- **A terminal wallet in every package and in the Docker image.** `credits-wallet`, the community
+  wallet, comes with the node, downloaded from its release and accepted only with a pinned
+  SHA-256, with its user guide. The set-up offers to use the node's own key as the wallet's account
+  (the key stays in place, with owner-only permissions), or a separate account, and asks whether to
+  keep the token cache. In Docker, the key and the token cache are set with variables.
+  [#166](https://github.com/CreditsCommunity/node/pull/166)
+- **Start-up banner and Docker health check.** The node shows its release, protocol, build and
+  storage at start; the Docker health check no longer reports a node at the head as unhealthy after
+  a log rotation.
+  [#157](https://github.com/CreditsCommunity/node/pull/157), [#160](https://github.com/CreditsCommunity/node/pull/160)
+- **Key file.** `NodePrivate.txt` is written readable by its owner only (mode 0600), and the
+  encrypted key file is re-encrypted atomically, with clear errors; the format is unchanged.
+  [#169](https://github.com/CreditsCommunity/node/pull/169), [#170](https://github.com/CreditsCommunity/node/pull/170)
 
 ## Tested on every change
 

@@ -157,7 +157,7 @@ A pruned node can start from the published snapshot: $start --config-file config
 A full node can too, on lmdb or rocksdb: set db_backend=lmdb (or rocksdb) in the [storage] section
   of config.ini, run $start --download-snapshot, then start it. It fetches the older blocks from its
   neighbours in the background down to block 0 (backward sync: about two to three days and 400 GB or more with lmdb,
-  200 to 250 GB with rocksdb, on mainnet; [storage] backfill=off keeps only the snapshot's blocks). A
+  250 to 300 GB with rocksdb, on mainnet; [storage] backfill=off keeps only the snapshot's blocks). A
   pruned node switched to full (prune_keep_blocks=0) fetches the blocks it pruned the same way.
   https://github.com/CreditsCommunity/node/blob/master/docs/storage.md#a-full-node-from-a-snapshot
 EOF

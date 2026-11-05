@@ -30,6 +30,8 @@ lines under the new release.
   against the chain; consensus keeps priority. See [storage.md](storage.md).
 - **Wallet state digest.** A digest of all wallet state, logged every 1000 blocks, lets different
   nodes and builds compare their state.
+- **Wallet.** A terminal wallet, `credits-wallet`, ships in every package and in the Docker image;
+  the set-up can use the node's own key as its account.
 - **Continuous integration.**
   - unit tests;
   - private networks of 5 to 61 nodes, with smart contracts read and written;
@@ -39,6 +41,10 @@ lines under the new release.
   - release packages and the Docker image.
 
 ## Not released yet
+
+Nothing yet.
+
+## community.17 — 2026-11-05
 
 | PR | Change |
 |---|---|
@@ -56,6 +62,16 @@ lines under the new release.
 | #168 | solver: the `stage3 inputs` line of #167 is logged at info level only when a stage-3 check fails (once per iteration, before the first `stage3 check failed`), at debug level every round, so a healthy node logs none of the stage-3 diagnostics |
 | #169 | config: the node writes `NodePrivate.txt` (generated, encrypted or re-encrypted) and the `--dumpkeys` JSON with mode 0600 on POSIX (`open` with 0600 and `fchmod`, which also narrows an existing wider file) instead of `std::ofstream`, which left them 0644 (readable by every user) under the usual umask; `NodePublic.txt` and Windows unchanged |
 | #170 | config: safer handling of the encrypted key file (atomic re-encryption, no empty file on failure, clear errors); the file format is unchanged and stays compatible with the official node. Re-encryption (`--encryptkey`, the change of password at start, a new key at first start) writes `NodePrivate.txt.tmp`, flushes it and renames it over the key file (MoveFileEx on Windows), so a crash or a full disk leaves the previous file and the log reports the failure instead of success; a failed encryption never writes an empty key file; a key file of an unexpected length stops the node with "Bad private key file in ... (N bytes)" instead of asking for a password; a failed key derivation is an error instead of a crash; a file used as password is wiped from memory after use |
+| — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 17; ships credits-wallet 0.1.0 and contract executor community-3 (build 1558) |
+
+The terminal wallet `credits-wallet` is in every package and in the Docker image, pinned by hash
+(#166); the set-up offers it, with the node's own key as the account and the choice of the token
+cache. The diagnostic API tells the network identity (#162). Stage-3 diagnostics help to find why
+a node disagrees with its peers (#167, #168). Contract API fixes (#164, #165) and the executor
+community-3, which reports compile errors. The node key file is written with mode 0600 (#169), and
+the encrypted key file is handled more safely, with the format unchanged (#170). Also the start-up
+banner (#157), the clean-up of obsolete folders (#158), the sample clients and contracts (#159,
+#161) and the Docker health check (#160).
 
 ## community.16 — 2026-11-03
 
