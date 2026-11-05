@@ -60,6 +60,9 @@ Indicative requirements:
 
 See [docs/storage.md](docs/storage.md) for the storage options.
 
+If you encrypt the node key (`--encryptkey`, or the password choice at the first start), use a
+long, unique password.
+
 ## The wallet
 From release community.17 on, every package and the Docker image ship
 [credits-wallet](https://github.com/CreditsCommunity/wallet), a terminal wallet that runs next to the
@@ -86,8 +89,8 @@ contracts, signed in the wallet and sent through the node's API. It opens no por
   `wallet-tag` and `wallet-sha256` together, then release the node; the release notes list the
   pinned hashes. A manual release run may take another `wallet_tag`, but publishes only with
   `wallet_sums_sha256`, the SHA-256 of that release's `SHA256SUMS`.
-- Once CreditsCommunity/wallet is public, its release tags get a ruleset (no deletion, no update),
-  so that a published wallet tag cannot move; see the wallet's README, "Releases".
+- The wallet's release tags are protected by a ruleset (no deletion, no update), so that a
+  published wallet tag cannot move; see the wallet's README, "Releases".
 
 ## Building from source
 The builds that CI runs on every change are the reference:
