@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #172 | docs: `docs/quick-start.md`, a short quick-start guide (Docker and native Linux, Windows and macOS; pruned on lmdb or full on rocksdb from the snapshot, snapshot serving on; requirements, ports, first checks, the wallet, upgrading with the database kept, common problems), linked from the top of the README |
 
 ## community.17 — 2026-11-05
 
