@@ -26,8 +26,11 @@ printf '\n[storage]\ncheckpoint_every=100000\nblock_db=lmdb\n' >> "$pkg/config.i
 touch "$pkg/contract-executor.jar" "$pkg/sc-api-support.jar"
 cat > "$pkg/node" <<'STUB'
 #!/bin/bash
-# --decryptkey: records its arguments, reads "p" and the password from stdin like the node; with
-# "stub pw" it keeps the encrypted file and writes /data/stub-plain as the key
+# --decryptkey: records its arguments and reads the choice and the password as lines from stdin; with
+# "stub pw" it keeps the encrypted file and writes /data/stub-plain as the key. It does not decrypt:
+# this checks the entrypoint's arguments and input only. The node itself reads the same input ("p",
+# newline, password, newline, from a pipe or a terminal): KeyFileCryptToPlain.PipedChoiceAndPassword*
+# in tests/csnode covers the real reading and decryption.
 if [[ " $* " == *" --decryptkey "* ]]; then
     echo "$@" > /data/stub-decrypt
     read -r choice || true; read -r pw || true

@@ -310,7 +310,9 @@ choice at its first start) makes the node ask for the password at every start, o
 
 Before you start:
 
-- **Never run two nodes with the same key**, not even for a moment. Stop the old node first.
+- **Never run two nodes with the same key**, not even for a moment. Stop every node that uses
+  this key first, including an official node or one on another machine: the node can only tell
+  a community node running in the same folder.
 - **Keep an offline backup** (USB stick, paper) of the original files. A plain key is as exposed
   as the machine it is on.
 - The wallet uses a plain node key as the account `node` without a password. On mainnet it still
@@ -374,7 +376,10 @@ On a **new** installation you can put the two files in `~/.credits/keys/` (with 
 
 The container cannot type a password at every start: with an encrypted key it stops with
 `NOT STARTING: keys/NodePrivate.txt is encrypted`. Turn the key into the plain key once, with the
-node of the image (community.18 or later); it asks the old password and needs no network.
+node of the image (community.18 or later); it asks the old password and needs no network. Opening
+the key takes about 1 GB of free memory for a few seconds, so `CREDITS_MEMORY` in `.env` must be at
+least about `1.2g` (the default is `4g`). Until the key is converted, `docker compose up -d` keeps
+restarting the container with that message: stop it with `docker compose stop`.
 
 1. Stop the node and save the keys it may have made (step 1 above).
 2. Copy your two files in, as in step 2 above.
@@ -388,7 +393,8 @@ node of the image (community.18 or later); it asks the old password and needs no
    It prints `keys/NodePrivate.txt is now in clear (address <your public key>); the encrypted
    original is kept as keys/NodePrivate.txt.encrypted-<date>-<time>`. A wrong password prints
    `Incorrect password (or corrupted file)` and asks again. If `NodePublic.txt` belongs to another
-   key, it changes nothing and says so: copy the two files of the same node.
+   key, it changes nothing and says so: copy the two files of the same node. The password can
+   also come from a pipe (`printf 'p\n%s\n' "$PW" | docker compose run --rm -T node decrypt-key`).
 
 4. Check, as in step 3 for a plain key. Then move the `.encrypted-...` copy offline (or delete it
    once you have an offline backup).
@@ -406,8 +412,14 @@ place:
 Press `p`, Enter, and type the old password. The node writes the plain key in place (mode 600),
 keeps the encrypted file as `NodePrivate.txt.encrypted-<date>-<time>`, prints the address and
 exits without starting. It needs no `config.ini`, network or database, and refuses while a node
-runs in the folder. A key that is already plain is left as it is. Other key files:
-`--private-key-file` and `--public-key-file`. The node then starts without asking anything.
+runs in the folder (a community node; stop an official node yourself). A key that is already
+plain is left as it is. Other key files: `--private-key-file` and `--public-key-file`. It needs
+about 1 GB of free memory for a few seconds; without it, it says so and changes nothing. The node
+then starts without asking anything.
+
+On Windows, type the password in a console window (`node.exe` reads it from the console, not from
+a pipe). The plain key and the `.encrypted-...` copy keep the folder's permissions (Windows has no
+mode 600): keep the `csnode` folder readable by your user only.
 
 ## 11. Troubleshooting
 
