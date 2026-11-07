@@ -87,8 +87,10 @@ cp "$dir/config.ini" "$dir/config.pruned.ini"
 cat >> "$dir/config.pruned.ini" <<'INI'
 
 [storage]
-; pruned storage: the node syncs from block 0 by itself and keeps only recent blocks
-; (from the last checkpoint but one), in an LMDB database that reuses freed space
+; pruned storage: only recent blocks are kept (from the last checkpoint but one), in an LMDB
+; database that reuses freed space. On an empty database the node starts from a snapshot: the
+; published one with --download-snapshot, otherwise one from its neighbours ([snapshot] fetch=auto,
+; the default); it syncs from block 0 only when no snapshot comes within fetch_wait (10 minutes)
 checkpoint_every=100000
 checkpoint_keep=2
 prune_keep_blocks=1000

@@ -123,8 +123,8 @@ Without Docker, in the folder of the full package (`config.ini`):
    `BACKFILL: full node with blocks N..M: fetching 0..N-1 from peers in the background`.
 
 With an empty `db/` and `[snapshot] fetch=auto` (the default), the node also takes a snapshot from
-its p2p neighbours by itself at its first start. In Docker: `CREDITS_STORAGE=full` with
-`CREDITS_DB_BACKEND=lmdb` or `rocksdb` (packaging/docker/README.md).
+its p2p neighbours by itself at its first start. In Docker: `CREDITS_STORAGE=full`, on rocksdb
+(the default for full) or with `CREDITS_DB_BACKEND=lmdb` (packaging/docker/README.md).
 
 ## Start-up check
 
@@ -247,7 +247,7 @@ db: stop it first` (exit 3).
 | `.env` | Meaning |
 |---|---|
 | `CREDITS_STORAGE` | `pruned` (default) or `full`. |
-| `CREDITS_DB_BACKEND` | `lmdb` (default for pruned), `berkeleydb` (default for full) or `rocksdb`. |
+| `CREDITS_DB_BACKEND` | `lmdb` (default for pruned), `rocksdb` (default for full) or `berkeleydb` (full only; it syncs from block 0). An existing `config.ini` keeps the backend it names. |
 | `CREDITS_CONVERT_DB=yes` | Pass `--convert-db` on every start, so that a change of `db_backend` converts the database (and an interrupted conversion resumes). Remove it afterwards. |
 | `CREDITS_RESET=1` | Move the data aside to `~/.credits/old-<date>` and start over. |
 

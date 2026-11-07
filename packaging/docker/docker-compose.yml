@@ -19,6 +19,7 @@ services:
       options:
         max-size: 50m
         max-file: "2"
-    # what a pruned node used while syncing on a shared server; remove or raise as needed
-    cpus: 1.5
-    mem_limit: 4g
+    # limits from .env: the defaults fit a pruned node on a shared server; for a full node set
+    # CREDITS_CPUS=4 and CREDITS_MEMORY=8g (or more) in .env
+    cpus: ${CREDITS_CPUS:-1.5}
+    mem_limit: ${CREDITS_MEMORY:-4g}

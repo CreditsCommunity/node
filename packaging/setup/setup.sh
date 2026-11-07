@@ -212,7 +212,8 @@ if [ -n "$cur_backend$cur_prune" ] && { [ -z "$cur_prune" ] || [ "$cur_prune" = 
 [ "$have" != berkeleydb ] || storage_default=full
 echo "1. Storage"
 echo "   pruned: keeps only recent blocks (a few GB), starts in minutes from a snapshot. Enough to run a node."
-echo "   full:   keeps every block since the start of the chain (tens of GB), for history and explorers."
+echo "   full:   keeps every block since the start of the chain (about 250 to 300 GB with rocksdb),"
+echo "           for history and explorers."
 ask "   Pruned or full node? (pruned/full)" "$storage_default" pruned full
 storage=$answer
 pruned_to_full=no
@@ -232,14 +233,25 @@ if [ "$storage" = pruned ]; then
     echo "   rocksdb: compressed, smaller on disk, a little more CPU."
     ask "   Database? (lmdb/rocksdb)" "$backend_default" lmdb rocksdb
 else
-    backend_default=berkeleydb
-    case "$cur_backend" in lmdb|rocksdb) [ "$cur_prune" != "" ] && [ "$cur_prune" != 0 ] || backend_default=$cur_backend ;; esac
+    # rocksdb for a new full node; a full config.ini keeps its backend, and an existing database
+    # keeps its own
+    backend_default=rocksdb
+    if [ -z "$cur_prune" ] || [ "$cur_prune" = 0 ]; then
+        case "$cur_backend" in
+            lmdb|rocksdb|berkeleydb) backend_default=$cur_backend ;;
+            rocks) backend_default=rocksdb ;;
+            berkeley) backend_default=berkeleydb ;;
+            # a full [storage] without db_backend runs the node's own default, berkeleydb
+            "") [ "$cur_prune" != 0 ] || backend_default=berkeleydb ;;
+        esac
+    fi
     [ -z "$have" ] || backend_default=$have
     echo "2. Database"
-    echo "   berkeleydb: the official node's format (the official node can open this folder too)."
-    echo "   rocksdb:    the smallest full node (about a third of berkeleydb)."
-    echo "   lmdb:       fast, larger on disk."
-    ask "   Database? (berkeleydb/rocksdb/lmdb)" "$backend_default" berkeleydb rocksdb lmdb
+    echo "   rocksdb:    the smallest full node (about a third of berkeleydb); starts from a snapshot."
+    echo "   lmdb:       fast, larger on disk; starts from a snapshot."
+    echo "   berkeleydb: the official node's format (the official node can open this folder too);"
+    echo "               it cannot start from a snapshot and syncs from block 0."
+    ask "   Database? (rocksdb/lmdb/berkeleydb)" "$backend_default" rocksdb lmdb berkeleydb
 fi
 backend=$answer
 echo
@@ -292,8 +304,8 @@ if [ "$storage" = full ] && { [ "$first" = github ] || [ "$first" = network ] ||
     echo "3b. History (backfill)"
     echo "   yes: fetch every older block down to block 0 in the background, each checked against the chain;"
     echo "        the node runs and takes part in the network meanwhile. On mainnet about 186 million blocks:"
-    echo "        one to five days, and the disk of a full node (about 130 GB or more with rocksdb, 400 GB"
-    echo "        with lmdb or berkeleydb)."
+    echo "        about 2 to 3 days (more on a slow disk or few cores), and the disk of a full node (about"
+    echo "        250 to 300 GB with rocksdb, 400 GB or more with lmdb or berkeleydb)."
     echo "   no:  keep only the blocks from the snapshot on (a few GB); the history before is not served."
     ask "   Fetch the older blocks? (yes/no)" "$backfill_default" yes no
     backfill=$answer

@@ -2,8 +2,8 @@ name: Set-up script test
 
 # The guided set-up (packaging/setup) in the published packages of Linux, Windows and macOS, used as a
 # user would: answers typed on stdin, the snapshot downloaded, the node started up to the mainnet
-# head; then a second run that must change nothing, and a full berkeleydb configuration with a wrong
-# answer first. The wallet of packaging/wallet-tag is added to the package (downloaded from its public
+# head; then a second run that must change nothing, a full berkeleydb configuration with a wrong
+# answer first (kept by a later run on Enter), and a full node on rocksdb, the default for full. The wallet of packaging/wallet-tag is added to the package (downloaded from its public
 # release and checked, packaging/fetch-wallet.sh): the set-up writes its profile (wallet.toml) and
 # the token cache, the wallet reads the synced node through that profile (status, the network check,
 # the token list from the cache, the node's own key as the account "node"); on a terminal the set-up
@@ -244,9 +244,11 @@ jobs:
 
       - name: Full berkeleydb set-up with a wrong answer first
         run: |
-          # storage (wrong, then full), database, share (no), executor, wallet, token cache, start, write
-          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup3.txt | tail -20
+          # storage (wrong, then full), database (berkeleydb: the full default is rocksdb), share (no),
+          # executor, wallet, token cache, start, write
+          bash setup-run.sh csnode-clean 'maybe\nfull\nberkeleydb\nno\n\nno\n\nno\n\n' 2>&1 | tee setup3.txt | tail -20
           grep -a "Please answer one of" setup3.txt
+          grep -a "Database? (rocksdb/lmdb/berkeleydb) \[rocksdb\]" setup3.txt
           python check-config.py csnode-clean/config.ini snapshot "serve=off fetch=off" storage "db_backend=berkeleydb"
           # the rest of config.ini is the package's
           python - <<'EOF'
@@ -263,6 +265,26 @@ jobs:
           assert new == old, "the rest of config.ini changed"
           print("the rest of config.ini is unchanged")
           EOF
+
+      - name: A full berkeleydb configuration is kept on Enter
+        run: |
+          # config.ini names berkeleydb (no database yet): storage (Enter: full), database (Enter:
+          # berkeleydb), share (Enter: no), executor, wallet, token cache, start, write
+          cp -a csnode-clean csnode-bdb && rm -f csnode-bdb/config.ini.bak-*
+          bash setup-run.sh csnode-bdb '\n\n\n\nno\n\nno\n\n' 2>&1 | tee setup3b.txt | tail -12
+          grep -a "Pruned or full node? (pruned/full) \[full\]" setup3b.txt
+          grep -a "Database? (rocksdb/lmdb/berkeleydb) \[berkeleydb\]" setup3b.txt
+          python check-config.py csnode-bdb/config.ini snapshot "serve=off fetch=off" storage "db_backend=berkeleydb"
+          # a berkeleydb database in a folder whose config.ini names no backend: kept too
+          cp -a csnode-clean csnode-bdb2 && rm -f csnode-bdb2/config.ini.bak-*
+          cp "$(ls csnode-clean/config.ini.bak-* | head -1)" csnode-bdb2/config.ini
+          mkdir -p csnode-bdb2/db && touch csnode-bdb2/db/blockchain.db csnode-bdb2/db/sequence.db
+          # storage (Enter: full), database (Enter: berkeleydb), share, executor, wallet, token cache,
+          # start, write (no first-start question: the database exists)
+          bash setup-run.sh csnode-bdb2 '\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup3c.txt | tail -12
+          grep -a "already holds a berkeleydb database" setup3c.txt
+          grep -a "Database? (rocksdb/lmdb/berkeleydb) \[berkeleydb\]" setup3c.txt
+          python check-config.py csnode-bdb2/config.ini storage "db_backend=berkeleydb"
 
       - name: A stray "n" never makes the node's key
         run: |
@@ -296,10 +318,13 @@ jobs:
 
       - name: Full rocksdb set-up from a snapshot, with and without the backfill
         run: |
-          cp -a csnode-clean csnode-full && rm -f csnode-full/config.ini.bak-*
-          # storage, database, first start (network), backfill (Enter: yes), share (no), executor, wallet,
-          # token cache, start, write
-          bash setup-run.sh csnode-full 'full\nrocksdb\nnetwork\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup6.txt | tail -14
+          # the package's config.ini, kept aside by the full berkeleydb set-up
+          cp -a csnode-clean csnode-full && cp "$(ls csnode-clean/config.ini.bak-* | head -1)" csnode-full/config.ini
+          rm -f csnode-full/config.ini.bak-*
+          # storage, database (Enter: rocksdb, the full default), first start (network), backfill
+          # (Enter: yes), share (no), executor, wallet, token cache, start, write
+          bash setup-run.sh csnode-full 'full\n\nnetwork\n\nno\n\nno\n\nno\n\n' 2>&1 | tee setup6.txt | tail -14
+          grep -a "Database? (rocksdb/lmdb/berkeleydb) \[rocksdb\]" setup6.txt
           grep -a "fetches the older blocks from" setup6.txt
           grep -a "backfill:     yes" setup6.txt
           python check-config.py csnode-full/config.ini snapshot "serve=off fetch=auto" storage "db_backend=rocksdb backfill=on"
