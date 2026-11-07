@@ -53,6 +53,37 @@ container's user (uid 1000) and nobody else can write to them: with a bind mount
 On mainnet every transfer is real. The user guide is `/opt/credits/wallet-guide.md` in the image,
 and [docs/guide.md](https://github.com/CreditsCommunity/wallet/blob/main/docs/guide.md) of the wallet.
 
+## An existing node key
+
+To run with the identity of a node you already have, stop the container, save the keys it made,
+copy your two files into `keys/` (owned by uid 1000, mode 600) and start again; the container makes
+new keys only when `keys/NodePublic.txt` is missing. Never run two nodes with one key: stop every
+node that uses it first, an official one or one on another machine too. Keep an offline copy of the
+original files.
+
+A key encrypted with a password by the node (`--encryptkey`) cannot be used as it is: the node would
+ask the password at every start, and nobody can type it in a container. The container then stops
+with `NOT STARTING: keys/NodePrivate.txt is encrypted`, and with `restart: unless-stopped` it keeps
+restarting with that message until you stop it. Turn it into the plain key once:
+
+```sh
+docker compose stop
+sudo cp -a ~/.credits/keys ~/.credits/keys.generated-$(date +%F)   # the keys the container made
+sudo cp old/NodePrivate.txt old/NodePublic.txt ~/.credits/keys/
+sudo chown 1000:1000 ~/.credits/keys/NodePrivate.txt ~/.credits/keys/NodePublic.txt
+sudo chmod 600 ~/.credits/keys/NodePrivate.txt ~/.credits/keys/NodePublic.txt
+docker compose run --rm node decrypt-key        # press p, then type the old password
+docker compose up -d
+```
+
+`decrypt-key` runs the node's `--decryptkey` on `keys/`: no network, configuration or database. It
+checks that the key matches `NodePublic.txt`, writes the plain key in place (mode 600), keeps the
+encrypted file as `keys/NodePrivate.txt.encrypted-<date>-<time>` and prints the address. A wrong
+password asks again. The password can also be piped:
+`printf 'p\n%s\n' "$PW" | docker compose run --rm -T node decrypt-key`. Opening the key takes about
+1 GB of free memory for a few seconds: `CREDITS_MEMORY` must be at least about `1.2g` (default `4g`).
+A plain key is as exposed as the machine it is on.
+
 ## Changing the storage
 
 | Change | Result |

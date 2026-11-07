@@ -1,12 +1,23 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 #include <base58.h>
 #include <cscrypto/cscrypto.hpp>
 
 #include <keyfilecrypt.hpp>
+#include <config.hpp>
+
+#include <boost/program_options.hpp>
+#include <sstream>
 
 // The key file keeps cscrypto's format: these tests compare the bytes with cscrypto's own writer
 // and reader (PrivateKey::getEncrypted / readFromEncrypted, the code of the official node). Each
@@ -105,4 +116,253 @@ TEST_F(KeyFileCrypt, FailedDerivationIsAnError) {
     EXPECT_TRUE(cs::keyfile::encrypt(sk_, nullptr, 5).empty());
     EXPECT_TRUE(cs::keyfile::encrypt(cscrypto::PrivateKey(), "pw", 2).empty());
     EXPECT_FALSE(cs::keyfile::decrypt(decode(kVectorFile), nullptr, 5));
+    bool failed = false;
+    EXPECT_FALSE(cs::keyfile::decrypt(decode(kVectorFile), nullptr, 5, &failed));
+    EXPECT_TRUE(failed);   // told apart from a wrong password
+    const std::string wrong = "x";
+    EXPECT_FALSE(cs::keyfile::decrypt(cscrypto::Bytes(10, 1), wrong.data(), wrong.size(), &failed));
+    EXPECT_FALSE(failed);
 }
+
+// --decryptkey (cs::keyfile::toPlain): the encrypted key file becomes the plain key file, the
+// encrypted original kept next to it. The unlock callback stands for the password prompt; only two
+// tests derive a key (Argon2id, 1 GiB).
+namespace {
+namespace fs = std::filesystem;
+
+std::string slurp(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+void put(const fs::path& p, const std::string& text) {
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f << text;
+}
+
+class KeyFileCryptToPlain : public KeyFileCrypt {
+protected:
+    void SetUp() override {
+        KeyFileCrypt::SetUp();
+        dir_ = fs::temp_directory_path() / ("keyfile-toplain-" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + "-" +
+                                            ::testing::UnitTest::GetInstance()->current_test_info()->name());
+        fs::remove_all(dir_);
+        fs::create_directories(dir_);
+        pkPath_ = (dir_ / "NodePublic.txt").string();
+        skPath_ = (dir_ / "NodePrivate.txt").string();
+        auto sk = sk_.access();
+        plain_ = EncodeBase58(sk.data(), sk.data() + sk.size());
+        address_ = EncodeBase58(pk_.data(), pk_.data() + pk_.size());
+        put(pkPath_, address_);
+    }
+    void TearDown() override {
+        std::error_code ec;
+        fs::remove_all(dir_, ec);
+    }
+
+    // an 88-byte NodePrivate.txt: a stand-in for the node's encrypted file, which the unlock
+    // callbacks below open by returning the key (no derivation)
+    std::string fakeEncrypted() const {
+        cscrypto::Bytes bytes(cs::keyfile::kEncryptedSize, 7);
+        return EncodeBase58(bytes.data(), bytes.data() + bytes.size());
+    }
+
+    cs::keyfile::Unlock returns(const cscrypto::PrivateKey& key, int* calls = nullptr) const {
+        return [key, calls](const cscrypto::Bytes&) {
+            if (calls) ++*calls;
+            return key;
+        };
+    }
+
+    fs::path dir_;
+    std::string pkPath_, skPath_, plain_, address_;
+};
+}  // namespace
+
+// the node's encryption with a password, opened with the same password: the plain file is the very
+// file the key had before it was encrypted, the encrypted one is kept byte for byte, mode 0600
+TEST_F(KeyFileCryptToPlain, EncryptedBecomesTheOriginalPlainFile) {
+    const std::string pw = "old node password";
+    const auto enc = cs::keyfile::encrypt(sk_, pw.data(), pw.size());
+    ASSERT_EQ(enc.size(), cs::keyfile::kEncryptedSize);
+    const std::string encText = EncodeBase58(enc.data(), enc.data() + enc.size());
+    put(skPath_, encText);
+
+    const auto r = cs::keyfile::toPlain(pkPath_, skPath_, [&pw](const cscrypto::Bytes& b) { return cs::keyfile::decrypt(b, pw.data(), pw.size()); },
+                                        "20261107-120000");
+    ASSERT_EQ(r.status, cs::keyfile::ToPlain::Done);
+    EXPECT_EQ(r.address, address_);
+    EXPECT_EQ(slurp(skPath_), plain_);
+    EXPECT_EQ(r.backup, skPath_ + ".encrypted-20261107-120000");
+    EXPECT_EQ(slurp(r.backup), encText);
+#ifndef _WIN32
+    struct stat st {};
+    ASSERT_EQ(::stat(r.backup.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0600u);
+    ASSERT_EQ(::stat(skPath_.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0600u);
+#endif
+    EXPECT_FALSE(fs::exists(skPath_ + ".tmp"));
+
+    // and the node reads it as a plain key: run again, nothing to do
+    const auto again = cs::keyfile::toPlain(pkPath_, skPath_, returns(cscrypto::PrivateKey()), "20261107-120001");
+    EXPECT_EQ(again.status, cs::keyfile::ToPlain::AlreadyPlain);
+    EXPECT_EQ(again.address, address_);
+}
+
+// a wrong password opens nothing: the prompt gives up (here at once), nothing is written
+TEST_F(KeyFileCryptToPlain, WrongPasswordChangesNothing) {
+    const auto bytes = decode(kVectorFile);
+    put(skPath_, kVectorFile);
+    put(pkPath_, kVectorPublic);
+    int calls = 0;
+    const auto r = cs::keyfile::toPlain(pkPath_, skPath_,
+                                        [&calls](const cscrypto::Bytes& b) {
+                                            ++calls;
+                                            const std::string wrong = "node passwore";
+                                            return cs::keyfile::decrypt(b, wrong.data(), wrong.size());
+                                        },
+                                        "20261107-120000");
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(r.status, cs::keyfile::ToPlain::Cancelled);
+    EXPECT_EQ(slurp(skPath_), kVectorFile);
+    EXPECT_EQ(std::distance(fs::directory_iterator(dir_), fs::directory_iterator()), 2);
+}
+
+// a plain key: nothing to do, nothing asked, nothing written
+TEST_F(KeyFileCryptToPlain, PlainIsANoOp) {
+    put(skPath_, plain_ + "\n");
+    int calls = 0;
+    const auto r = cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_, &calls), "20261107-120000");
+    EXPECT_EQ(r.status, cs::keyfile::ToPlain::AlreadyPlain);
+    EXPECT_EQ(r.address, address_);
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(slurp(skPath_), plain_ + "\n");
+    EXPECT_EQ(std::distance(fs::directory_iterator(dir_), fs::directory_iterator()), 2);
+}
+
+// NodePublic.txt of another key (or none): refused, nothing written
+TEST_F(KeyFileCryptToPlain, MismatchingOrMissingPublicRefused) {
+    const std::string enc = fakeEncrypted();
+    put(skPath_, enc);
+    put(pkPath_, kVectorPublic);
+    auto r = cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_), "20261107-120000");
+    EXPECT_EQ(r.status, cs::keyfile::ToPlain::PublicMismatch);
+    EXPECT_EQ(r.address, address_);
+    EXPECT_EQ(slurp(skPath_), enc);
+    EXPECT_EQ(std::distance(fs::directory_iterator(dir_), fs::directory_iterator()), 2);
+
+    fs::remove(pkPath_);
+    int calls = 0;
+    r = cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_, &calls), "20261107-120000");
+    EXPECT_EQ(r.status, cs::keyfile::ToPlain::NoPublicFile);
+    EXPECT_EQ(calls, 0);  // refused before the password
+    EXPECT_EQ(slurp(skPath_), enc);
+}
+
+// a NodePublic.txt written on Windows (CRLF, a final newline) still matches
+TEST_F(KeyFileCryptToPlain, PublicWithLineEndMatches) {
+    put(skPath_, fakeEncrypted());
+    put(pkPath_, address_ + "\r\n");
+    const auto r = cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_), "20261107-120000");
+    EXPECT_EQ(r.status, cs::keyfile::ToPlain::Done);
+    EXPECT_EQ(slurp(skPath_), plain_);
+}
+
+// an existing file with the backup's name is never replaced: the next free name is used
+TEST_F(KeyFileCryptToPlain, ExistingBackupNameNotOverwritten) {
+    const std::string enc = fakeEncrypted();
+    put(skPath_, enc);
+    const std::string taken = skPath_ + ".encrypted-20261107-120000";
+    put(taken, "an earlier copy");
+    put(taken + "-2", "another one");
+    const auto r = cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_), "20261107-120000");
+    ASSERT_EQ(r.status, cs::keyfile::ToPlain::Done);
+    EXPECT_EQ(r.backup, taken + "-3");
+    EXPECT_EQ(slurp(taken), "an earlier copy");
+    EXPECT_EQ(slurp(taken + "-2"), "another one");
+    EXPECT_EQ(slurp(r.backup), enc);
+    EXPECT_EQ(slurp(skPath_), plain_);
+}
+
+// no key file, or a file that is neither key: refused, nothing asked
+TEST_F(KeyFileCryptToPlain, MissingOrBadPrivateRefused) {
+    int calls = 0;
+    EXPECT_EQ(cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_, &calls), "x").status, cs::keyfile::ToPlain::NoPrivateFile);
+    put(skPath_, "not base58 0OIl");
+    EXPECT_EQ(cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_, &calls), "x").status, cs::keyfile::ToPlain::BadPrivateFile);
+    cscrypto::Bytes other(72, 1);
+    put(skPath_, EncodeBase58(other.data(), other.data() + other.size()));
+    EXPECT_EQ(cs::keyfile::toPlain(pkPath_, skPath_, returns(sk_, &calls), "x").status, cs::keyfile::ToPlain::BadPrivateFile);
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(KeyFileCryptTimestamp, Format) {
+    const auto t = cs::keyfile::timestamp();
+    ASSERT_EQ(t.size(), 15u);
+    EXPECT_EQ(t[8], '-');
+    for (size_t i = 0; i < t.size(); ++i) {
+        if (i != 8) {
+            EXPECT_TRUE(t[i] >= '0' && t[i] <= '9') << t;
+        }
+    }
+}
+
+// Config::decryptKeyFile, the node's --decryptkey, with its prompt on std::cin as the node reads it:
+// the end of the input stops it (a service, < /dev/null), and piped input (the choice, then the
+// password, all in std::cin's buffer at once) opens the key
+namespace {
+class StdinFrom {
+public:
+    explicit StdinFrom(const std::string& text) : buf_(text), old_(std::cin.rdbuf(&buf_)) {
+        std::cin.clear();
+    }
+    ~StdinFrom() {
+        std::cin.rdbuf(old_);
+        std::cin.clear();
+    }
+
+private:
+    std::stringbuf buf_;
+    std::streambuf* old_;
+};
+
+int runDecryptKey(const std::string& pk, const std::string& sk) {
+    namespace po = boost::program_options;
+    po::options_description desc;
+    desc.add_options()("public-key-file", po::value<std::string>())("private-key-file", po::value<std::string>());
+    const std::string a1 = "--public-key-file=" + pk, a2 = "--private-key-file=" + sk;
+    const char* argv[] = {"node", a1.c_str(), a2.c_str()};
+    po::variables_map vm;
+    po::store(po::parse_command_line(3, argv, desc), vm);
+    return Config::decryptKeyFile(vm);
+}
+}  // namespace
+
+TEST_F(KeyFileCryptToPlain, EndOfInputCancels) {
+    const std::string enc = fakeEncrypted();
+    put(skPath_, enc);
+#ifdef _WIN32
+    // the password itself is read from the console (ReadConsoleA), not from std::cin
+    for (const char* input : {"", "x\ny\n"}) {
+#else
+    for (const char* input : {"", "p", "p\n", "x\ny\n"}) {
+#endif
+        StdinFrom in(input);
+        EXPECT_EQ(runDecryptKey(pkPath_, skPath_), EXIT_FAILURE) << input;   // returns: no endless prompt
+        EXPECT_EQ(slurp(skPath_), enc);
+    }
+    EXPECT_EQ(std::distance(fs::directory_iterator(dir_), fs::directory_iterator()), 2);
+}
+
+#ifndef _WIN32
+TEST_F(KeyFileCryptToPlain, PipedChoiceAndPasswordOpenTheKey) {
+    const std::string pw = "piped pw";
+    const auto enc = cs::keyfile::encrypt(sk_, pw.data(), pw.size());
+    ASSERT_EQ(enc.size(), cs::keyfile::kEncryptedSize);
+    put(skPath_, EncodeBase58(enc.data(), enc.data() + enc.size()));
+    StdinFrom in("p\n" + pw + "\n");
+    EXPECT_EQ(runDecryptKey(pkPath_, skPath_), EXIT_SUCCESS);
+    EXPECT_EQ(slurp(skPath_), plain_);
+}
+#endif

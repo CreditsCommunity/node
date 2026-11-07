@@ -209,73 +209,7 @@ static inline void writeFile(const std::string name, const std::string data) {
     file.close();
 }
 
-// the private key file (in clear, or encrypted by the node) and the keys JSON: readable by their
-// owner only (mode 0600 on POSIX whatever the umask; Windows keeps the folder's ACL), and replaced
-// atomically: the data goes to NAME.tmp, is flushed to disk, then renamed over NAME (a link named
-// NAME is followed, its target replaced), and the folder is flushed where the system allows it. On
-// any failure NAME is left as it was and false is returned.
-static bool writeKeyFile(const std::string& name, const std::string& data) {
-#ifndef _WIN32
-    std::string target = name;
-    if (char* resolved = ::realpath(name.c_str(), nullptr)) {
-        target = resolved;
-        ::free(resolved);
-    }
-    const std::string tmp = target + ".tmp";
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
-        return false;
-    }
-    bool ok = ::fchmod(fd, 0600) == 0;
-    size_t done = 0;
-    while (ok && done < data.size()) {
-        const ssize_t n = ::write(fd, data.data() + done, data.size() - done);
-        if (n < 0 && errno == EINTR) {
-            continue;
-        }
-        if (n <= 0) {
-            ok = false;
-            break;
-        }
-        done += static_cast<size_t>(n);
-    }
-    ok = ok && ::fsync(fd) == 0;
-    ok = (::close(fd) == 0) && ok;
-    if (!ok || ::rename(tmp.c_str(), target.c_str()) != 0) {
-        ::unlink(tmp.c_str());
-        return false;
-    }
-    const auto slash = target.find_last_of('/');
-    const std::string dir = slash == std::string::npos ? std::string(".") : (slash == 0 ? std::string("/") : target.substr(0, slash));
-    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd >= 0) {  // best effort: the rename is done either way
-        ::fsync(dfd);
-        ::close(dfd);
-    }
-    return true;
-#else
-    const std::string tmp = name + ".tmp";
-    HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    bool ok = true;
-    size_t done = 0;
-    while (ok && done < data.size()) {
-        DWORD n = 0;
-        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(data.size() - done, 1u << 20));
-        ok = ::WriteFile(h, data.data() + done, chunk, &n, nullptr) && n > 0;
-        done += n;
-    }
-    ok = ok && ::FlushFileBuffers(h);
-    ok = ::CloseHandle(h) && ok;
-    if (!ok || !::MoveFileExA(tmp.c_str(), name.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        ::DeleteFileA(tmp.c_str());
-        return false;
-    }
-    return true;
-#endif
-}
+using cs::keyfile::writeKeyFile;
 
 void Config::dumpJSONKeys(const std::string& fName) const {
     auto sk = privateKey_.access();
@@ -413,8 +347,44 @@ static int _kbhit() {
 }
 #endif
 
+#ifndef _WIN32
+// a password character from std::cin, where the choice before it ("p") was read: with
+// sync_with_stdio(false) std::cin buffers what it reads, so getchar() would miss piped input that
+// std::cin already holds. On a terminal the echo and the line editing are off while it is read (the
+// typed characters print as *); a pipe or a file is read as it is. -1 at the end of the input.
+class PasswordInput {
+public:
+    PasswordInput() : tty_(::isatty(STDIN_FILENO) == 1 && ::tcgetattr(STDIN_FILENO, &old_) == 0) {
+        if (tty_) {
+            termios raw = old_;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        }
+    }
+    ~PasswordInput() {
+        if (tty_) {
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &old_);
+        }
+    }
+    PasswordInput(const PasswordInput&) = delete;
+    PasswordInput& operator=(const PasswordInput&) = delete;
+
+    int next() {
+        const auto c = std::cin.get();
+        return c == std::char_traits<char>::eof() ? -1 : static_cast<unsigned char>(c);
+    }
+
+private:
+    termios old_{};
+    bool tty_;
+};
+#endif
+
+// prints the prompt once the terminal no longer echoes, so that nothing typed after it shows
 template <typename T>
-static bool readPasswordFromCin(T& mem) {
+static bool readPasswordFromCin(T& mem, const char* prompt) {
     auto ptr = mem.data();
     unsigned char ch = 0;
 
@@ -429,13 +399,25 @@ static bool readPasswordFromCin(T& mem) {
 
     GetConsoleMode(hIn, &con_mode);
     SetConsoleMode(hIn, con_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
+    std::cout << prompt << std::flush;
 
     while (ReadConsoleA(hIn, &ch, 1, &dwRead, nullptr) && ch != RETURN) {
 #else
     const char BACKSPACE = 127;
     const char RETURN = 10;
 
-    while ((ch = getch()) != RETURN) {
+    PasswordInput input;
+    std::cout << prompt << std::flush;
+    int c = input.next();
+    // the end of the choice's line ("p" and Enter), left in std::cin: not an empty password
+    while (c == '\n' || c == '\r') {
+        c = input.next();
+    }
+    for (; c != -1 && c != RETURN; c = input.next()) {
+        ch = static_cast<unsigned char>(c);
+        if (ch == '\r') {   // CRLF input
+            continue;
+        }
 #endif
         if (ch == BACKSPACE) {
             if (ptr != mem.data()) {
@@ -458,7 +440,11 @@ static bool readPasswordFromCin(T& mem) {
     if (!sz)
         return false;
 
+#ifdef _WIN32
     return ferror(stdin) == 0;
+#else
+    return !std::cin.bad();
+#endif
 }
 
 static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint8_t>& skBytes) {
@@ -466,8 +452,7 @@ static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint
     cscrypto::MemGuard<char, 256> pass;
 
     while (!pGood) {
-        std::cout << "Enter password: " << std::flush;
-        if (!readPasswordFromCin(pass)) {
+        if (!readPasswordFromCin(pass, "Enter password: ")) {
             return false;
         }
         const auto pLen = strlen(pass.data());
@@ -481,9 +466,8 @@ static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint
             continue;
         }
 
-        std::cout << "Confirm password: " << std::flush;
         cscrypto::MemGuard<char, 256> passConf;
-        if (!readPasswordFromCin(passConf))
+        if (!readPasswordFromCin(passConf, "Confirm password: "))
             return false;
 
         if (strcmp(pass.data(), passConf.data()) != 0) {
@@ -554,6 +538,10 @@ static bool usePassword() {
         std::cout << "\nTo use password for encrytion/decryption press \"p\", to use file press \"f\": "
                   << std::flush;
         std::cin >> choice;
+        if (!std::cin.good()) {   // the end of the input (a service, < /dev/null): the caller stops
+            std::cout << std::endl;
+            return false;
+        }
         std::cout << std::endl;
     }
     if (choice == 'p') {
@@ -566,10 +554,55 @@ static bool getEncryptedPrivateBytes(const cscrypto::PrivateKey& sk, std::vector
     if (!std::cin.good()) {
         return false;
     }
-    if (usePassword()) {
+    const bool password = usePassword();
+    if (!std::cin.good()) {
+        return false;
+    }
+    if (password) {
         return encryptWithPassword(sk, skBytes);
     }
     return encryptWithFile(sk, skBytes);
+}
+
+// the encrypted key file's password (or key file), asked until it opens the key; an empty key when
+// the input ends
+static cscrypto::PrivateKey unlockWithPrompt(const cscrypto::Bytes& sk) {
+    cscrypto::PrivateKey key;
+    while (!key) {
+        if (!std::cin.good()) {
+            return cscrypto::PrivateKey();
+        }
+        const bool password = usePassword();
+        if (!std::cin.good()) {
+            return cscrypto::PrivateKey();
+        }
+        bool noMemory = false;
+        if (password) {
+            cscrypto::MemGuard<char, 256> pass;
+            if (!readPasswordFromCin(pass, "Enter password: ")) {
+                return cscrypto::PrivateKey();
+            }
+            std::cout << "Trying to open file..." << std::endl;
+            key = cs::keyfile::decrypt(sk, pass.data(), std::strlen(pass.data()), &noMemory);
+        }
+        else {
+            std::string buf;
+            if (!getBufFromFile(buf)) {
+                return cscrypto::PrivateKey();
+            }
+            key = cs::keyfile::decrypt(sk, buf.data(), buf.size(), &noMemory);
+            wipe(buf);
+        }
+
+        if (noMemory) {   // asking again would fail the same way
+            std::cout << "Could not open the key: not enough memory (the password check needs about 1 GB free)" << std::endl;
+            return cscrypto::PrivateKey();
+        }
+        if (!key) {
+            std::cout << "Incorrect password (or corrupted file)" << std::endl;
+        }
+    }
+    return key;
 }
 
 static bool findWordInDictionary(const char* word, size_t& index) {
@@ -716,30 +749,9 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
         if (encFlag) {  // Check the encryption flag
             std::cout << "The key file seems to be encrypted" << std::endl;
 
-            while (!privateKey_) {
-                if (!std::cin.good())
-                    return false;
-                if (usePassword()) {
-                    std::cout << "Enter password: " << std::flush;
-                    cscrypto::MemGuard<char, 256> pass;
-                    if (!readPasswordFromCin(pass)) {
-                        return false;
-                    }
-                    std::cout << "Trying to open file..." << std::endl;
-                    privateKey_ = cs::keyfile::decrypt(sk, pass.data(), std::strlen(pass.data()));
-                }
-                else {
-                    std::string buf;
-                    if (!getBufFromFile(buf)) {
-                        return false;
-                    }
-                    privateKey_ = cs::keyfile::decrypt(sk, buf.data(), buf.size());
-                    wipe(buf);
-                }
-
-                if (!privateKey_) {
-                    std::cout << "Incorrect password (or corrupted file)" << std::endl;
-                }
+            privateKey_ = unlockWithPrompt(sk);
+            if (!privateKey_) {
+                return false;
             }
             changePasswordOption(pathToSk);
         }
@@ -877,6 +889,50 @@ bool Config::readKeys(const std::string& pathToPk, const std::string& pathToSk, 
     }
 
     return true;
+}
+
+/*public*/
+int Config::decryptKeyFile(const po::variables_map& vm) {
+    const std::string pathToPk = getArgFromCmdLine(vm, ARG_NAME_PUBLIC_KEY_FILE, DEFAULT_PATH_TO_PUBLIC_KEY);
+    const std::string pathToSk = getArgFromCmdLine(vm, ARG_NAME_PRIVATE_KEY_FILE, DEFAULT_PATH_TO_PRIVATE_KEY);
+    const auto unlock = [&pathToSk](const cscrypto::Bytes& sk) {
+        std::cout << pathToSk << " is encrypted: its password turns it into the plain key" << std::endl;
+        return unlockWithPrompt(sk);
+    };
+    const auto r = cs::keyfile::toPlain(pathToPk, pathToSk, unlock, cs::keyfile::timestamp());
+    using cs::keyfile::ToPlain;
+    switch (r.status) {
+        case ToPlain::Done:
+            std::cout << pathToSk << " is now in clear (address " << r.address << "); the encrypted original is kept as " << r.backup << std::endl;
+            std::cout << "Keep an offline copy of the original, never run two nodes with one key, and remember that the plain key is as safe as this machine." << std::endl;
+            return EXIT_SUCCESS;
+        case ToPlain::AlreadyPlain:
+            std::cout << pathToSk << " is already in clear (address " << r.address << "): nothing to do" << std::endl;
+            return EXIT_SUCCESS;
+        case ToPlain::NoPrivateFile:
+            std::cout << "No private key file " << pathToSk << " (set it with --private-key-file)" << std::endl;
+            break;
+        case ToPlain::BadPrivateFile:
+            std::cout << pathToSk << " holds neither a plain key nor a key encrypted by the node: nothing changed" << std::endl;
+            break;
+        case ToPlain::NoPublicFile:
+            std::cout << "No public key file " << pathToPk << " next to the encrypted key (set it with --public-key-file): nothing changed" << std::endl;
+            break;
+        case ToPlain::Cancelled:
+            std::cout << "Cancelled: the key was not opened, nothing changed" << std::endl;
+            break;
+        case ToPlain::PublicMismatch:
+            std::cout << "The key in " << pathToSk << " is address " << r.address << ", but " << pathToPk
+                      << " holds another public key: nothing changed (copy NodePublic.txt and NodePrivate.txt of the same node)" << std::endl;
+            break;
+        case ToPlain::BackupFailed:
+            std::cout << "Could not keep a copy of the encrypted " << pathToSk << " next to it (is the folder writable?): nothing changed" << std::endl;
+            break;
+        case ToPlain::WriteFailed:
+            std::cout << "Could not write " << pathToSk << ": it is still encrypted, as it was (a copy is in " << r.backup << ")" << std::endl;
+            break;
+    }
+    return EXIT_FAILURE;
 }
 
 /*public*/

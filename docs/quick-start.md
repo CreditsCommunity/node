@@ -295,7 +295,133 @@ Docker: `docker compose pull && docker compose up -d`. Native:
 
 Never run the old and the new node at the same time with the same key or the same `db/` folder.
 
-## 10. Troubleshooting
+## 10. Using your existing node key
+
+Your node's identity is its key: `NodePrivate.txt` and `NodePublic.txt`. To keep an identity you
+already have, give the node those two files instead of letting it make new ones. First check which
+kind of `NodePrivate.txt` you have:
+
+```sh
+wc -c NodePrivate.txt      # about 88 characters: plain; about 120: encrypted with a password
+```
+
+A **plain** key works everywhere. A key **encrypted by the node** (`--encryptkey`, or the password
+choice at its first start) makes the node ask for the password at every start, on its console.
+
+Before you start:
+
+- **Never run two nodes with the same key**, not even for a moment. Stop every node that uses
+  this key first, including an official node or one on another machine: the node can only tell
+  a community node running in the same folder.
+- **Keep an offline backup** (USB stick, paper) of the original files. A plain key is as exposed
+  as the machine it is on.
+- The wallet uses a plain node key as the account `node` without a password. On mainnet it still
+  asks you to type `send` before every transfer.
+
+### Native, plain key
+
+Put `NodePrivate.txt` and `NodePublic.txt` in the `csnode` folder **before** you run `./setup.sh`
+(`setup.bat` on Windows). The set-up finds them, offers the key as the wallet's account `node`
+(answer `node`), and sets `NodePrivate.txt` to mode 600.
+
+### Native, encrypted key
+
+Same place, same set-up. At every start the node asks:
+
+```
+The key file seems to be encrypted
+To use password for encrytion/decryption press "p", to use file press "f": p
+Enter password: ********
+```
+
+This works in tmux or in a Windows console window you type into. It does **not** work under
+systemd or any start without a console: the node cannot ask and does not start. Either keep it
+in tmux, or convert the key to plain once with `./node --decryptkey`
+([below](#convert-an-encrypted-key-to-plain)). The
+wallet opens an encrypted key with `--node-key` or as the account `node`, and asks the node's
+password; it needs about 1 GB of free memory for that.
+
+### Docker, plain key
+
+1. Stop the node, and save the keys the container may have made at its first start:
+
+   ```sh
+   docker compose stop
+   sudo cp -a ~/.credits/keys ~/.credits/keys.generated-$(date +%F)
+   ```
+
+2. Copy your two files in, owned by the container's user (uid 1000), mode 600:
+
+   ```sh
+   sudo cp NodePrivate.txt NodePublic.txt ~/.credits/keys/
+   sudo chown 1000:1000 ~/.credits/keys/NodePrivate.txt ~/.credits/keys/NodePublic.txt
+   sudo chmod 600 ~/.credits/keys/NodePrivate.txt ~/.credits/keys/NodePublic.txt
+   ```
+
+3. Start it and check the key it runs with:
+
+   ```sh
+   docker compose up -d
+   docker compose exec node credits-wallet account node-key
+   ```
+
+   `address` must be your `NodePublic.txt`, with `public file : ... matches`. The log must not
+   show `new node keys` nor ask for a password. (The node does not print its own key in the log.)
+
+On a **new** installation you can put the two files in `~/.credits/keys/` (with the `chown` and
+`chmod` above) before the first `docker compose up -d`: the container makes new keys only when
+`keys/NodePublic.txt` is missing. Always copy both files.
+
+### Docker, encrypted key
+
+The container cannot type a password at every start: with an encrypted key it stops with
+`NOT STARTING: keys/NodePrivate.txt is encrypted`. Turn the key into the plain key once, with the
+node of the image (community.18 or later); it asks the old password and needs no network. Opening
+the key takes about 1 GB of free memory for a few seconds, so `CREDITS_MEMORY` in `.env` must be at
+least about `1.2g` (the default is `4g`). Until the key is converted, `docker compose up -d` keeps
+restarting the container with that message: stop it with `docker compose stop`.
+
+1. Stop the node and save the keys it may have made (step 1 above).
+2. Copy your two files in, as in step 2 above.
+3. Decrypt and start:
+
+   ```sh
+   docker compose run --rm node decrypt-key        # press p, Enter, then type the old password
+   docker compose up -d
+   ```
+
+   It prints `keys/NodePrivate.txt is now in clear (address <your public key>); the encrypted
+   original is kept as keys/NodePrivate.txt.encrypted-<date>-<time>`. A wrong password prints
+   `Incorrect password (or corrupted file)` and asks again. If `NodePublic.txt` belongs to another
+   key, it changes nothing and says so: copy the two files of the same node. The password can
+   also come from a pipe (`printf 'p\n%s\n' "$PW" | docker compose run --rm -T node decrypt-key`).
+
+4. Check, as in step 3 for a plain key. Then move the `.encrypted-...` copy offline (or delete it
+   once you have an offline backup).
+
+### Convert an encrypted key to plain
+
+Native, for example to run the node under systemd (node community.18 or later): in the `csnode`
+folder, with the node **stopped** and the encrypted `NodePrivate.txt` and `NodePublic.txt` in
+place:
+
+```sh
+./node --decryptkey             # Windows: node.exe --decryptkey
+```
+
+Press `p`, Enter, and type the old password. The node writes the plain key in place (mode 600),
+keeps the encrypted file as `NodePrivate.txt.encrypted-<date>-<time>`, prints the address and
+exits without starting. It needs no `config.ini`, network or database, and refuses while a node
+runs in the folder (a community node; stop an official node yourself). A key that is already
+plain is left as it is. Other key files: `--private-key-file` and `--public-key-file`. It needs
+about 1 GB of free memory for a few seconds; without it, it says so and changes nothing. The node
+then starts without asking anything.
+
+On Windows, type the password in a console window (`node.exe` reads it from the console, not from
+a pipe). The plain key and the `.encrypted-...` copy keep the folder's permissions (Windows has no
+mode 600): keep the `csnode` folder readable by your user only.
+
+## 11. Troubleshooting
 
 | Problem | What to do |
 |---|---|

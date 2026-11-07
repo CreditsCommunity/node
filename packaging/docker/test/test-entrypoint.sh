@@ -2,7 +2,8 @@
 # Tests the image's entrypoint with a stub node: first-start setup, kept configuration and keys, the
 # wallet on the PATH with its data on the volume, the token cache on request (CREDITS_TOKENS_CACHE),
 # the snapshot download on request (--download-snapshot) and the [snapshot] settings, for pruned and
-# full nodes, the refusal after a snapshot mismatch, and storage changes.
+# full nodes, the refusal after a snapshot mismatch, storage changes, and a key encrypted by the node
+# (the start stops, the decrypt-key command).
 # Usage: test-entrypoint.sh <dir with mdb_copy and mdb_load>
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,6 +26,20 @@ printf '\n[storage]\ncheckpoint_every=100000\nblock_db=lmdb\n' >> "$pkg/config.i
 touch "$pkg/contract-executor.jar" "$pkg/sc-api-support.jar"
 cat > "$pkg/node" <<'STUB'
 #!/bin/bash
+# --decryptkey: records its arguments and reads the choice and the password as lines from stdin; with
+# "stub pw" it keeps the encrypted file and writes /data/stub-plain as the key. It does not decrypt:
+# this checks the entrypoint's arguments and input only. The node itself reads the same input ("p",
+# newline, password, newline, from a pipe or a terminal): KeyFileCryptToPlain.PipedChoiceAndPassword*
+# in tests/csnode covers the real reading and decryption.
+if [[ " $* " == *" --decryptkey "* ]]; then
+    echo "$@" > /data/stub-decrypt
+    read -r choice || true; read -r pw || true
+    if [ "$choice" != p ] || [ "$pw" != "stub pw" ]; then echo "Incorrect password (or corrupted file)"; exit 1; fi
+    cp /data/keys/NodePrivate.txt /data/keys/NodePrivate.txt.encrypted-stub
+    cp /data/stub-plain /data/keys/NodePrivate.txt
+    echo "keys/NodePrivate.txt is now in clear"
+    exit 0
+fi
 # stub node: --download-snapshot is recorded and exits STUB_DOWNLOAD_RC (0); otherwise it records its
 # arguments, logs a start-up digest and a written sequence, stops on SIGTERM
 if [[ " $* " == *" --download-snapshot "* ]]; then
@@ -252,5 +267,34 @@ touch "$d/db/.lock"
 run "$d" >/dev/null
 [ -e "$d/stub-download" ] || fail "no download over db/.lock alone"
 pass "db/.lock alone does not count as data"
+
+# 17. a key encrypted by the node: the normal start stops with the way out instead of waiting for a
+# password; decrypt-key runs the node's --decryptkey on keys/ with the terminal's input, then exits
+d=$(newdata 17)
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+cp "$d/keys/NodePrivate.txt" "$d/stub-plain"
+python3 -c 'import base58, os, sys; open(sys.argv[1], "w").write(base58.b58encode(os.urandom(88)).decode())' "$d/keys/NodePrivate.txt"
+rm -f "$d/stub-args"
+set +e; out=$(run "$d" -e CREDITS_SNAPSHOT=off); rc=$?; set -e
+[ "$rc" = 3 ] && grep -q 'NOT STARTING: keys/NodePrivate.txt is encrypted with a password' <<<"$out" \
+    && grep -q 'docker compose run --rm node decrypt-key' <<<"$out" || { echo "$out"; fail "an encrypted key: exit $rc"; }
+[ -e "$d/stub-args" ] && fail "the node started with an encrypted key"
+command_run() { local data=$1; shift; docker run --rm -i --label credits-entrypoint-test --user "$(id -u)" -v "$data:/data" "$image" "$@" 2>&1; }
+set +e; out=$(printf 'p\nwrong\n' | command_run "$d" decrypt-key); rc=$?; set -e
+[ "$rc" = 1 ] && grep -q 'Incorrect password' <<<"$out" || { echo "$out"; fail "decrypt-key with a wrong password: exit $rc"; }
+out=$(printf 'p\nstub pw\n' | command_run "$d" decrypt-key) || { echo "$out"; fail "decrypt-key"; }
+[ "$(cat "$d/stub-decrypt")" = "--decryptkey --db-path db --public-key-file keys/NodePublic.txt --private-key-file keys/NodePrivate.txt" ] \
+    || fail "decrypt-key arguments: $(cat "$d/stub-decrypt")"
+cmp -s "$d/keys/NodePrivate.txt" "$d/stub-plain" || fail "decrypt-key did not write the plain key"
+[ -e "$d/keys/NodePrivate.txt.encrypted-stub" ] || fail "decrypt-key: no encrypted copy"
+[ -e "$d/stub-args" ] && fail "decrypt-key started the node"
+[ -e "$d/stub-download" ] && fail "decrypt-key downloaded"
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+[ -e "$d/stub-args" ] || fail "no start after decrypt-key"
+set +e; out=$(command_run "$(newdata 17b)" decrypt-key); rc=$?; set -e
+[ "$rc" = 2 ] && grep -q 'no /data/keys/NodePrivate.txt' <<<"$out" || { echo "$out"; fail "decrypt-key without keys: exit $rc"; }
+set +e; out=$(command_run "$d" frobnicate); rc=$?; set -e
+[ "$rc" = 2 ] && grep -q "unknown command 'frobnicate'" <<<"$out" || { echo "$out"; fail "unknown command: exit $rc"; }
+pass "an encrypted key stops the start; decrypt-key makes it plain"
 
 echo "PASS: entrypoint"

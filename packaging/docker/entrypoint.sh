@@ -49,6 +49,17 @@ for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL" "$TOKENS_CACHE"; do case "$v" i
 [[ "$P2P_PORT" =~ ^[0-9]+$ ]] || { log "CREDITS_P2P_PORT must be a number"; exit 2; }
 
 cd "$DATA"
+# commands (docker compose run --rm node <command>); none: the node's normal start
+case "${1:-}" in
+    "") ;;
+    decrypt-key)
+        # the node's --decryptkey: asks the password of keys/NodePrivate.txt (encrypted by the node),
+        # writes the plain key in its place, keeps the encrypted file next to it, exits; no network,
+        # configuration or database
+        [ -f keys/NodePrivate.txt ] || { log "no $DATA/keys/NodePrivate.txt: copy NodePrivate.txt and NodePublic.txt into the keys folder (~/.credits/keys on the host), owned by uid 1000, then run decrypt-key again"; exit 2; }
+        exec "$OPT/node" --decryptkey --db-path db --public-key-file keys/NodePublic.txt --private-key-file keys/NodePrivate.txt ;;
+    *) log "unknown command '$1': the only command is decrypt-key (docker compose run --rm node decrypt-key)"; exit 2 ;;
+esac
 # a data directory with a database but no config.ini (removed by hand): without CREDITS_DB_BACKEND,
 # config.ini is written for the backend already there, not for the default
 if [ -z "${CREDITS_DB_BACKEND:-}" ] && [ ! -f config.ini ] && [ -d db ] && [ "$RESET" != 1 ]; then
@@ -186,6 +197,15 @@ done
 [ ! -e "$OPT/snapshot_sources.txt" ] || [ -e snapshot_sources.txt ] || cp "$OPT/snapshot_sources.txt" snapshot_sources.txt
 if [ ! -f keys/NodePublic.txt ]; then
     log "new node keys, public key $(python3 "$OPT/keygen.py" keys); back up $DATA/keys"
+fi
+# a key encrypted by the node (88 bytes, 64 in clear) would make the node wait for a password that
+# nobody can type in a container: stop with the way out instead
+key_bytes() { python3 -c 'import sys, base58; t = open(sys.argv[1]).readline().strip(); print(len(base58.b58decode(t)) if t else 0)' "$1" 2>/dev/null || echo 0; }
+if [ "$(key_bytes keys/NodePrivate.txt)" = 88 ]; then
+    log "NOT STARTING: keys/NodePrivate.txt is encrypted with a password, which the node would ask at every start and a container cannot type."
+    log "Turn it into the plain key once (it asks the password and keeps the encrypted file next to it):"
+    log "    docker compose stop && docker compose run --rm node decrypt-key && docker compose up -d"
+    exit 3
 fi
 mkdir -p log
 if [ "$download" = 1 ]; then

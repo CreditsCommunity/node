@@ -72,6 +72,7 @@ int main(int argc, char* argv[]) {
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
         ("dumpkeys", po::value<std::string>(), "dump your public and private keys into a JSON file with the specified name (UNENCRYPTED!)")
         ("encryptkey", "encrypts the private key with password upon startup (if not yet encrypted)")
+        ("decryptkey", "turn a private key file encrypted by the node into the plain key file after asking its password, then exit; the encrypted file is kept as <private key file>.encrypted-<date> (the node must be stopped; no configuration or database is needed)")
 #ifdef _WIN32
         (cmdline::argInstall,
             po::value<std::string>(),
@@ -186,6 +187,16 @@ int main(int argc, char* argv[]) {
 #else
         chdir(currentDir.c_str());
 #endif
+    }
+
+    // the key files only: no configuration, network or database (db/.lock tells a running node)
+    if (vm.count("decryptkey") > 0) {
+        const std::string dbPath = vm.count(cmdline::argDBPath) ? vm[cmdline::argDBPath].as<std::string>() : std::string("db");
+        if (dbcheck::lockedByAnotherProcess(dbPath)) {
+            std::cerr << "a node runs with " << dbPath << " (db/.lock is held): stop it first, then run --decryptkey again" << std::endl;
+            return 3;
+        }
+        return Config::decryptKeyFile(vm);
     }
 
     auto config = Config::read(vm, true);
