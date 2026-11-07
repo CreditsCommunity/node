@@ -334,7 +334,8 @@ Enter password: ********
 
 This works in tmux or in a Windows console window you type into. It does **not** work under
 systemd or any start without a console: the node cannot ask and does not start. Either keep it
-in tmux, or convert the key to plain once ([below](#convert-an-encrypted-key-to-plain)). The
+in tmux, or convert the key to plain once with `./node --decryptkey`
+([below](#convert-an-encrypted-key-to-plain)). The
 wallet opens an encrypted key with `--node-key` or as the account `node`, and asks the node's
 password; it needs about 1 GB of free memory for that.
 
@@ -371,79 +372,42 @@ On a **new** installation you can put the two files in `~/.credits/keys/` (with 
 
 ### Docker, encrypted key
 
-The container cannot type a password, so convert the key to plain once, with the node from the
-same image, then continue as for a plain key.
+The container cannot type a password at every start: with an encrypted key it stops with
+`NOT STARTING: keys/NodePrivate.txt is encrypted`. Turn the key into the plain key once, with the
+node of the image (community.18 or later); it asks the old password and needs no network.
 
-1. Stop the node and save its current keys (step 1 above).
-2. Put the encrypted files in a temporary folder owned by uid 1000:
-
-   ```sh
-   mkdir ~/keyconv
-   cp /path/to/old/NodePrivate.txt /path/to/old/NodePublic.txt ~/keyconv/
-   sudo chown -R 1000:1000 ~/keyconv && sudo chmod 700 ~/keyconv
-   ```
-
-3. Decrypt it. Type `p`, Enter, then the password and Enter. The node then waits about 10 seconds
-   (two 5-second countdowns: press nothing) and exits with `Keys dumped to /keyconv/keys.json`.
-   It needs no network and touches no data.
+1. Stop the node and save the keys it may have made (step 1 above).
+2. Copy your two files in, as in step 2 above.
+3. Decrypt and start:
 
    ```sh
-   docker run --rm -it --network none -v ~/keyconv:/keyconv -w /opt/credits \
-     --entrypoint /opt/credits/node ghcr.io/creditscommunity/credits-node:latest \
-     --config-file config.ini.template --db-path /tmp/db \
-     --public-key-file /keyconv/NodePublic.txt --private-key-file /keyconv/NodePrivate.txt \
-     --dumpkeys /keyconv/keys.json
+   docker compose run --rm node decrypt-key        # press p, Enter, then type the old password
+   docker compose up -d
    ```
 
-   A wrong password prints `Incorrect password (or corrupted file)` and asks again. If it asks
-   to rewrite the public key file, your `NodePublic.txt` does not belong to this key: type `q`
-   to stop, or `f` to write the right one.
+   It prints `keys/NodePrivate.txt is now in clear (address <your public key>); the encrypted
+   original is kept as keys/NodePrivate.txt.encrypted-<date>-<time>`. A wrong password prints
+   `Incorrect password (or corrupted file)` and asks again. If `NodePublic.txt` belongs to another
+   key, it changes nothing and says so: copy the two files of the same node.
 
-4. Write the two plain files (no newline at the end, mode 600, owner 1000):
-
-   ```sh
-   docker run --rm -v ~/keyconv:/keyconv --entrypoint python3 \
-     ghcr.io/creditscommunity/credits-node:latest -c "import json,os; \
-   k=json.load(open('/keyconv/keys.json'))['key']; os.umask(0o077); os.makedirs('/keyconv/plain', exist_ok=True); \
-   open('/keyconv/plain/NodePrivate.txt','w').write(k['private']); open('/keyconv/plain/NodePublic.txt','w').write(k['public'])"
-   ```
-
-5. Install them, then delete the decrypted copies:
-
-   ```sh
-   sudo cp -p ~/keyconv/plain/NodePrivate.txt ~/keyconv/plain/NodePublic.txt ~/.credits/keys/
-   sudo shred -u ~/keyconv/keys.json ~/keyconv/plain/NodePrivate.txt ~/keyconv/plain/NodePublic.txt \
-     ~/keyconv/NodePrivate.txt ~/keyconv/NodePublic.txt
-   sudo rm -r ~/keyconv
-   ```
-
-6. Start and check, as in step 3 for a plain key.
+4. Check, as in step 3 for a plain key. Then move the `.encrypted-...` copy offline (or delete it
+   once you have an offline backup).
 
 ### Convert an encrypted key to plain
 
-Native variant, for example to run the node under systemd: the same `--dumpkeys` with the
-package's `node`, in the `csnode` folder with the node **stopped** and the encrypted
-`NodePrivate.txt` and `NodePublic.txt` in place.
+Native, for example to run the node under systemd (node community.18 or later): in the `csnode`
+folder, with the node **stopped** and the encrypted `NodePrivate.txt` and `NodePublic.txt` in
+place:
 
 ```sh
-cp NodePrivate.txt ~/NodePrivate.encrypted.bak          # move it offline afterwards
-./node --config-file config.ini --db-path /tmp/keyconv-db --dumpkeys keys.json
-python3 -c "import json,os; k=json.load(open('keys.json'))['key']; os.umask(0o077); \
-open('NodePrivate.txt','w').write(k['private']); open('NodePublic.txt','w').write(k['public'])"
-chmod 600 NodePrivate.txt
-shred -u keys.json && rm -rf /tmp/keyconv-db
+./node --decryptkey             # Windows: node.exe --decryptkey
 ```
 
-Type `p` and the password as above. Without `python3`:
-`jq -j .key.private keys.json > NodePrivate.txt` and `jq -j .key.public keys.json > NodePublic.txt`.
-The node then starts without asking anything. On Windows use `node.exe` the same way, then in
-PowerShell:
-
-```powershell
-$k = (Get-Content keys.json | ConvertFrom-Json).key
-[IO.File]::WriteAllText("$PWD\NodePrivate.txt", $k.private); [IO.File]::WriteAllText("$PWD\NodePublic.txt", $k.public)
-Remove-Item keys.json
-```
+Press `p`, Enter, and type the old password. The node writes the plain key in place (mode 600),
+keeps the encrypted file as `NodePrivate.txt.encrypted-<date>-<time>`, prints the address and
+exits without starting. It needs no `config.ini`, network or database, and refuses while a node
+runs in the folder. A key that is already plain is left as it is. Other key files:
+`--private-key-file` and `--public-key-file`. The node then starts without asking anything.
 
 ## 11. Troubleshooting
 

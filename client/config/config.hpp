@@ -352,6 +352,9 @@ public:
     }
 
     bool readKeys(const po::variables_map& vm);
+    // --decryptkey: the key file encrypted by the node becomes the plain key file after its password
+    // is typed (the encrypted file is kept next to it); the exit code. No configuration is read.
+    static int decryptKeyFile(const po::variables_map& vm);
     bool enterWithSeed();
 
     const ConveyerData& conveyerData() const {
