@@ -45,8 +45,8 @@ lines under the new release.
 | PR | Change |
 |---|---|
 | #172 | docs: `docs/quick-start.md`, a short quick-start guide (Docker and native Linux, Windows and macOS; pruned on lmdb or full on rocksdb from the snapshot, snapshot serving on; requirements, ports, first checks, the wallet, upgrading with the database kept, common problems), linked from the top of the README |
-| #174 | docs: quick-start: using an existing node key, plain or encrypted, in Docker or native (a section with copy-paste steps; an encrypted key converted once to plain with the node's own `--dumpkeys`, for Docker and systemd) |
 | #173 | packaging: a new full node defaults to rocksdb (it starts from a snapshot) in Docker and in the guided set-up (setup.sh, setup.ps1); pruned stays on lmdb; existing installs keep their backend (the database in `db/`, the `db_backend` of `config.ini`, berkeleydb for a full `[storage]` without one; the entrypoint also detects the database of a data folder whose `config.ini` was removed); `docker-compose.yml` takes its limits from `CREDITS_CPUS` (1.5) and `CREDITS_MEMORY` (4g) in `.env` (a full node: 4 and 8g); texts aligned: a full node on rocksdb about 250 to 300 GB, backfill about 2 to 3 days, glibc 2.38 for `linux-x64` (2.31 for `-glibc2.31`) in the README, the image `ghcr.io/creditscommunity/credits-node`, the `config.pruned.ini` comment on the snapshot start; quick-start, storage.md and the Docker README updated; ci: setup-test and the Docker entrypoint test check the rocksdb default and that a full berkeleydb install is kept |
+| #174 | docs: quick-start: using an existing node key, plain or encrypted, in Docker or native (a section with copy-paste steps; an encrypted key converted once to plain with the node's own `--dumpkeys`, for Docker and systemd) |
 
 ## community.17 — 2026-11-05
 
