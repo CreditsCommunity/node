@@ -41,7 +41,7 @@ Systems: Linux x86-64, Windows 10 or later (x64), macOS on Apple Silicon, or any
 |---|---|---|
 | 9510 TCP and UDP | **open** to the internet (firewall and router) | p2p: the other nodes reach yours here |
 | 9090 | **closed** to other hosts (localhost only) | the node's API, used by the wallet |
-| 9088 | **closed** to other hosts | the diagnostic API (off unless you turn it on) |
+| 9088 | **closed** to other hosts | the diagnostic API (on by default in the packages: the wallet uses it to check the network) |
 | 9080, 9070 | **closed** to other hosts | the smart-contract executor |
 
 The node listens on 9090 and 9088 on every interface: block them in the firewall. Docker publishes
