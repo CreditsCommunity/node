@@ -9,6 +9,10 @@
 [![AGPL License](https://img.shields.io/github/license/CREDITSCOM/node.svg?color=green&label=License&style=plastic)](LICENSE)
 [![Twitter](https://img.shields.io/twitter/follow/creditscom.svg?label=Follow&style=social)](https://twitter.com/intent/follow?screen_name=creditscom)
 # Credits Node (community)
+
+> **New here? Start with the [quick-start guide](docs/quick-start.md):** a node running in
+> minutes, with Docker or the native package, pruned or full.
+
 The node is the program that runs on the operator's machine and takes part in the CREDITS network.
 Written in C++.
 
