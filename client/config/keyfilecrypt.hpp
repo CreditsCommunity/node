@@ -31,8 +31,9 @@ cscrypto::Bytes encrypt(const cscrypto::PrivateKey& key, const char* passwd, std
 // files written by cscrypto
 cscrypto::Bytes encryptWithNonce(const cscrypto::PrivateKey& key, const char* passwd, std::size_t pswdLen, const cscrypto::Byte* nonce);
 
-// an empty key on a wrong password, a changed file, another length or a failed derivation
-cscrypto::PrivateKey decrypt(const cscrypto::Bytes& bytes, const char* passwd, std::size_t pswdLen);
+// an empty key on a wrong password, a changed file, another length or a failed derivation;
+// derivationFailed, when given, tells the last (libsodium could not allocate its memory, about 1 GiB)
+cscrypto::PrivateKey decrypt(const cscrypto::Bytes& bytes, const char* passwd, std::size_t pswdLen, bool* derivationFailed = nullptr);
 
 // The private key file and the keys JSON: readable by their owner only (mode 0600 on POSIX whatever
 // the umask; Windows keeps the folder's ACL), and replaced atomically: the data goes to NAME.tmp, is

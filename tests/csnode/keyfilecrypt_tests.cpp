@@ -14,6 +14,10 @@
 #include <cscrypto/cscrypto.hpp>
 
 #include <keyfilecrypt.hpp>
+#include <config.hpp>
+
+#include <boost/program_options.hpp>
+#include <sstream>
 
 // The key file keeps cscrypto's format: these tests compare the bytes with cscrypto's own writer
 // and reader (PrivateKey::getEncrypted / readFromEncrypted, the code of the official node). Each
@@ -112,6 +116,12 @@ TEST_F(KeyFileCrypt, FailedDerivationIsAnError) {
     EXPECT_TRUE(cs::keyfile::encrypt(sk_, nullptr, 5).empty());
     EXPECT_TRUE(cs::keyfile::encrypt(cscrypto::PrivateKey(), "pw", 2).empty());
     EXPECT_FALSE(cs::keyfile::decrypt(decode(kVectorFile), nullptr, 5));
+    bool failed = false;
+    EXPECT_FALSE(cs::keyfile::decrypt(decode(kVectorFile), nullptr, 5, &failed));
+    EXPECT_TRUE(failed);   // told apart from a wrong password
+    const std::string wrong = "x";
+    EXPECT_FALSE(cs::keyfile::decrypt(cscrypto::Bytes(10, 1), wrong.data(), wrong.size(), &failed));
+    EXPECT_FALSE(failed);
 }
 
 // --decryptkey (cs::keyfile::toPlain): the encrypted key file becomes the plain key file, the
@@ -297,3 +307,62 @@ TEST(KeyFileCryptTimestamp, Format) {
         }
     }
 }
+
+// Config::decryptKeyFile, the node's --decryptkey, with its prompt on std::cin as the node reads it:
+// the end of the input stops it (a service, < /dev/null), and piped input (the choice, then the
+// password, all in std::cin's buffer at once) opens the key
+namespace {
+class StdinFrom {
+public:
+    explicit StdinFrom(const std::string& text) : buf_(text), old_(std::cin.rdbuf(&buf_)) {
+        std::cin.clear();
+    }
+    ~StdinFrom() {
+        std::cin.rdbuf(old_);
+        std::cin.clear();
+    }
+
+private:
+    std::stringbuf buf_;
+    std::streambuf* old_;
+};
+
+int runDecryptKey(const std::string& pk, const std::string& sk) {
+    namespace po = boost::program_options;
+    po::options_description desc;
+    desc.add_options()("public-key-file", po::value<std::string>())("private-key-file", po::value<std::string>());
+    const std::string a1 = "--public-key-file=" + pk, a2 = "--private-key-file=" + sk;
+    const char* argv[] = {"node", a1.c_str(), a2.c_str()};
+    po::variables_map vm;
+    po::store(po::parse_command_line(3, argv, desc), vm);
+    return Config::decryptKeyFile(vm);
+}
+}  // namespace
+
+TEST_F(KeyFileCryptToPlain, EndOfInputCancels) {
+    const std::string enc = fakeEncrypted();
+    put(skPath_, enc);
+#ifdef _WIN32
+    // the password itself is read from the console (ReadConsoleA), not from std::cin
+    for (const char* input : {"", "x\ny\n"}) {
+#else
+    for (const char* input : {"", "p", "p\n", "x\ny\n"}) {
+#endif
+        StdinFrom in(input);
+        EXPECT_EQ(runDecryptKey(pkPath_, skPath_), EXIT_FAILURE) << input;   // returns: no endless prompt
+        EXPECT_EQ(slurp(skPath_), enc);
+    }
+    EXPECT_EQ(std::distance(fs::directory_iterator(dir_), fs::directory_iterator()), 2);
+}
+
+#ifndef _WIN32
+TEST_F(KeyFileCryptToPlain, PipedChoiceAndPasswordOpenTheKey) {
+    const std::string pw = "piped pw";
+    const auto enc = cs::keyfile::encrypt(sk_, pw.data(), pw.size());
+    ASSERT_EQ(enc.size(), cs::keyfile::kEncryptedSize);
+    put(skPath_, EncodeBase58(enc.data(), enc.data() + enc.size()));
+    StdinFrom in("p\n" + pw + "\n");
+    EXPECT_EQ(runDecryptKey(pkPath_, skPath_), EXIT_SUCCESS);
+    EXPECT_EQ(slurp(skPath_), plain_);
+}
+#endif

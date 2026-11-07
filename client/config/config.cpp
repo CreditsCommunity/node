@@ -347,8 +347,44 @@ static int _kbhit() {
 }
 #endif
 
+#ifndef _WIN32
+// a password character from std::cin, where the choice before it ("p") was read: with
+// sync_with_stdio(false) std::cin buffers what it reads, so getchar() would miss piped input that
+// std::cin already holds. On a terminal the echo and the line editing are off while it is read (the
+// typed characters print as *); a pipe or a file is read as it is. -1 at the end of the input.
+class PasswordInput {
+public:
+    PasswordInput() : tty_(::isatty(STDIN_FILENO) == 1 && ::tcgetattr(STDIN_FILENO, &old_) == 0) {
+        if (tty_) {
+            termios raw = old_;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        }
+    }
+    ~PasswordInput() {
+        if (tty_) {
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &old_);
+        }
+    }
+    PasswordInput(const PasswordInput&) = delete;
+    PasswordInput& operator=(const PasswordInput&) = delete;
+
+    int next() {
+        const auto c = std::cin.get();
+        return c == std::char_traits<char>::eof() ? -1 : static_cast<unsigned char>(c);
+    }
+
+private:
+    termios old_{};
+    bool tty_;
+};
+#endif
+
+// prints the prompt once the terminal no longer echoes, so that nothing typed after it shows
 template <typename T>
-static bool readPasswordFromCin(T& mem) {
+static bool readPasswordFromCin(T& mem, const char* prompt) {
     auto ptr = mem.data();
     unsigned char ch = 0;
 
@@ -363,13 +399,25 @@ static bool readPasswordFromCin(T& mem) {
 
     GetConsoleMode(hIn, &con_mode);
     SetConsoleMode(hIn, con_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT));
+    std::cout << prompt << std::flush;
 
     while (ReadConsoleA(hIn, &ch, 1, &dwRead, nullptr) && ch != RETURN) {
 #else
     const char BACKSPACE = 127;
     const char RETURN = 10;
 
-    while ((ch = getch()) != RETURN) {
+    PasswordInput input;
+    std::cout << prompt << std::flush;
+    int c = input.next();
+    // the end of the choice's line ("p" and Enter), left in std::cin: not an empty password
+    while (c == '\n' || c == '\r') {
+        c = input.next();
+    }
+    for (; c != -1 && c != RETURN; c = input.next()) {
+        ch = static_cast<unsigned char>(c);
+        if (ch == '\r') {   // CRLF input
+            continue;
+        }
 #endif
         if (ch == BACKSPACE) {
             if (ptr != mem.data()) {
@@ -392,7 +440,11 @@ static bool readPasswordFromCin(T& mem) {
     if (!sz)
         return false;
 
+#ifdef _WIN32
     return ferror(stdin) == 0;
+#else
+    return !std::cin.bad();
+#endif
 }
 
 static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint8_t>& skBytes) {
@@ -400,8 +452,7 @@ static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint
     cscrypto::MemGuard<char, 256> pass;
 
     while (!pGood) {
-        std::cout << "Enter password: " << std::flush;
-        if (!readPasswordFromCin(pass)) {
+        if (!readPasswordFromCin(pass, "Enter password: ")) {
             return false;
         }
         const auto pLen = strlen(pass.data());
@@ -415,9 +466,8 @@ static bool encryptWithPassword(const cscrypto::PrivateKey& sk, std::vector<uint
             continue;
         }
 
-        std::cout << "Confirm password: " << std::flush;
         cscrypto::MemGuard<char, 256> passConf;
-        if (!readPasswordFromCin(passConf))
+        if (!readPasswordFromCin(passConf, "Confirm password: "))
             return false;
 
         if (strcmp(pass.data(), passConf.data()) != 0) {
@@ -488,6 +538,10 @@ static bool usePassword() {
         std::cout << "\nTo use password for encrytion/decryption press \"p\", to use file press \"f\": "
                   << std::flush;
         std::cin >> choice;
+        if (!std::cin.good()) {   // the end of the input (a service, < /dev/null): the caller stops
+            std::cout << std::endl;
+            return false;
+        }
         std::cout << std::endl;
     }
     if (choice == 'p') {
@@ -500,7 +554,11 @@ static bool getEncryptedPrivateBytes(const cscrypto::PrivateKey& sk, std::vector
     if (!std::cin.good()) {
         return false;
     }
-    if (usePassword()) {
+    const bool password = usePassword();
+    if (!std::cin.good()) {
+        return false;
+    }
+    if (password) {
         return encryptWithPassword(sk, skBytes);
     }
     return encryptWithFile(sk, skBytes);
@@ -514,24 +572,32 @@ static cscrypto::PrivateKey unlockWithPrompt(const cscrypto::Bytes& sk) {
         if (!std::cin.good()) {
             return cscrypto::PrivateKey();
         }
-        if (usePassword()) {
-            std::cout << "Enter password: " << std::flush;
+        const bool password = usePassword();
+        if (!std::cin.good()) {
+            return cscrypto::PrivateKey();
+        }
+        bool noMemory = false;
+        if (password) {
             cscrypto::MemGuard<char, 256> pass;
-            if (!readPasswordFromCin(pass)) {
+            if (!readPasswordFromCin(pass, "Enter password: ")) {
                 return cscrypto::PrivateKey();
             }
             std::cout << "Trying to open file..." << std::endl;
-            key = cs::keyfile::decrypt(sk, pass.data(), std::strlen(pass.data()));
+            key = cs::keyfile::decrypt(sk, pass.data(), std::strlen(pass.data()), &noMemory);
         }
         else {
             std::string buf;
             if (!getBufFromFile(buf)) {
                 return cscrypto::PrivateKey();
             }
-            key = cs::keyfile::decrypt(sk, buf.data(), buf.size());
+            key = cs::keyfile::decrypt(sk, buf.data(), buf.size(), &noMemory);
             wipe(buf);
         }
 
+        if (noMemory) {   // asking again would fail the same way
+            std::cout << "Could not open the key: not enough memory (the password check needs about 1 GB free)" << std::endl;
+            return cscrypto::PrivateKey();
+        }
         if (!key) {
             std::cout << "Incorrect password (or corrupted file)" << std::endl;
         }
@@ -853,7 +919,7 @@ int Config::decryptKeyFile(const po::variables_map& vm) {
             std::cout << "No public key file " << pathToPk << " next to the encrypted key (set it with --public-key-file): nothing changed" << std::endl;
             break;
         case ToPlain::Cancelled:
-            std::cout << "No password given: nothing changed" << std::endl;
+            std::cout << "Cancelled: the key was not opened, nothing changed" << std::endl;
             break;
         case ToPlain::PublicMismatch:
             std::cout << "The key in " << pathToSk << " is address " << r.address << ", but " << pathToPk

@@ -71,13 +71,19 @@ cscrypto::Bytes encrypt(const cscrypto::PrivateKey& key, const char* passwd, std
     return encryptWithNonce(key, passwd, pswdLen, nonce.data());
 }
 
-cscrypto::PrivateKey decrypt(const cscrypto::Bytes& bytes, const char* passwd, std::size_t pswdLen) {
+cscrypto::PrivateKey decrypt(const cscrypto::Bytes& bytes, const char* passwd, std::size_t pswdLen, bool* derivationFailed) {
+    if (derivationFailed) {
+        *derivationFailed = false;
+    }
     if (bytes.size() != kEncryptedSize) {
         return cscrypto::PrivateKey();
     }
 
     FileKey fileKey;
     if (!deriveKey(fileKey, passwd, pswdLen)) {
+        if (derivationFailed) {
+            *derivationFailed = true;
+        }
         return cscrypto::PrivateKey();
     }
 
@@ -103,7 +109,12 @@ bool writeKeyFile(const std::string& name, const std::string& data) {
         ::free(resolved);
     }
     const std::string tmp = target + ".tmp";
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    // a new file: whatever has the name (a file left by a crash, a link, a FIFO) is removed, never
+    // written through or waited on
+    if (::unlink(tmp.c_str()) != 0 && errno != ENOENT) {
+        return false;
+    }
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) {
         return false;
     }
@@ -136,7 +147,8 @@ bool writeKeyFile(const std::string& name, const std::string& data) {
     return true;
 #else
     const std::string tmp = name + ".tmp";
-    HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ::DeleteFileA(tmp.c_str());   // a file left by a crash; CREATE_NEW fails on anything left
+    HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         return false;
     }
