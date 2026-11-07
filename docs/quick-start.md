@@ -76,13 +76,16 @@ The node listens on 9090 and 9088 on every interface: block them in the firewall
    CREDITS_SNAPSHOT=github
    CREDITS_SERVE_SNAPSHOT=on
    CREDITS_API=on
+   CREDITS_CPUS=4
+   CREDITS_MEMORY=8g
    # CREDITS_BACKFILL=off   # uncomment to keep only the snapshot's blocks
    ```
 
-   Set `CREDITS_DB_BACKEND=rocksdb` for a full node: without it the full default is `berkeleydb`,
-   which cannot start from a snapshot and syncs from block 0. `CREDITS_API=on` is needed by the
-   wallet. For a full node, also raise or remove `cpus: 1.5` and `mem_limit: 4g` in
-   `docker-compose.yml`.
+   `rocksdb` is the default for a full node; the line only makes it explicit. (`berkeleydb`, the
+   official node's format, cannot start from a snapshot and syncs from block 0.) `CREDITS_API=on`
+   is needed by the wallet. `CREDITS_CPUS` and `CREDITS_MEMORY` set the container's limits in
+   `docker-compose.yml`: the defaults (1.5 cores, `4g`) fit a pruned node, a full node needs 4
+   cores and 8 GB.
 
    `.env` is read on the **first start only**, to write `~/.credits/config.ini`. After that, edit
    `config.ini`.
@@ -151,7 +154,7 @@ The set-up asks a few questions. Enter keeps the default shown in brackets.
 | # | Question | Pruned | Full |
 |---|---|---|---|
 | 1 | Pruned or full node? | `pruned` | `full` |
-| 2 | Database? | `lmdb` (default) | `rocksdb` (the default is `berkeleydb`: change it) |
+| 2 | Database? | `lmdb` (default) | `rocksdb` (default) |
 | 3 | How should the node get the chain? | `github` (default) | `github` (default) |
 | 3b | Fetch the older blocks? (full only) | not asked | `yes` (default); `no` keeps only the snapshot's blocks |
 | 4 | Share snapshots with other nodes? | `yes` (default) | `yes` (default) |

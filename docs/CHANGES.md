@@ -5,7 +5,7 @@ Every pull request merged into this fork since it branched from
 the first community release that contains it. For what these changes mean when running a node, see
 [differences.md](differences.md). Each release is published as
 `community-v4.2.532-community.N`, with full and pruned packages and the Docker image
-`ghcr.io/enzinobb/credits-node`.
+`ghcr.io/creditscommunity/credits-node`.
 
 Add a line here with every merged pull request. When a release is cut, move the "Not released yet"
 lines under the new release.

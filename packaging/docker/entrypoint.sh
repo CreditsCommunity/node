@@ -6,16 +6,16 @@
 # values on the first start only; afterwards it is the operator's file and the source of truth.
 # A node with an empty data directory first downloads the latest published snapshot
 # (CREDITS_SNAPSHOT=github, the default: node --download-snapshot); when that fails, the node itself
-# looks for a snapshot among its p2p neighbours, then syncs from block 0. A full node on lmdb or
-# rocksdb does the same, then fetches the older blocks from its neighbours in the background
-# (backward sync, CREDITS_BACKFILL); a full node on berkeleydb syncs from block 0.
+# looks for a snapshot among its p2p neighbours, then syncs from block 0. A full node on rocksdb (the
+# full default) or lmdb does the same, then fetches the older blocks from its neighbours in the
+# background (backward sync, CREDITS_BACKFILL); a full node on berkeleydb syncs from block 0.
 # See packaging/docker/README.md for the variables.
 set -euo pipefail
 
 OPT=${CREDITS_OPT:-/opt/credits}
 DATA=${CREDITS_DATA:-/data}
 STORAGE=${CREDITS_STORAGE:-pruned}
-case "$STORAGE" in pruned) default_backend=lmdb ;; full) default_backend=berkeleydb ;;
+case "$STORAGE" in pruned) default_backend=lmdb ;; full) default_backend=rocksdb ;;
     *) echo "[entrypoint] CREDITS_STORAGE must be pruned or full, not '$STORAGE'"; exit 2 ;; esac
 BACKEND=${CREDITS_DB_BACKEND:-$default_backend}
 SNAPSHOT=${CREDITS_SNAPSHOT:-github}
@@ -49,6 +49,16 @@ for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL" "$TOKENS_CACHE"; do case "$v" i
 [[ "$P2P_PORT" =~ ^[0-9]+$ ]] || { log "CREDITS_P2P_PORT must be a number"; exit 2; }
 
 cd "$DATA"
+# a data directory with a database but no config.ini (removed by hand): without CREDITS_DB_BACKEND,
+# config.ini is written for the backend already there, not for the default
+if [ -z "${CREDITS_DB_BACKEND:-}" ] && [ ! -f config.ini ] && [ -d db ] && [ "$RESET" != 1 ]; then
+    if [ -f .storage ]; then BACKEND=$(sed -nE 's/.*backend=([a-z]+).*/\1/p' .storage)
+    elif [ -f db/blockchain.db ] || [ -f db/sequence.db ]; then BACKEND=berkeleydb
+    elif [ -f db/lmdb/data.mdb ]; then BACKEND=lmdb
+    elif [ -f db/CURRENT ]; then BACKEND=rocksdb
+    fi
+    case "$BACKEND" in berkeleydb|lmdb|rocksdb) ;; *) BACKEND=$default_backend ;; esac
+fi
 # left by the restore script of earlier releases; the node cleans up its own interrupted imports
 rm -rf .restore-tmp .digest-before
 if [ -e .restore-incomplete ]; then
@@ -159,7 +169,7 @@ elif [ "$SNAPSHOT" = github ]; then
     else
         download=1   # below, once the keys exist
         [ "$cfg_mode" = pruned ] \
-            || log "a full node starts from the snapshot, then fetches the older blocks from its neighbours in the background (about 400 GB with lmdb, 130 GB with rocksdb, days on mainnet; CREDITS_BACKFILL=off keeps the snapshot's blocks only)"
+            || log "a full node starts from the snapshot, then fetches the older blocks from its neighbours in the background (on mainnet about 2 to 3 days, and about 250 to 300 GB with rocksdb, 400 GB or more with lmdb; CREDITS_BACKFILL=off keeps the snapshot's blocks only)"
     fi
 fi
 echo "mode=$cfg_mode backend=$cfg_backend" > .storage

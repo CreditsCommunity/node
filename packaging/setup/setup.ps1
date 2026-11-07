@@ -181,7 +181,8 @@ if (($curBackend + $curPrune) -and (-not $curPrune -or $curPrune -eq '0')) { $st
 if ($have -eq 'berkeleydb') { $storageDefault = 'full' }
 Write-Host '1. Storage'
 Write-Host '   pruned: keeps only recent blocks (a few GB), starts in minutes from a snapshot. Enough to run a node.'
-Write-Host '   full:   keeps every block since the start of the chain (tens of GB), for history and explorers.'
+Write-Host '   full:   keeps every block since the start of the chain (about 250 to 300 GB with rocksdb),'
+Write-Host '           for history and explorers.'
 $storage = Ask '   Pruned or full node? (pruned/full)' $storageDefault @('pruned', 'full')
 $prunedToFull = $false
 if ($storage -eq 'full' -and $have -and $curPrune -and $curPrune -ne '0') {
@@ -199,13 +200,24 @@ if ($storage -eq 'pruned') {
     Write-Host '   rocksdb: compressed, smaller on disk, a little more CPU.'
     $backend = Ask '   Database? (lmdb/rocksdb)' $backendDefault @('lmdb', 'rocksdb')
 } else {
-    $backendDefault = 'berkeleydb'
-    if (($curBackend -eq 'lmdb' -or $curBackend -eq 'rocksdb') -and (-not $curPrune -or $curPrune -eq '0')) { $backendDefault = $curBackend }
+    # rocksdb for a new full node; a full config.ini keeps its backend, and an existing database
+    # keeps its own
+    $backendDefault = 'rocksdb'
+    if (-not $curPrune -or $curPrune -eq '0') {
+        switch ($curBackend) {
+            { $_ -in @('lmdb', 'rocksdb', 'berkeleydb') } { $backendDefault = $curBackend }
+            'rocks' { $backendDefault = 'rocksdb' }
+            'berkeley' { $backendDefault = 'berkeleydb' }
+        }
+        # a full [storage] without db_backend runs the node's own default, berkeleydb
+        if (-not $curBackend -and $curPrune -eq '0') { $backendDefault = 'berkeleydb' }
+    }
     if ($have) { $backendDefault = $have }
-    Write-Host "   berkeleydb: the official node's format (the official node can open this folder too)."
-    Write-Host '   rocksdb:    the smallest full node (about a third of berkeleydb).'
-    Write-Host '   lmdb:       fast, larger on disk.'
-    $backend = Ask '   Database? (berkeleydb/rocksdb/lmdb)' $backendDefault @('berkeleydb', 'rocksdb', 'lmdb')
+    Write-Host '   rocksdb:    the smallest full node (about a third of berkeleydb); starts from a snapshot.'
+    Write-Host '   lmdb:       fast, larger on disk; starts from a snapshot.'
+    Write-Host "   berkeleydb: the official node's format (the official node can open this folder too);"
+    Write-Host '               it cannot start from a snapshot and syncs from block 0.'
+    $backend = Ask '   Database? (rocksdb/lmdb/berkeleydb)' $backendDefault @('rocksdb', 'lmdb', 'berkeleydb')
 }
 Write-Host ''
 
@@ -247,8 +259,8 @@ if ($storage -eq 'full' -and ($first -eq 'github' -or $first -eq 'network' -or $
     Write-Host '3b. History (backfill)'
     Write-Host '   yes: fetch every older block down to block 0 in the background, each checked against the chain;'
     Write-Host '        the node runs and takes part in the network meanwhile. On mainnet about 186 million blocks:'
-    Write-Host '        one to five days, and the disk of a full node (about 130 GB or more with rocksdb, 400 GB'
-    Write-Host '        with lmdb or berkeleydb).'
+    Write-Host '        about 2 to 3 days (more on a slow disk or few cores), and the disk of a full node (about'
+    Write-Host '        250 to 300 GB with rocksdb, 400 GB or more with lmdb or berkeleydb).'
     Write-Host '   no:  keep only the blocks from the snapshot on (a few GB); the history before is not served.'
     $backfill = Ask '   Fetch the older blocks? (yes/no)' $backfillDefault @('yes', 'no')
     Write-Host ''

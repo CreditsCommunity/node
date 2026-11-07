@@ -56,7 +56,7 @@ Indicative requirements:
 
 | | Pruned node | Full node |
 |---|---|---|
-| Operating system | Linux x86-64 (glibc 2.31 or later: Ubuntu 20.04, Debian 11 and later), Windows 10 or later (x64), macOS on Apple Silicon | same |
+| Operating system | Linux x86-64: the `linux-x64` package needs glibc 2.38 or later (Ubuntu 24.04, Debian 13 and later), the `linux-x64-glibc2.31` package runs on glibc 2.31 or later (Ubuntu 20.04, Debian 11 and later); Windows 10 or later (x64); macOS on Apple Silicon | same |
 | CPU | 2 cores | 4 cores or more (the backfill checks signatures on several threads) |
 | Memory | 4 GB (8 GB recommended) | 8 GB |
 | Disk | about 10 GB | about 250 to 300 GB with RocksDB, 400 GB or more with LMDB or BerkeleyDB; an SSD |

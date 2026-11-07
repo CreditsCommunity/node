@@ -128,19 +128,22 @@ run "$d" -e CREDITS_SNAPSHOT=auto -e CREDITS_SNAPSHOT_URL=https://example.org/re
 grep -q -- '--download-snapshot https://example.org/rel/snapshot.json' "$d/stub-download" || fail "old latest.json address"
 pass "p2p, off, serve and the old values"
 
-# 6b. a full node on berkeleydb (the full default) does not download and does not fetch: berkeleydb
+# 6b. a full node on berkeleydb (on request) does not download and does not fetch: berkeleydb
 # cannot hold a database that starts above block 0
 d=$(newdata 6f)
-run "$d" -e CREDITS_STORAGE=full >/dev/null
+run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=berkeleydb >/dev/null
 [ -e "$d/stub-download" ] && fail "a full berkeleydb node downloads"
 grep -q '^fetch=off' "$d/config.ini" || fail "a full berkeleydb node fetches"
+grep -q '^db_backend=berkeleydb' "$d/config.ini" || fail "a full berkeleydb node: db_backend"
 pass "a full berkeleydb node syncs from block 0"
 
-# 6g. a full node on lmdb or rocksdb starts from the snapshot and backfills (backward sync);
-# CREDITS_BACKFILL=off writes backfill=off
-for b in lmdb rocksdb; do
+# 6g. a full node on rocksdb (the full default, "default") or lmdb starts from the snapshot and
+# backfills (backward sync); CREDITS_BACKFILL=off writes backfill=off
+for b in default lmdb rocksdb; do
     d=$(newdata "6g-$b")
-    out=$(run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=$b)
+    if [ "$b" = default ]; then out=$(run "$d" -e CREDITS_STORAGE=full); b=rocksdb
+    else out=$(run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=$b); fi
+    grep -q "^db_backend=$b" "$d/config.ini" || fail "a full $b node: db_backend"
     grep -q -- '--download-snapshot' "$d/stub-download" 2>/dev/null || { echo "$out"; fail "a full $b node does not download"; }
     grep -q 'fetches the older blocks from its neighbours' <<<"$out" || { echo "$out"; fail "a full $b node: no backfill note"; }
     grep -q '^fetch=auto' "$d/config.ini" || fail "a full $b node does not fetch"
@@ -152,6 +155,24 @@ d=$(newdata 6g-off)
 run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=lmdb -e CREDITS_BACKFILL=off >/dev/null
 grep -q '^backfill=off' "$d/config.ini" || fail "CREDITS_BACKFILL=off not written"
 pass "a full lmdb or rocksdb node starts from the snapshot and backfills"
+
+# 6h. an existing full berkeleydb install keeps berkeleydb: a config.ini without db_backend (the
+# node's own default) and, with config.ini removed, a berkeleydb database already in db/
+d=$(newdata 6h)
+run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=berkeleydb >/dev/null
+sed -i '/^db_backend=/d' "$d/config.ini"
+mkdir -p "$d/db"; touch "$d/db/blockchain.db" "$d/db/sequence.db"
+rm -f "$d/stub-download"
+set +e; out=$(run "$d" -e CREDITS_STORAGE=full); rc=$?; set -e
+[ "$rc" = 0 ] || { echo "$out"; fail "an old full berkeleydb install: exit $rc"; }
+grep -q 'mode=full backend=berkeleydb' "$d/.storage" || fail "an old full berkeleydb install: record"
+grep -q 'warning: CREDITS_DB_BACKEND' <<<"$out" && fail "an old full berkeleydb install: backend warning"
+rm -f "$d/config.ini" "$d/.storage"
+set +e; out=$(run "$d" -e CREDITS_STORAGE=full); rc=$?; set -e
+[ "$rc" = 0 ] || { echo "$out"; fail "a berkeleydb database without config.ini: exit $rc"; }
+grep -q '^db_backend=berkeleydb' "$d/config.ini" || fail "a berkeleydb database without config.ini: db_backend"
+[ -e "$d/stub-download" ] && fail "an old full berkeleydb install downloads"
+pass "an existing full berkeleydb install keeps berkeleydb"
 
 # 6c. a snapshot mismatch reported by the node: the next start is refused
 d=$(newdata 6m)
