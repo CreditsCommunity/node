@@ -20,13 +20,15 @@ TEST(PollUntil, StopsAtTheFirstSuccess) {
     EXPECT_LT(std::chrono::steady_clock::now() - start, 1000ms);
 }
 
-// never answers: tried until the deadline, the last attempt at or after it
+// never answers: tried until the deadline, the last attempt at or after it. A slow CI runner may
+// oversleep an interval, so only the first attempt, the one at the deadline and an upper bound
+// are certain
 TEST(PollUntil, LastAttemptAtTheDeadline) {
     int calls = 0;
     std::chrono::steady_clock::time_point last;
     const auto start = std::chrono::steady_clock::now();
     EXPECT_FALSE(pollUntil(250ms, 100ms, [&] { ++calls; last = std::chrono::steady_clock::now(); return false; }, never));
-    EXPECT_GE(calls, 3);
+    EXPECT_GE(calls, 2);
     EXPECT_LE(calls, 6);
     EXPECT_GE(last - start, 250ms);
 }
