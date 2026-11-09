@@ -486,6 +486,26 @@ jobs:
           - name: contracts-net-loss
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 CONTRACTS=1
             contracts: true
+          - name: delay-50
+            manual: true   # study/trusted-selection experiment: one delayed node (n7 = the quick-started one), stage-3 diagnostics of #176
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=50 NET_FAULT_JITTER_MS=10 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-150
+            manual: true   # study/trusted-selection experiment: one delayed node (n7 = the quick-started one), stage-3 diagnostics of #176
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=150 NET_FAULT_JITTER_MS=30 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-300
+            manual: true   # study/trusted-selection experiment: one delayed node (n7 = the quick-started one), stage-3 diagnostics of #176
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=300 NET_FAULT_JITTER_MS=60 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-150-restart
+            manual: true   # study/trusted-selection experiment: one delayed node (n7 = the quick-started one), stage-3 diagnostics of #176
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=150 NET_FAULT_JITTER_MS=30 NET_FAULT_NODES=7 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-300-restart
+            manual: true   # study/trusted-selection experiment: one delayed node (n7 = the quick-started one), stage-3 diagnostics of #176
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=300 NET_FAULT_JITTER_MS=60 NET_FAULT_NODES=7 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
           # an official stage-1 hash race: with round_elapse_time 10 s a slow round under loss can
           # trigger a bootstrap of the full table, which then never completes. Intermittent (it
           # stalled 1 run of 3 at 10 s, none at 3000 blocks in run 39878938046): run by name, repeated

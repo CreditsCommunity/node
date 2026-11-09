@@ -77,7 +77,8 @@
 #        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
-#        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
+#        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up.
+#        delay: NET_FAULT_DELAY_MS (default 250) +- NET_FAULT_JITTER_MS (default 150), normal distribution
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
@@ -441,7 +442,7 @@ case "$NET_FAULT" in
     "") NETEM="" ;;
     loss) NETEM="loss ${NET_FAULT_PCT}%" ;;
     corrupt) NETEM="corrupt ${NET_FAULT_PCT}%" ;;
-    delay) NETEM="delay 250ms 150ms distribution normal" ;;
+    delay) NETEM="delay ${NET_FAULT_DELAY_MS:-250}ms ${NET_FAULT_JITTER_MS:-150}ms distribution normal" ;;
     reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50% duplicate 5%" ;;
     duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
     partition) NETEM="loss 100%" ;;
