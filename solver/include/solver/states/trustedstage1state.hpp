@@ -51,8 +51,6 @@ protected:
     bool min_time_expired{false};
     void finalizeStage(SolverContext& context);
 
-    static std::string stage1ContentDiff(const cs::StageOne& a, const cs::StageOne& b);
-
     // TimeoutTracking min_time_tracking;
     cs::StageOne stage;
     size_t likeMineHashes;

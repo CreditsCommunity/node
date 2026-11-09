@@ -6,6 +6,10 @@
 #include <csnode/datastream.hpp>
 #include <conveyer.hpp>
 #include <cscrypto/cscrypto.hpp>
+
+#include <algorithm>
+#include <string>
+
 namespace cs {
     TrustedMask::TrustedMask() {}
 
@@ -238,5 +242,64 @@ namespace cs {
     }
     Stage::Stage() {
         sender = cs::ConfidantConsts::InvalidConfidantIndex;
+    }
+
+    StageOneResend stageOneResend(const StageOne& sent, const Hash& freshHash, uint64_t lastBlockStamp, uint64_t now) {
+        if (sent.hash != freshHash) {
+            return StageOneResend::HashChanged;
+        }
+        uint64_t sentStamp = 0;
+        try {
+            sentStamp = std::stoull(sent.roundTimeStamp);
+        }
+        catch (...) {
+            return StageOneResend::NotAfterLastBlock;
+        }
+        if (sentStamp <= lastBlockStamp) {
+            return StageOneResend::NotAfterLastBlock;
+        }
+        if (now > sentStamp && now - sentStamp > Consensus::DefaultTimeStampRange) {
+            return StageOneResend::TooOld;
+        }
+        return StageOneResend::Resend;
+    }
+
+    const char* toString(StageOneResend decision) {
+        switch (decision) {
+            case StageOneResend::Resend:
+                return "resend";
+            case StageOneResend::HashChanged:
+                return "hash-changed";
+            case StageOneResend::NotAfterLastBlock:
+                return "not-after-last-block";
+            case StageOneResend::TooOld:
+                return "too-old";
+        }
+        return "?";
+    }
+
+    std::string stageOneContentDiff(const StageOne& a, const StageOne& b) {
+        std::string diff;
+        auto add = [&diff](const char* field) {
+            diff += diff.empty() ? field : std::string(",") + field;
+        };
+        if (a.sender != b.sender) {
+            add("sender");
+        }
+        if (a.hash != b.hash) {
+            add("hash");
+        }
+        auto sameSet = [](auto x, auto y) {
+            std::sort(x.begin(), x.end());
+            std::sort(y.begin(), y.end());
+            return x == y;
+        };
+        if (!sameSet(a.trustedCandidates, b.trustedCandidates)) {
+            add("candidates");
+        }
+        if (a.hashesCandidates != b.hashesCandidates) {
+            add("packets");
+        }
+        return diff;
     }
 }

@@ -199,6 +199,12 @@ void SolverCore::nextRound(bool updateRound) {
     if (!updateRound) {
         recv_hash.clear();
     }
+    // the own signed stage 1 is kept only across the re-entry of the same round after a fuller
+    // round package replaced the first one; a new round and every bootstrap round start without it
+    // (bootstrap tables start rounds with updateRound = true too)
+    if (!updateRound || pnode->isBootstrapRound()) {
+        sentStageOne_.reset();
+    }
     deferredBlock_ = csdb::Pool{};
     stageOneStorage.clear();
     stageTwoStorage.clear();

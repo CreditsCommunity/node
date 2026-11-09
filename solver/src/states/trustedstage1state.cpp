@@ -15,7 +15,7 @@
 
 #include <csnode/datastream.hpp>
 #include <cscrypto/cscrypto.hpp>
-#include <algorithm>
+#include <limits>
 #include <string>
 
 namespace cs {
@@ -100,52 +100,55 @@ void TrustedStage1State::off(SolverContext& context) {
     //}
     csdebug() << name() << ": --> stage-1 [" << static_cast<int>(stage.sender) << "]";
     if (min_time_expired && transactions_checked && enough_hashes) {
-        // a stage 1 already signed and sent for this round and sub-round: the round was entered
-        // again after a fuller round package replaced the first one (SolverCore::nextRound(true))
+        // a stage 1 already signed and sent for this round and sub-round from this seat: the round
+        // was entered again after a fuller round package replaced the first one (SolverCore::nextRound(true))
         const cs::StageOne* sent = context.sent_stage1();
         std::string sentStamp;
         std::string differs;
+        cs::StageOneResend decision = cs::StageOneResend::Resend;
         if (sent != nullptr) {
             sentStamp = sent->roundTimeStamp;
-            differs = stage1ContentDiff(*sent, stage);
+            differs = cs::stageOneContentDiff(*sent, stage);
+            // Do not sign a second stage 1 for the same round and sub-round: send the same signed
+            // bytes again, as gotStageOneRequest() does. A second signed message of the seat makes
+            // the confidants hold different stage-1 copies (a receiver keeps the later stamp only if
+            // it gets both): they choose different block timestamps, or see two hash-signature pairs
+            // of this seat at stage 2 and exclude it. Receivers verify the message as any other (the
+            // signature covers this round, sub-round and message hash); one that already holds it
+            // ignores it (same timestamp).
+            // What the stored message may lack is harmless: the trusted candidates and the packet
+            // hashes are this node's votes for the next round, and the ones that came in after the
+            // first stage 1 only miss one vote, as if the replacement had not happened; the others
+            // already hold and accept that message. A new stage 1 is signed as before when the
+            // stored one would be refused or make this seat look faulty: see cs::stageOneResend().
+            uint64_t lastStamp = 0;
+            try {
+                lastStamp = std::stoull(context.blockchain().getLastTimeStamp());
+            }
+            catch (...) {
+                lastStamp = std::numeric_limits<uint64_t>::max();  // unknown: sign a new one
+            }
+            decision = cs::stageOneResend(*sent, stage.hash, lastStamp, cs::Utils::currentTimestamp());
+            if (decision == cs::StageOneResend::Resend) {
+                stage = *sent;
+                cslog() << name() << ": stage1 resent unchanged: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
+                        << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp
+                        << (differs.empty() ? std::string{} : ", a new one would differ in " + differs);
+                context.add_stage1(stage, true);
+                return;
+            }
         }
         finalizeStage(context);
         if (sent != nullptr) {
-            // diagnostics only: the receivers now hold two signed stage-1 messages of this seat
+            // the receivers may now hold two signed stage-1 messages of this seat
             cslog() << name() << ": stage1 signed again: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
                     << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp
-                    << " -> " << stage.roundTimeStamp << ", content " << (differs.empty() ? "same" : "differs (" + differs + ")");
+                    << " -> " << stage.roundTimeStamp << ", content " << (differs.empty() ? "same" : "differs (" + differs + ")")
+                    << ", reason " << cs::toString(decision);
         }
         context.add_stage1(stage, true);
         context.remember_sent_stage1(stage);
     }
-}
-
-// the fields of two stage-1 messages of one seat that differ, timestamp and signature aside
-// (empty: the same content); candidates compare as sets, their order is the arrival order
-std::string TrustedStage1State::stage1ContentDiff(const cs::StageOne& a, const cs::StageOne& b) {
-    std::string diff;
-    auto add = [&diff](const char* field) {
-        diff += diff.empty() ? field : std::string(",") + field;
-    };
-    if (a.sender != b.sender) {
-        add("sender");
-    }
-    if (a.hash != b.hash) {
-        add("hash");
-    }
-    auto sameSet = [](auto x, auto y) {
-        std::sort(x.begin(), x.end());
-        std::sort(y.begin(), y.end());
-        return x == y;
-    };
-    if (!sameSet(a.trustedCandidates, b.trustedCandidates)) {
-        add("candidates");
-    }
-    if (a.hashesCandidates != b.hashesCandidates) {
-        add("packets");
-    }
-    return diff;
 }
 
 Result TrustedStage1State::onSyncTransactions(SolverContext& context, cs::RoundNumber round) {
