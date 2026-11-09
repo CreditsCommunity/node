@@ -509,6 +509,30 @@ jobs:
           # an official stage-1 hash race: with round_elapse_time 10 s a slow round under loss can
           # trigger a bootstrap of the full table, which then never completes. Intermittent (it
           # stalled 1 run of 3 at 10 s, none at 3000 blocks in run 39878938046): run by name, repeated
+          - name: delay-600
+            manual: true   # study/trusted-selection experiment, second run
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=600 NET_FAULT_JITTER_MS=100 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-1000
+            manual: true   # study/trusted-selection experiment, second run
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=1000 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-2000
+            manual: true   # study/trusted-selection experiment, second run
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=2000 NET_FAULT_JITTER_MS=300 NET_FAULT_NODES=3 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-1000-restart
+            manual: true   # study/trusted-selection experiment, second run
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=1000 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=7 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: slow-cpu-10
+            manual: true   # study/trusted-selection experiment, second run
+            env: SLOW_NODES=3 SLOW_CPU=10 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: delay-600-slow-cpu
+            manual: true   # study/trusted-selection experiment, second run
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=600 NET_FAULT_JITTER_MS=100 NET_FAULT_NODES=3 SLOW_NODES=3 SLOW_CPU=20 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
             manual: true
