@@ -549,6 +549,9 @@ jobs:
             manual: true   # exp/stage1-fixes experiment (scratch): a community and an official node faulty, n7 quick-started at 300
             env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=3,4 CONTRACTS=1 TARGET_SEQ=1500 CANDIDACY_PAUSE=1
             contracts: true
+          - name: s1-power-cut-pause
+            manual: true   # exp/stage1-fixes experiment (scratch): every node killed at 600 with the candidacy pause on the community nodes
+            env: CRASH_ALL_AT=600 CANDIDACY_PAUSE=1 TARGET_SEQ=1300
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
             manual: true
