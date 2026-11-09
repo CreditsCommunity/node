@@ -4291,6 +4291,12 @@ std::string Node::candidacyPause(cs::RoundNumber round, bool lagging) {
     if (!cfg.candidacyPause) {
         return {};
     }
+    // a bootstrap round needs every capable node: no pause in it, and a warm-up in progress is
+    // over (after a power cut every node would otherwise wait, and no round could complete)
+    if (isBootstrapRound_) {
+        candidacySyncedRound_ = 1;
+        return {};
+    }
     if (lagging) {
         return "lagging: block " + std::to_string(blockChain_.getLastSeq()) + " in round " + std::to_string(round);
     }
