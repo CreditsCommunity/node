@@ -71,9 +71,9 @@ TEST(StageOneResend, SignsAgainWhenTheStampIsNotAfterTheLastBlock) {
 TEST(StageOneResend, SignsAgainWhenTheStampIsUnreadable) {
     cs::StageOne sent = stageOne(kLast + 500);
     sent.roundTimeStamp = "";
-    EXPECT_EQ(cs::stageOneResend(sent, sent.hash, kLast, kLast + 1500), cs::StageOneResend::NotAfterLastBlock);
+    EXPECT_EQ(cs::stageOneResend(sent, sent.hash, kLast, kLast + 1500), cs::StageOneResend::Unreadable);
     sent.roundTimeStamp = "x";
-    EXPECT_EQ(cs::stageOneResend(sent, sent.hash, kLast, kLast + 1500), cs::StageOneResend::NotAfterLastBlock);
+    EXPECT_EQ(cs::stageOneResend(sent, sent.hash, kLast, kLast + 1500), cs::StageOneResend::Unreadable);
 }
 
 TEST(StageOneResend, SignsAgainWhenTheStampIsTooOld) {
@@ -107,6 +107,14 @@ TEST(StageOneResend, ContentDiff) {
 
     b.hash = hashOf(1);
     EXPECT_EQ(cs::stageOneContentDiff(a, b), "hash,candidates,packets");
+}
+
+TEST(StageOneResend, ReasonNames) {
+    EXPECT_STREQ(cs::toString(cs::StageOneResend::Resend), "resend");
+    EXPECT_STREQ(cs::toString(cs::StageOneResend::HashChanged), "hash-changed");
+    EXPECT_STREQ(cs::toString(cs::StageOneResend::NotAfterLastBlock), "not-after-last-block");
+    EXPECT_STREQ(cs::toString(cs::StageOneResend::TooOld), "too-old");
+    EXPECT_STREQ(cs::toString(cs::StageOneResend::Unreadable), "unreadable");
 }
 
 TEST(StageOneResend, ResentBytesVerifyAsTheFirstCopy) {

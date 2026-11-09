@@ -253,7 +253,7 @@ namespace cs {
             sentStamp = std::stoull(sent.roundTimeStamp);
         }
         catch (...) {
-            return StageOneResend::NotAfterLastBlock;
+            return StageOneResend::Unreadable;
         }
         if (sentStamp <= lastBlockStamp) {
             return StageOneResend::NotAfterLastBlock;
@@ -274,6 +274,8 @@ namespace cs {
                 return "not-after-last-block";
             case StageOneResend::TooOld:
                 return "too-old";
+            case StageOneResend::Unreadable:
+                return "unreadable";
         }
         return "?";
     }

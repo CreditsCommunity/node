@@ -235,6 +235,16 @@ info Trusted-1: stage1 signed again: R-1205.0 T3 ts 1793783441147 -> 17937834420
 - `too-old`: the stored timestamp is more than `DefaultTimeStampRange` (30 s) old, so fresh
   timestamps from the other confidants could fall outside this node's stage-2 window, which is
   measured from its own timestamp.
+- `unreadable`: the stored timestamp cannot be read as a number.
+
+Two cases still sign a second stage 1 for the same round, as before this change, and log no
+`stage1` line:
+
+- a fuller package that reaches the writer of the round package (the `moreTrusted` branch of
+  `Node::getRoundTable` for a node that holds its own package): that path starts the round
+  again with `updateRound = false`, which clears the stored stage 1;
+- a fuller package that replaces the first one inside a bootstrap round: the start of a bootstrap
+  round clears the stored stage 1.
 
 `content` compares the old and the new stage 1 apart from the timestamp: `same`, or `differs`
 with the fields (`hash`, `candidates`, `packets`). The stored stage 1 is kept only while the node

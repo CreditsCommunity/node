@@ -169,12 +169,14 @@ struct StageHash {
 //   would make this seat look faulty: HashChanged (the characteristic hash must match the
 //   majority's), NotAfterLastBlock (the stamp must be after the last block's), TooOld (the stored
 //   stamp is more than Consensus::DefaultTimeStampRange old, so fresh stamps of the others could
-//   fall outside this node's own stage-2 window, which is measured from its own stamp).
+//   fall outside this node's own stage-2 window, which is measured from its own stamp),
+//   Unreadable (the stored stamp does not parse as a number).
 enum class StageOneResend : uint8_t {
     Resend,
     HashChanged,
     NotAfterLastBlock,
-    TooOld
+    TooOld,
+    Unreadable
 };
 
 // sent: the stored signed stage 1; freshHash: the characteristic hash computed now;

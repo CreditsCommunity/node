@@ -139,6 +139,8 @@ void TrustedStage1State::off(SolverContext& context) {
             }
         }
         finalizeStage(context);
+        // stored before add_stage1(): that call already runs the state's onStage1() handlers
+        context.remember_sent_stage1(stage);
         if (sent != nullptr) {
             // the receivers may now hold two signed stage-1 messages of this seat
             cslog() << name() << ": stage1 signed again: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
@@ -147,7 +149,6 @@ void TrustedStage1State::off(SolverContext& context) {
                     << ", reason " << cs::toString(decision);
         }
         context.add_stage1(stage, true);
-        context.remember_sent_stage1(stage);
     }
 }
 
