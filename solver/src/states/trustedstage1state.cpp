@@ -15,6 +15,7 @@
 
 #include <csnode/datastream.hpp>
 #include <cscrypto/cscrypto.hpp>
+#include <algorithm>
 #include <string>
 
 namespace cs {
@@ -99,9 +100,52 @@ void TrustedStage1State::off(SolverContext& context) {
     //}
     csdebug() << name() << ": --> stage-1 [" << static_cast<int>(stage.sender) << "]";
     if (min_time_expired && transactions_checked && enough_hashes) {
+        // a stage 1 already signed and sent for this round and sub-round: the round was entered
+        // again after a fuller round package replaced the first one (SolverCore::nextRound(true))
+        const cs::StageOne* sent = context.sent_stage1();
+        std::string sentStamp;
+        std::string differs;
+        if (sent != nullptr) {
+            sentStamp = sent->roundTimeStamp;
+            differs = stage1ContentDiff(*sent, stage);
+        }
         finalizeStage(context);
+        if (sent != nullptr) {
+            // diagnostics only: the receivers now hold two signed stage-1 messages of this seat
+            cslog() << name() << ": stage1 signed again: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
+                    << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp
+                    << " -> " << stage.roundTimeStamp << ", content " << (differs.empty() ? "same" : "differs (" + differs + ")");
+        }
         context.add_stage1(stage, true);
+        context.remember_sent_stage1(stage);
     }
+}
+
+// the fields of two stage-1 messages of one seat that differ, timestamp and signature aside
+// (empty: the same content); candidates compare as sets, their order is the arrival order
+std::string TrustedStage1State::stage1ContentDiff(const cs::StageOne& a, const cs::StageOne& b) {
+    std::string diff;
+    auto add = [&diff](const char* field) {
+        diff += diff.empty() ? field : std::string(",") + field;
+    };
+    if (a.sender != b.sender) {
+        add("sender");
+    }
+    if (a.hash != b.hash) {
+        add("hash");
+    }
+    auto sameSet = [](auto x, auto y) {
+        std::sort(x.begin(), x.end());
+        std::sort(y.begin(), y.end());
+        return x == y;
+    };
+    if (!sameSet(a.trustedCandidates, b.trustedCandidates)) {
+        add("candidates");
+    }
+    if (a.hashesCandidates != b.hashesCandidates) {
+        add("packets");
+    }
+    return diff;
 }
 
 Result TrustedStage1State::onSyncTransactions(SolverContext& context, cs::RoundNumber round) {

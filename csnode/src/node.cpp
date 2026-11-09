@@ -4044,7 +4044,7 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
             if (rPackage.roundTable().round == roundPackageCache_.back().roundTable().round && !stageThreeSent_) {
                 auto mask = roundPackageCache_.back().poolMetaInfo().realTrustedMask;
                 if (cs::TrustedMask::trustedSize(rPackage.poolMetaInfo().realTrustedMask) > cs::TrustedMask::trustedSize(mask)) {
-                    csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
+                    cslog() << "NODE> Current Roundpackage of " << rNum << " will be replaced by new one";
                     auto it = roundPackageCache_.end();
                     if (!roundPackageCache_.empty()) {
                         --it;
@@ -4081,7 +4081,7 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
                                   && getBlockChain().hasDeferredBlock(own.sequenceNumber);
             const bool verifies = deferred && getBlockChain().packageBlockVerifies(rPackage);
             if (moreTrusted) {  // official rule
-                csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
+                cslog() << "NODE> Current Roundpackage of " << rNum << " will be replaced by new one";
                 roundPackageCache_.push_back(rPackage);
             }
             else if (verifies) {
