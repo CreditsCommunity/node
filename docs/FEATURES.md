@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.17 or earlier.
+Everything listed here is in release 4.2.532-community.18 or earlier.
 
 ## Storage
 
@@ -145,6 +145,11 @@ Everything listed here is in release 4.2.532-community.17 or earlier.
   what the node signed and why a peer's stage failed, at info level only when a check fails; a
   healthy node logs none of it. See [consensus-diagnostics.md](consensus-diagnostics.md).
   [#167](https://github.com/CreditsCommunity/node/pull/167), [#168](https://github.com/CreditsCommunity/node/pull/168)
+- **More stage-3 diagnostics.** A `stage3 timestamp` line shows the last block timestamp, every
+  stage-1 timestamp and what became of it, and the value chosen; `stage3 inputs` shows more of what
+  the node signed; a `stage3 network block` line shows the block the network stored when stage 3
+  failed here, with the fields that differ. Logging only.
+  [#176](https://github.com/CreditsCommunity/node/pull/176)
 
 ## Crash and safety fixes
 
@@ -194,6 +199,17 @@ limits in the p2p layer (a fork of the p2p library), and two races in the cache 
   storage at start; the Docker health check no longer reports a node at the head as unhealthy after
   a log rotation.
   [#157](https://github.com/CreditsCommunity/node/pull/157), [#160](https://github.com/CreditsCommunity/node/pull/160)
+- **Quick-start guide.** `docs/quick-start.md`: Docker and native Linux, Windows and macOS, with
+  requirements, ports, first checks, upgrading and common problems.
+  [#172](https://github.com/CreditsCommunity/node/pull/172)
+- **RocksDB by default for a new full node**, in the set-up and in Docker; pruned stays on lmdb and
+  an existing install keeps its database. Docker CPU and memory limits are set with `CREDITS_CPUS`
+  and `CREDITS_MEMORY`.
+  [#173](https://github.com/CreditsCommunity/node/pull/173)
+- **Using an existing node key**, plain or encrypted, in Docker or native; `--decryptkey` (Docker:
+  `decrypt-key`) turns an encrypted key file into the plain key after asking the password, keeping
+  the encrypted file.
+  [#174](https://github.com/CreditsCommunity/node/pull/174), [#175](https://github.com/CreditsCommunity/node/pull/175)
 - **Key file.** `NodePrivate.txt` is written readable by its owner only (mode 0600), and the
   encrypted key file is re-encrypted atomically, with clear errors; the format is unchanged.
   [#169](https://github.com/CreditsCommunity/node/pull/169), [#170](https://github.com/CreditsCommunity/node/pull/170)

@@ -124,16 +124,16 @@ caches.
 
 1. Open the [latest release](https://github.com/CreditsCommunity/node/releases/latest) and download
    the Linux package and `SHA256SUMS`:
-   - `credits-node-4.2.532-community.17-linux-x64.tar.gz` for Ubuntu 24.04, Debian 13 and later
+   - `credits-node-4.2.532-community.18-linux-x64.tar.gz` for Ubuntu 24.04, Debian 13 and later
      (glibc 2.38);
-   - `credits-node-4.2.532-community.17-linux-x64-glibc2.31.tar.gz` for Ubuntu 20.04, Debian 11
+   - `credits-node-4.2.532-community.18-linux-x64-glibc2.31.tar.gz` for Ubuntu 20.04, Debian 11
      and later.
 
 2. Check and extract:
 
    ```sh
    sha256sum -c --ignore-missing SHA256SUMS      # must print "OK"
-   tar -xzf credits-node-4.2.532-community.17-linux-x64.tar.gz
+   tar -xzf credits-node-4.2.532-community.18-linux-x64.tar.gz
    cd csnode
    ```
 
@@ -209,12 +209,12 @@ The node's own log is in `csnode/log/`.
 
 ## 5. Native on Windows
 
-1. Download `credits-node-4.2.532-community.17-windows-x64.zip` and `SHA256SUMS-windows-macos`
+1. Download `credits-node-4.2.532-community.18-windows-x64.zip` and `SHA256SUMS-windows-macos`
    from the [latest release](https://github.com/CreditsCommunity/node/releases/latest). Check it in
    PowerShell and compare with the file:
 
    ```powershell
-   Get-FileHash credits-node-4.2.532-community.17-windows-x64.zip
+   Get-FileHash credits-node-4.2.532-community.18-windows-x64.zip
    ```
 
 2. Extract the zip, for example to `C:\credits`. Open the `csnode` folder.
@@ -234,12 +234,12 @@ The package has no Windows service. Run the node in a console window you keep op
 
 ## 6. macOS (Apple Silicon)
 
-Download `credits-node-4.2.532-community.17-macos-arm64.tar.gz`, check it with
+Download `credits-node-4.2.532-community.18-macos-arm64.tar.gz`, check it with
 `shasum -a 256 -c --ignore-missing SHA256SUMS-windows-macos`, extract it, then clear the
 download quarantine once (the binaries are not signed) and follow the Linux steps:
 
 ```sh
-tar -xzf credits-node-4.2.532-community.17-macos-arm64.tar.gz
+tar -xzf credits-node-4.2.532-community.18-macos-arm64.tar.gz
 xattr -dr com.apple.quarantine csnode
 cd csnode && ./setup.sh
 ```
@@ -251,7 +251,7 @@ In the console or the log (`csnode/log/`, or `docker compose logs -f`), look for
 1. The banner with the version and your settings:
 
    ```
-     node 4.2.532-community.17  (protocol 532, build ...)
+     node 4.2.532-community.18  (protocol 532, build ...)
      storage: pruned, lmdb    snapshots: serve on
    ```
 

@@ -42,6 +42,12 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.18 — 2026-11-09
+
+Release 18 makes a first start easier and gives a full node a better default. It adds a short quick-start guide (Docker and native Linux, Windows and macOS). A new full node now uses rocksdb, in the guided set-up and in Docker; pruned nodes stay on lmdb and existing installs keep their database. Docker takes its CPU and memory limits from `CREDITS_CPUS` and `CREDITS_MEMORY`. The guide explains how to use an existing node key, and `--decryptkey` (in Docker, `decrypt-key`) turns a password-protected key file into a plain one. The log gains more stage-3 diagnostics (`stage3 timestamp`, `stage3 network block`), written only when a check fails.
+
 | PR | Change |
 |---|---|
 | #172 | docs: `docs/quick-start.md`, a short quick-start guide (Docker and native Linux, Windows and macOS; pruned on lmdb or full on rocksdb from the snapshot, snapshot serving on; requirements, ports, first checks, the wallet, upgrading with the database kept, common problems), linked from the top of the README |
@@ -49,6 +55,7 @@ lines under the new release.
 | #174 | docs: quick-start: using an existing node key, plain or encrypted, in Docker or native (a section with copy-paste steps; an encrypted key converted once to plain with the node's own `--dumpkeys`, for Docker and systemd) |
 | #175 | node: `--decryptkey` turns a key file encrypted with a password by the node into the plain key after asking the old password (the encrypted file kept as `NodePrivate.txt.encrypted-<date>`, the public key checked, no configuration, network or database); Docker: `docker compose run --rm node decrypt-key`, and a normal start with an encrypted key stops with that hint instead of waiting for a password; quick-start section 10 uses it instead of the `--dumpkeys` procedure of #174 |
 | #176 | solver: stage-3 diagnostics (logging only, failure path): a `stage3 timestamp` line with the last block timestamp, every stage-1 timestamp and its fate (in, outlier, masked, not after last, empty, invalid), N, mean, dispersion and the chosen value; `stage3 inputs` also shows the confirmation mask bits, a hash of the round-confirmation signatures, the real-trusted mask, version, round cost and bootstrap flag; a `stage3 network block` line prints the block the network stored for a sequence whose stage 3 failed here, with the fields that differ; docs/consensus-diagnostics.md sections 1a and 1b |
+| — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 18 |
 
 ## community.17 — 2026-11-05
 
