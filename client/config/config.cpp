@@ -47,6 +47,7 @@ const std::string BLOCK_NAME_HOST_ADDRESS = "host_address";
 const std::string BLOCK_NAME_POOL_SYNC = "pool_sync";
 const std::string BLOCK_NAME_STORAGE = "storage";
 const std::string BLOCK_NAME_SNAPSHOT = "snapshot";
+const std::string BLOCK_NAME_CONSENSUS = "consensus";
 const std::string BLOCK_NAME_API = "api";
 const std::string BLOCK_NAME_CONVEYER = "conveyer";
 const std::string BLOCK_NAME_EVENT_REPORTER = "event_report";
@@ -1084,6 +1085,7 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.snapshotData_ = parseSnapshotData(config);
+        result.consensusData_ = parseConsensusData(config);
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -1355,6 +1357,44 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
     return result;
 }
 
+ConsensusData Config::parseConsensusData(const boost::property_tree::ptree& config) {
+    ConsensusData result;
+    if (!config.count(BLOCK_NAME_CONSENSUS)) {
+        return result;
+    }
+    const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_CONSENSUS);
+    for (const auto& [key, value] : data) {
+        if (key != "candidacy_pause" && key != "candidacy_pause_rounds") {
+            cswarning() << "config: [consensus] " << key << " is not a setting of this version, ignored";
+        }
+    }
+    if (data.count("candidacy_pause")) {
+        const auto text = data.get<std::string>("candidacy_pause");
+        if (text == "on" || text == "true" || text == "1") {
+            result.candidacyPause = true;
+        }
+        else if (text != "off" && text != "false" && text != "0") {
+            cswarning() << "config: [consensus] candidacy_pause=" << text << " is not on or off, using off";
+        }
+    }
+    if (data.count("candidacy_pause_rounds")) {
+        const auto text = data.get<std::string>("candidacy_pause_rounds");
+        try {
+            size_t used = 0;
+            const unsigned long long parsed = std::stoull(text, &used);
+            if (used == text.size() && text.find('-') == std::string::npos && parsed <= 100'000) {
+                result.candidacyPauseRounds = static_cast<size_t>(parsed);
+                return result;
+            }
+        }
+        catch (const std::exception&) {
+        }
+        cswarning() << "config: [consensus] candidacy_pause_rounds=" << text << " is not in [0, 100000], using "
+                    << result.candidacyPauseRounds;
+    }
+    return result;
+}
+
 void Config::readApiData(const boost::property_tree::ptree& config) {
     if (!config.count(BLOCK_NAME_API)) {
         return;
@@ -1534,6 +1574,14 @@ bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs) {
     return !(lhs == rhs);
 }
 
+bool operator==(const ConsensusData& lhs, const ConsensusData& rhs) {
+    return lhs.candidacyPause == rhs.candidacyPause && lhs.candidacyPauseRounds == rhs.candidacyPauseRounds;
+}
+
+bool operator!=(const ConsensusData& lhs, const ConsensusData& rhs) {
+    return !(lhs == rhs);
+}
+
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs) {
     return lhs.maxPacketLifeTime == rhs.maxPacketLifeTime;
 }
@@ -1583,6 +1631,7 @@ bool operator==(const Config& lhs, const Config& rhs) {
         lhs.poolSyncData_ == rhs.poolSyncData_ &&
         lhs.apiData_ == rhs.apiData_ &&
         lhs.snapshotData_ == rhs.snapshotData_ &&
+        lhs.consensusData_ == rhs.consensusData_ &&
         lhs.alwaysExecuteContracts_ == rhs.alwaysExecuteContracts_ &&
         lhs.syncContractExecution_ == rhs.syncContractExecution_ &&
         lhs.compatibleVersion_ == rhs.compatibleVersion_ &&

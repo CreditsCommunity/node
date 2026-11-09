@@ -98,6 +98,15 @@ struct SnapshotData {
     size_t fetchRateKbps = 0;                       // 0: unlimited
 };
 
+// [consensus]: what this node does for itself in the consensus; never how it judges others
+struct ConsensusData {
+    // candidacy_pause: do not send the round hash (the candidacy to be trusted) while the own key is
+    // gray-listed, while the node lags, and for candidacy_pause_rounds rounds after it first caught up
+    // with a running network (start, quick start); off by default
+    bool candidacyPause = false;
+    size_t candidacyPauseRounds = 300;
+};
+
 struct ApiData {
     // on by default:
     uint16_t port = 9090;
@@ -248,6 +257,10 @@ public:
         return snapshotData_;
     }
 
+    const ConsensusData& getConsensusSettings() const {
+        return consensusData_;
+    }
+
     const StorageData& getStorageSettings() const {
         return storageData_;
     }
@@ -393,6 +406,7 @@ private:
 public:
     // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
+    static ConsensusData parseConsensusData(const boost::property_tree::ptree& config);
     // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
     static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
 private:
@@ -448,6 +462,7 @@ private:
     PoolSyncData poolSyncData_;
     StorageData storageData_;
     SnapshotData snapshotData_;
+    ConsensusData consensusData_;
     ApiData apiData_;
 
     bool showBalanceChange_ = false;
@@ -497,6 +512,8 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs);
 
 bool operator==(const SnapshotData& lhs, const SnapshotData& rhs);
 bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs);
+bool operator==(const ConsensusData& lhs, const ConsensusData& rhs);
+bool operator!=(const ConsensusData& lhs, const ConsensusData& rhs);
 
 
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs);

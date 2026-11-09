@@ -4283,12 +4283,55 @@ void Node::clearRPCache(cs::RoundNumber rNum) {
 
 }
 
+std::string Node::candidacyPause(cs::RoundNumber round, bool lagging) {
+    const auto& cfg = cs::ConfigHolder::instance().config()->getConsensusSettings();
+    if (!lagging && candidacySyncedRound_ == 0) {
+        candidacySyncedRound_ = round;
+    }
+    if (!cfg.candidacyPause) {
+        return {};
+    }
+    if (lagging) {
+        return "lagging: block " + std::to_string(blockChain_.getLastSeq()) + " in round " + std::to_string(round);
+    }
+    if (solver_->isInGrayList(solver_->getPublicKey())) {
+        return "own key gray-listed";
+    }
+    // a node that caught up with a running network (a start, a quick start) waits; one that started
+    // with the network (the first rounds) does not, or a new network could not form
+    const size_t warmup = cfg.candidacyPauseRounds;
+    if (warmup > 0 && candidacySyncedRound_ > warmup && round < candidacySyncedRound_ + warmup) {
+        return "warm-up: in sync since round " + std::to_string(candidacySyncedRound_) + ", " + std::to_string(warmup) + " rounds";
+    }
+    return {};
+}
+
 void Node::sendHash(cs::RoundNumber round) {
     if (!canBeTrusted(subRound_ != 0 /*critical, all trusted capable required*/)) {
         return;
     }
 
-    if (blockChain_.getLastSeq() != round - 1) {
+    const bool lagging = blockChain_.getLastSeq() != round - 1;
+    // [consensus] candidacy_pause: only whether this node offers itself; nothing it computes or
+    // accepts from others changes. One line when the pause starts, changes reason or ends
+    const std::string pause = candidacyPause(round, lagging);
+    if (pause != candidacyPauseReason_) {
+        if (pause.empty()) {
+            cslog() << "NODE> candidacy pause ends in round " << round;
+        }
+        else if (candidacyPauseReason_.empty()) {
+            cslog() << "NODE> candidacy pause starts in round " << round << " (" << pause << ")";
+        }
+        else if (pause.compare(0, 8, candidacyPauseReason_, 0, 8) != 0) {
+            cslog() << "NODE> candidacy pause goes on in round " << round << " (" << pause << ")";
+        }
+        candidacyPauseReason_ = pause;
+    }
+    if (!pause.empty()) {
+        return;
+    }
+
+    if (lagging) {
         // should not send hash until have got proper block sequence
         return;
     }

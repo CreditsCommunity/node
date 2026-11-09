@@ -671,6 +671,13 @@ private:
     std::map<cs::PublicKey, size_t> blackListCounter_;
     size_t lastRoundPackageTime_ = 0;
 
+    // [consensus] candidacy_pause: the first round this process was in sync (0: not yet) and why
+    // the candidacy is paused now (empty: not paused), to log only the changes
+    cs::RoundNumber candidacySyncedRound_ = 0;
+    std::string candidacyPauseReason_;
+    // the reason to pause the candidacy in this round, empty if none (lagging: the sequence and round)
+    std::string candidacyPause(cs::RoundNumber round, bool lagging);
+
     cs::config::Observer& observer_;
     cs::Compressor compressor_;
 
