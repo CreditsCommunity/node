@@ -207,7 +207,7 @@ round and sub-round from the same seat, it now sends the same signed message aga
 signing a second one with a new timestamp:
 
 ```
-info TrustedStage1: stage1 resent unchanged: R-1205.0 T3 ts 1793783441147, a new one would differ in candidates,packets
+info Trusted-1: stage1 resent unchanged: R-1205.0 T3 ts 1793783441147, a new one would differ in candidates,packets
 ```
 
 `a new one would differ in` lists the fields a new stage 1 would have changed (`candidates`: the
@@ -225,7 +225,7 @@ The node signs a new stage 1, as before this change, when the stored one would b
 would make the seat look faulty:
 
 ```
-info TrustedStage1: stage1 signed again: R-1205.0 T3 ts 1793783441147 -> 1793783442010, content differs (hash), reason hash-changed
+info Trusted-1: stage1 signed again: R-1205.0 T3 ts 1793783441147 -> 1793783442010, content differs (hash), reason hash-changed
 ```
 
 - `hash-changed`: the characteristic hash changed, because the new package changed the last
