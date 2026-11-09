@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.18 or earlier.
+Everything listed here is in release 4.2.532-community.18.1 or earlier.
 
 ## Storage
 
@@ -138,6 +138,11 @@ Everything listed here is in release 4.2.532-community.18 or earlier.
   neighbour would refuse as a duplicate, and asks another one instead: a node syncing among mostly
   pruned peers could otherwise wait for ever for its first blocks.
   [#136](https://github.com/CreditsCommunity/node/pull/136)
+- **One stage 1 per round.** When a fuller round package replaces the first one, a confidant sends
+  the stage-1 message it already signed instead of signing a second, different one. Two different
+  stage-1 messages made the confidants build different blocks and left the node in the stage-3
+  minority. A replacement on the writer side and in a bootstrap round still signs twice.
+  [#178](https://github.com/CreditsCommunity/node/pull/178)
 
 ## Diagnostics
 
