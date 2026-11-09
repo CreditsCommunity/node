@@ -42,8 +42,17 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.18.1 — 2026-11-09
+
+Release 18.1 is a point release of 18: the protocol and the version a node announces to its peers are unchanged (the announced minor version stays 18, which cannot express 18.1). It fixes one consensus problem. A node no longer signs a second, different stage-1 message in the same round when a fuller round package replaces the first one. That double signing made the confidants build different blocks, so the node was left in the stage-3 minority and gray-listed. A replacement on the writer side and inside a bootstrap round still signs twice; that is a follow-up.
+
+The Windows and macOS packages of community.18 were not published (no macOS runner was available), so 18.1 is the first release of the 18 line for those systems.
+
 | PR | Change |
 |---|---|
+| release | community.18.1, a point release of 18: `MINOR_NODE_VERSION` stays 18, the package and the tag carry 4.2.532-community.18.1 |
 | #178 | solver: when a confidant enters stage 1 again in the same round after a fuller round package replaced the first one, it sends the stage 1 it already signed again instead of signing a second one with a new timestamp; it signs a new one when the characteristic hash changed, the stored timestamp is not after the last block's, is more than 30 s old or cannot be read; a writer-side replacement and a replacement inside a bootstrap round still sign a second stage 1, as before; new info lines `stage1 resent unchanged` and `stage1 signed again ... reason`, and the package replacement is logged at info level (`docs/consensus-diagnostics.md`, section 5) |
 
 ## community.18 — 2026-11-09
