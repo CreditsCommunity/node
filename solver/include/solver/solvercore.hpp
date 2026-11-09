@@ -116,6 +116,9 @@ public:
     void addRoundSignature(const cs::StageThree & st3);
 
     void gotStageOneRequest(uint8_t requester, uint8_t required);
+    // test-network hook (exp/stage1-resend-hook, never to be merged): alter the stored own stage 1
+    // so that the next re-entry must sign a new one (hash: characteristic hash, else: stamp 0)
+    void testnetSpoilSentStageOne(bool hash);
     void gotStageTwoRequest(uint8_t requester, uint8_t required);
     void gotStageThreeRequest(uint8_t requester, uint8_t required, uint8_t iteration);
 

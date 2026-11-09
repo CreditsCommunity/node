@@ -553,6 +553,14 @@ jobs:
             manual: true   # exp/stage1-fixes experiment (scratch): n5 replays every 5th round package after its stage 1 (CREDITS_TESTNET hook)
             env: NET_FAULT=delay NET_FAULT_DELAY_MS=400 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3,4 REPLAY_ROUND=5:1 REPLAY_NODES=5 CONTRACTS=1 TARGET_SEQ=1500
             contracts: true
+          - name: s1r-reorder
+            manual: true   # exp/stage1-resend-hook (scratch): reorder fault, n5 replays every 5th round package after its stage 1
+            env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=3,4 REPLAY_ROUND=5:1 REPLAY_NODES=5 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: s1r-resign
+            manual: true   # exp/stage1-resend-hook (scratch): as s1r-delay, the stored stage 1 spoiled before each replay (fallback: signed again)
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=400 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3,4 REPLAY_ROUND=5:1:resign REPLAY_NODES=5 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
           - name: s1r-delay-pause
             manual: true   # exp/stage1-fixes experiment (scratch): n5 replays every 5th round package after its stage 1 (CREDITS_TESTNET hook)
             env: NET_FAULT=delay NET_FAULT_DELAY_MS=400 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3,4 REPLAY_ROUND=5:1 REPLAY_NODES=5 CONTRACTS=1 TARGET_SEQ=1500 CANDIDACY_PAUSE=1

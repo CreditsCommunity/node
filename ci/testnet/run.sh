@@ -744,7 +744,7 @@ if [ -n "${REPLAY_ROUND:-}" ]; then
     REPLAY_NODES=${REPLAY_NODES:-5}
     for j in ${REPLAY_NODES//,/ }; do
         alt_node "$j" && { echo "FAIL: REPLAY_NODES names n$j, which runs BIN_ALT"; exit 1; }
-        echo "${REPLAY_ROUND%%:*} ${REPLAY_ROUND##*:}" > "$WORK/n$j/testnet-replay-round"
+        echo "${REPLAY_ROUND//:/ }" > "$WORK/n$j/testnet-replay-round"
     done
 fi
 # test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes

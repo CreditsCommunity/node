@@ -234,6 +234,20 @@ void SolverCore::nextRound(bool updateRound) {
     }
 }
 
+void SolverCore::testnetSpoilSentStageOne(bool hash) {
+    if (!sentStageOne_.has_value()) {
+        cslog() << kLogPrefix_ << "testnet: no stored stage 1 to spoil";
+        return;
+    }
+    if (hash) {
+        sentStageOne_->stage.hash[0] ^= 0xFF;
+    }
+    else {
+        sentStageOne_->stage.roundTimeStamp = "0";
+    }
+    cslog() << kLogPrefix_ << "testnet: stored stage 1 spoiled (" << (hash ? "hash" : "stamp") << ")";
+}
+
 void SolverCore::gotStageOne(const cs::StageOne& stage) {
     if (find_stage1(stage.sender) != nullptr) {
         uint64_t lastTimeStamp = 0;

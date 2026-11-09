@@ -3101,16 +3101,24 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
         if (std::ifstream marker("testnet-replay-round"); marker) {
             cs::RoundNumber period = 0;
             int delayMs = 0;
+            std::string mode;
             if (marker >> period >> delayMs && period > 0 && round % period == 0) {
+                marker >> mode;  // optional "resign": spoil the stored stage 1 first (fallback path)
                 testnetReplayDone_ = true;
                 auto replay = testnetReplay_;
                 const cs::PublicKey from = testnetReplaySender_;
-                cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy, [this, replay, from, round]() {
+                cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy, [this, replay, from, round, mode]() {
                     if (cs::Conveyer::instance().currentRoundNumber() != round || stageThreeSent_) {
                         cslog() << "NODE> testnet: round package R-" << round << " not processed again (round over)";
                         return;
                     }
                     cslog() << "NODE> testnet: round package R-" << round << " processed again (replacement)";
+                    if (mode == "resign") {
+                        // alternately: the stored stage 1 looks as if the characteristic hash changed,
+                        // or as if its stamp were not after the last block's: a new one must be signed
+                        static int spoilCount = 0;
+                        solver_->testnetSpoilSentStageOne(++spoilCount % 2 == 1);
+                    }
                     cs::RoundPackage copy = *replay;
                     performRoundPackage(copy, from, true);
                 });
