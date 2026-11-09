@@ -108,15 +108,20 @@ void TrustedStage1State::off(SolverContext& context) {
         if (sent != nullptr) {
             sentStamp = sent->roundTimeStamp;
             differs = stage1ContentDiff(*sent, stage);
-            // Never sign a second stage 1 for the same round and sub-round when only the timestamp
-            // would change: send the same signed bytes again, as gotStageOneRequest() does. A second
-            // signed message of the seat makes the confidants hold different stage-1 copies (a
-            // receiver keeps the later stamp only if it gets both), so they choose different block
-            // timestamps or see two hash-signature pairs of this seat at stage 2. Receivers verify
-            // the message as any other; one that already holds it ignores it (same timestamp).
-            // When the content differs (the replaced package changed the last block, so the hash
-            // candidates or the characteristic changed), the new stage 1 is signed as before: the
-            // old one would carry a view of the chain the others no longer share.
+            // Never sign a second stage 1 for the same round and sub-round: send the same signed bytes
+            // again, as gotStageOneRequest() does. A second signed message of the seat makes the
+            // confidants hold different stage-1 copies (a receiver keeps the later stamp only if it
+            // gets both): they choose different block timestamps, or see two hash-signature pairs of
+            // this seat at stage 2 and exclude it. Receivers verify the message as any other; one
+            // that already holds it ignores it (same timestamp).
+            // What the stored message may lack is harmless: the trusted candidates and the packet
+            // hashes are this node's votes for the next round, and the hashes or packets that came in
+            // after the first stage 1 only miss one vote, as if the replacement had not happened;
+            // the others already hold and accept that message. The characteristic hash is different:
+            // it must match the majority or this seat is marked a liar, so when it changed (the
+            // replaced package changed the last block and so the wallets the transactions are
+            // checked against), the new stage 1 is signed as before. So is a stored timestamp no
+            // longer after the last block's, which the receivers would refuse.
             uint64_t lastStamp = 0;
             uint64_t sentStampValue = 0;
             try {
@@ -126,10 +131,11 @@ void TrustedStage1State::off(SolverContext& context) {
             catch (...) {
                 sentStampValue = 0;
             }
-            if (differs.empty() && sentStampValue > lastStamp) {
+            if (sent->hash == stage.hash && sentStampValue > lastStamp) {
                 stage = *sent;
                 cslog() << name() << ": stage1 resent unchanged: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
-                        << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp;
+                        << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp
+                        << (differs.empty() ? std::string{} : ", a new one would differ in " + differs);
                 context.add_stage1(stage, true);
                 return;
             }
