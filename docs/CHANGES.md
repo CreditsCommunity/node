@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #178 | solver: when a confidant enters stage 1 again in the same round after a fuller round package replaced the first one, it sends the stage 1 it already signed again instead of signing a second one with a new timestamp; it signs a new one when the characteristic hash changed, the stored timestamp is not after the last block's, or it is more than 30 s old; new info lines `stage1 resent unchanged` and `stage1 signed again ... reason`, and the package replacement is logged at info level (`docs/consensus-diagnostics.md`, section 5) |
 
 ## community.18 — 2026-11-09
 
