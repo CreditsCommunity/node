@@ -641,6 +641,11 @@ private:
     std::vector<cs::Bytes> stageTwoMessage_;
     std::vector<cs::Bytes> stageThreeMessage_;
     bool stageThreeSent_ = false;
+    // ./testnet-replay-round (exp/stage1-fixes experiment, used by CREDITS_TESTNET builds only; declared
+    // in every build so that the class layout does not depend on the define): the last package processed
+    std::shared_ptr<cs::RoundPackage> testnetReplay_;
+    cs::PublicKey testnetReplaySender_{};
+    bool testnetReplayDone_ = false;
 
     std::vector<cs::StageOneSmarts> smartStageOneStorage_;
     std::vector<cs::StageTwoSmarts> smartStageTwoStorage_;

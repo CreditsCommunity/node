@@ -81,6 +81,9 @@
 #        delay: NET_FAULT_DELAY_MS (default 250) +- NET_FAULT_JITTER_MS (default 150), normal distribution
 #        CANDIDACY_PAUSE=1: the nodes of this build (not BIN_ALT) run with [consensus] candidacy_pause=on,
 #        candidacy_pause_rounds=CANDIDACY_PAUSE_ROUNDS (default 300) (experiment, exp/stage1-fixes)
+#        REPLAY_ROUND=<period>:<delay ms> (a CREDITS_TESTNET build; experiment, exp/stage1-fixes): the nodes
+#        REPLAY_NODES (comma separated, nodes of this build, default 5) process the round package of
+#        every period-th round again <delay ms> after their stage 1, as a same-round replacement does
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
@@ -736,6 +739,14 @@ Format="[%TimeStamp%] %Severity% %Message%"
 CFG
 done
 
+# experiment hook: same-round round-package replacement on REPLAY_NODES
+if [ -n "${REPLAY_ROUND:-}" ]; then
+    REPLAY_NODES=${REPLAY_NODES:-5}
+    for j in ${REPLAY_NODES//,/ }; do
+        alt_node "$j" && { echo "FAIL: REPLAY_NODES names n$j, which runs BIN_ALT"; exit 1; }
+        echo "${REPLAY_ROUND%%:*} ${REPLAY_ROUND##*:}" > "$WORK/n$j/testnet-replay-round"
+    done
+fi
 # test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
 [ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
 [ "$CORRUPT_NODE" -eq 0 ] || : > "$WORK/n$CORRUPT_NODE/testnet-corrupt-pieces"
