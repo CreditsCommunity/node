@@ -378,6 +378,17 @@ private:
     cs::RoundNumber lastGrayUpdated_ = 0;
     RoundPackage justCreatedRoundPackage_;
     SentSignatures lastSentSignatures_;
+
+    // the stage 1 this node last signed and sent, with the round, sub-round and seat key it was
+    // signed for; unlike stageOneStorage it survives nextRound(true), the re-entry of the same
+    // round after a fuller round package replaced the first one
+    struct SentStageOne {
+        cs::RoundNumber round = 0;
+        uint8_t subRound = 0;
+        cs::PublicKey key{};
+        cs::StageOne stage;
+    };
+    std::optional<SentStageOne> sentStageOne_;
     std::unique_ptr<IterValidator> pVal_;
     std::string kLogPrefix_;
 };

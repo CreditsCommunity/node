@@ -249,6 +249,13 @@ public:
 
     void add_stage1(cs::StageOne& stage, bool send);
 
+    // the stage 1 this node already signed and sent for the current round and sub-round from its
+    // current seat (nullptr if none): kept across a same-round round-package replacement
+    const cs::StageOne* sent_stage1() const;
+
+    // remembers the stage 1 just signed and sent, for sent_stage1()
+    void remember_sent_stage1(const cs::StageOne& stage);
+
     void add_stage2(cs::StageTwo& stage, bool send);
 
     void add_stage3(cs::StageThree& stage);
