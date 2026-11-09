@@ -27,24 +27,32 @@ at debug level it is logged for every stage 3:
 
 ```
 info SolverCore: stage3 inputs: R-37 iter=0 seq=37 prev=7C839893 ts=1793783441147 reward=- tx=1
-  txIds=40E79CA6 fees=69F07B9F charMask=FC87F4F1/1 newWallets=0 smartSigs=0 conf=5/5 writer=2
-  block=BC24F874 round=44C9C6F6 trusted=D7B1BD25 mask=[3] [4] [0] [1] [2]
+  txIds=40E79CA6 fees=69F07B9F newWallets=0 smartSigs=0 conf=5/5 confMask=1F confSigs=9A0B7C21
+  realTrusted=[0] [1] [2] [3] [4] version=0 roundCost=0.0 bootstrap=0 metaTs=1793783441147
+  charMask=FC87F4F1/1 writer=2 block=BC24F874 round=44C9C6F6 trusted=D7B1BD25 mask=[3] [4] [0] [1] [2]
 ```
 
 (one line in the log; wrapped here.) Hashes are shortened to their first 8 hex characters; `-` means
-empty (no transactions, no reward field).
+empty (no transactions, no reward field). The fields from `seq` to `bootstrap` are the hashed
+fields of the block, in the order of the block binary; the `stage3 network block` line of
+section 1b prints the same fields for the block the network stores.
 
 | Field | Meaning | Goes into |
 |---|---|---|
 | `seq`, `prev` | sequence and previous block hash of the new block | block hash |
-| `ts` | block timestamp chosen from the stage-1 timestamps | block hash and round table |
+| `ts` | block timestamp chosen from the stage-1 timestamps (section 1a shows how) | block hash and round table |
 | `reward` | block reward field (hex; `-` before DPoS or with mining off), computed from the confidants' cached wallet data | block hash and round table |
 | `tx`, `txIds` | number of transactions and a hash of their signatures in block order | block hash |
 | `fees` | hash of the counted fee of every transaction, in order | block hash |
-| `charMask` | hash and length of the characteristic (the mask that chose the transactions) | block hash |
 | `newWallets` | number of new wallet ids the block assigns | block hash |
 | `smartSigs` | number of contract-consensus signatures carried in the block | block hash |
 | `conf` | round confirmations in the block: mask size / signature count | block hash |
+| `confMask` | the confirmation mask bits (hex): which of the previous round's trusted signed this round's table | block hash |
+| `confSigs` | hash of the confirmation signatures in order; `(n zero)` counts empty signature slots | block hash |
+| `realTrusted` | the real-trusted mask written into the block | block hash |
+| `version`, `roundCost`, `bootstrap` | block version, round cost and the bootstrap flag of the block | block hash |
+| `metaTs` | the timestamp of the round package being built (equal to `ts`) | round table |
+| `charMask` | hash and length of the characteristic (the mask that chose the transactions) | block hash |
 | `writer`, `mask` | writer index and real-trusted mask of this iteration (`X` = excluded) | compared directly |
 | `block`, `round`, `trusted` | the three hashes this node signed | signatures |
 
@@ -74,7 +82,59 @@ nodes that differ, the first field that differs is the cause:
 The round table also signs the timestamp, reward, characteristic, sequence and previous hash, so a
 difference in one of them makes both `block` and `round` fail (`failed=block+round` below); only
 `block` failing points to the block-only inputs (`txIds`, `fees`, `newWallets`, `conf`,
-`smartSigs`).
+`confMask`, `confSigs`, `smartSigs`).
+
+### 1a. How the timestamp was chosen: `stage3 timestamp`
+
+Logged right after `stage3 inputs` (info level on a failure, debug level otherwise). The block
+timestamp is the mean of the stage-1 timestamps of the confidants in the mask, taken as offsets
+from the last block's timestamp, with a 3-sigma outlier drop (`SolverCore::chooseTimeStamp`).
+The line shows every value that went into it:
+
+```
+info R-37 SolverCore> stage3 timestamp: R-37 last=1793783440011 chosen=1793783441147 N=5/5 mean=1136.200 disp=18.560
+  [T0:KasmLeQs:1793783441140:in:1129] [T1:7gZ4BWYh:1793783441152:in:1141] [T2:B9XbBZUD:1793783441143:in:1132]
+  [T3:Br6U154N:1793783441150:in:1139] [T4:EJGNJj2S:1793783441146:in:1135]
+```
+
+| Field | Meaning |
+|---|---|
+| `last` | the last block's timestamp this node used (`BlockChain::getLastTimeStamp()`: the deferred block or the last stored one) |
+| `chosen` | the timestamp written into the block (`ts` of the inputs line) |
+| `N=a/b` | stamps left after the outlier drop / stamps that entered the mean |
+| `mean`, `disp` | mean and dispersion of the offsets (in ms) at the end of the computation |
+| `fallback` | present when no stamp was usable: `plain-mean-of-all` (integer mean of every stage-1 timestamp, masked or not), `last+1`, or `no-last-timestamp` (no block timestamp could be read: `0` is chosen) |
+| `[Ti:key:stamp:fate[:offset]]` | one entry per stage 1 held for the round: confidant index, key, the raw stage-1 timestamp and its fate: `in` (used, with its offset from `last`), `outlier` (dropped by the 3-sigma test), `masked` (confidant excluded in the mask), `not-after-last` (not later than `last`), `empty`, `invalid` (not a number), `sender-out-of-range` |
+
+**How to compare it between nodes.** Stage-1 messages are signed, so two nodes hold the same
+stamp for the same confidant: entries with a different stamp for the same index mean one node holds
+another stage-1 message of that sender (a stage 1 built twice in the round). The set of entries
+and their fates must agree too: a different `last` changes which stamps pass `not-after-last`, and
+a stamp present on one node and missing on the other changes the mean. Note that the `mean`
+alone, with the same `last`, gives `chosen`: with the same entries and the same `last`, two nodes
+cannot choose different timestamps.
+
+### 1b. The block the network stored: `stage3 network block`
+
+When the stage 3 of this node failed against its peers, the block the network writes for that
+sequence arrives in the next round package. If it differs from the block this node signed, it is
+logged once, with the same fields as `stage3 inputs`, and the names of the fields that differ:
+
+```
+info R-38 SolverCore> stage3 network block: seq=37 hash=6AE2F8B5 (we signed C566481F) seq=37 prev=7C839893
+  ts=1793783441150 reward=... tx=1 txIds=40E79CA6 fees=69F07B9F newWallets=0 smartSigs=0 conf=5/5
+  confMask=1F confSigs=9A0B7C21 realTrusted=[0] [1] [X] [3] [4] version=0 roundCost=0.0 bootstrap=0
+  differs=ts,reward,realTrusted (ts and reward also change with the real trusted mask when the writer retried stage 3)
+```
+
+Read `differs` with care: when the majority excluded this node (`realTrusted` has an `X` at its
+index), the writer rebuilt the block in a second stage-3 iteration with the smaller mask, so `ts`
+(the mean of fewer stage-1 stamps) and `reward` (shared among fewer confidants) differ for that
+reason alone. Fields that do not depend on the mask (`prev`, `txIds`, `fees`, `newWallets`,
+`conf`, `confMask`, `confSigs`, `version`, `roundCost`, `bootstrap`) must be equal on a healthy
+node; one of them differing is the cause of the failure. When only `ts`, `reward` and
+`realTrusted` differ, the first-iteration block cannot be compared this way: collect the
+`stage3 inputs` and `stage3 timestamp` lines of the same round from a peer of the majority.
 
 ## 2. Why a peer failed: `stage3 check failed`
 
