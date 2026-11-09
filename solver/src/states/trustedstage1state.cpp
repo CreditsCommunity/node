@@ -108,6 +108,31 @@ void TrustedStage1State::off(SolverContext& context) {
         if (sent != nullptr) {
             sentStamp = sent->roundTimeStamp;
             differs = stage1ContentDiff(*sent, stage);
+            // Never sign a second stage 1 for the same round and sub-round when only the timestamp
+            // would change: send the same signed bytes again, as gotStageOneRequest() does. A second
+            // signed message of the seat makes the confidants hold different stage-1 copies (a
+            // receiver keeps the later stamp only if it gets both), so they choose different block
+            // timestamps or see two hash-signature pairs of this seat at stage 2. Receivers verify
+            // the message as any other; one that already holds it ignores it (same timestamp).
+            // When the content differs (the replaced package changed the last block, so the hash
+            // candidates or the characteristic changed), the new stage 1 is signed as before: the
+            // old one would carry a view of the chain the others no longer share.
+            uint64_t lastStamp = 0;
+            uint64_t sentStampValue = 0;
+            try {
+                lastStamp = std::stoull(context.blockchain().getLastTimeStamp());
+                sentStampValue = std::stoull(sent->roundTimeStamp);
+            }
+            catch (...) {
+                sentStampValue = 0;
+            }
+            if (differs.empty() && sentStampValue > lastStamp) {
+                stage = *sent;
+                cslog() << name() << ": stage1 resent unchanged: R-" << cs::Conveyer::instance().currentRoundNumber() << "."
+                        << static_cast<int>(context.subRound()) << " T" << static_cast<int>(stage.sender) << " ts " << sentStamp;
+                context.add_stage1(stage, true);
+                return;
+            }
         }
         finalizeStage(context);
         if (sent != nullptr) {
