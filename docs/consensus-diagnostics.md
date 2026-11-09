@@ -191,3 +191,68 @@ the larger group.
 - `the signatures of the block are insufficient or incorrect: #<seq> hash <hex> prev <hex>`
   (warning, was debug): a received block failed the signature check and is dropped; its full hash
   and previous hash identify which block it was.
+
+## 5. Stage 1 entered again in the same round: `stage1 resent unchanged` / `stage1 signed again`
+
+A confidant can receive a second round package for the round it is in, with more real trusted
+signatures than the first. It then replaces the first package and enters stage 1 again
+(`SolverCore::nextRound(true)`):
+
+```
+info NODE> Current Roundpackage of 1205 will be replaced by new one
+```
+
+(this line was at debug level before). If this node already signed and sent its stage 1 for that
+round and sub-round from the same seat, it now sends the same signed message again instead of
+signing a second one with a new timestamp:
+
+```
+info Trusted-1: stage1 resent unchanged: R-1205.0 T3 ts 1793783441147, a new one would differ in candidates,packets
+```
+
+`a new one would differ in` lists the fields a new stage 1 would have changed (`candidates`: the
+trusted candidates as a set, `packets`: the packet hashes); it is absent when nothing differs.
+Both are this node's votes for the next round, and the stored message the other confidants
+already hold stays valid. Receivers check the resent message like any stage 1. A receiver that
+already holds it ignores it, because its timestamp is the same.
+
+Two signed stage-1 messages from one seat with different timestamps can leave the confidants
+holding different copies. They then compute different block timestamps, or see two
+hash-signature pairs for that seat at stage 2. In both cases the seat, or the block, can fail the
+stage-3 check.
+
+The node signs a new stage 1, as before this change, when the stored one would be refused or
+would make the seat look faulty:
+
+```
+info Trusted-1: stage1 signed again: R-1205.0 T3 ts 1793783441147 -> 1793783442010, content differs (hash), reason hash-changed
+```
+
+- `hash-changed`: the characteristic hash changed, because the new package changed the last
+  block. This hash must match the majority's.
+- `not-after-last-block`: the stored timestamp is not after the last block's, so the receivers
+  would refuse it.
+- `too-old`: the stored timestamp is more than `DefaultTimeStampRange` (30 s) old, so fresh
+  timestamps from the other confidants could fall outside this node's stage-2 window, which is
+  measured from its own timestamp.
+- `unreadable`: the stored timestamp cannot be read as a number.
+
+Two cases still sign a second stage 1 for the same round, as before this change, and log no
+`stage1` line:
+
+- a fuller package that reaches the writer of the round package (the `moreTrusted` branch of
+  `Node::getRoundTable` for a node that holds its own package): that path starts the round
+  again with `updateRound = false`, which clears the stored stage 1;
+- a fuller package that replaces the first one inside a bootstrap round: the start of a bootstrap
+  round clears the stored stage 1.
+
+`content` compares the old and the new stage 1 apart from the timestamp: `same`, or `differs`
+with the fields (`hash`, `candidates`, `packets`). The stored stage 1 is kept only while the node
+is in that round and sub-round on the same seat. A new round, a new sub-round and every bootstrap
+round start without it.
+
+The replacement itself also logs `fatal ConveyerBase> Meta round currently in conveyer`. This line
+is older than this change and the official node logs it too, on every replacement of a round
+package by one for the same round. The conveyer already holds a round table for that round, so it
+keeps that table and does not store the second one. Despite its `fatal` level, the node keeps
+running.

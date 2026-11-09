@@ -50,6 +50,29 @@ void SolverContext::add_stage1(cs::StageOne& stage, bool send) {
     core.gotStageOne(stage);
 }
 
+const cs::StageOne* SolverContext::sent_stage1() const {
+    const auto& sent = core.sentStageOne_;
+    if (!sent.has_value()) {
+        return nullptr;
+    }
+    const cs::Conveyer& conveyer = cs::Conveyer::instance();
+    const uint8_t seat = own_conf_number();
+    if (sent->round != conveyer.currentRoundNumber() || sent->subRound != core.subRound() || sent->stage.sender != seat ||
+        !conveyer.isConfidantExists(seat) || conveyer.confidantByIndex(seat) != sent->key) {
+        return nullptr;
+    }
+    return &sent->stage;
+}
+
+void SolverContext::remember_sent_stage1(const cs::StageOne& stage) {
+    const cs::Conveyer& conveyer = cs::Conveyer::instance();
+    if (!conveyer.isConfidantExists(stage.sender)) {
+        core.sentStageOne_.reset();
+        return;
+    }
+    core.sentStageOne_ = SolverCore::SentStageOne{conveyer.currentRoundNumber(), core.subRound(), conveyer.confidantByIndex(stage.sender), stage};
+}
+
 void SolverContext::add_stage2(cs::StageTwo& stage, bool send) {
     // core.stageTwoStorage.push_back(stage);
 

@@ -160,6 +160,35 @@ struct StageHash {
     cs::RoundNumber round;
 };
 
+// What a confidant does with its stage 1 when it enters stage 1 again in the same round and
+// sub-round from the same seat (SolverCore::nextRound(true), after a fuller round package of the
+// round replaced the first one) and finds the stage 1 it already signed and sent:
+// - Resend: the stored signed message is sent again byte for byte, so every confidant holds the
+//   same stage 1 of this seat;
+// - otherwise a new stage 1 is signed as before, because the stored one would be refused or
+//   would make this seat look faulty: HashChanged (the characteristic hash must match the
+//   majority's), NotAfterLastBlock (the stamp must be after the last block's), TooOld (the stored
+//   stamp is more than Consensus::DefaultTimeStampRange old, so fresh stamps of the others could
+//   fall outside this node's own stage-2 window, which is measured from its own stamp),
+//   Unreadable (the stored stamp does not parse as a number).
+enum class StageOneResend : uint8_t {
+    Resend,
+    HashChanged,
+    NotAfterLastBlock,
+    TooOld,
+    Unreadable
+};
+
+// sent: the stored signed stage 1; freshHash: the characteristic hash computed now;
+// lastBlockStamp: the last block's timestamp; now: the current time (ms)
+StageOneResend stageOneResend(const StageOne& sent, const Hash& freshHash, uint64_t lastBlockStamp, uint64_t now);
+
+const char* toString(StageOneResend decision);
+
+// the content fields of two stage-1 messages of one seat that differ, timestamp and signature
+// aside, comma separated (empty: the same content); trusted candidates compare as sets
+std::string stageOneContentDiff(const StageOne& a, const StageOne& b);
+
 }  // namespace cs
 
 #endif  // STAGE_HPP
