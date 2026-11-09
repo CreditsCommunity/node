@@ -533,6 +533,22 @@ jobs:
             manual: true   # study/trusted-selection experiment, second run
             env: NET_FAULT=delay NET_FAULT_DELAY_MS=600 NET_FAULT_JITTER_MS=100 NET_FAULT_NODES=3 SLOW_NODES=3 SLOW_CPU=20 CONTRACTS=1 TARGET_SEQ=1500
             contracts: true
+          - name: s1-delay
+            manual: true   # exp/stage1-fixes experiment (scratch): a community and an official node faulty, n7 quick-started at 300
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=400 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3,4 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: s1-delay-pause
+            manual: true   # exp/stage1-fixes experiment (scratch): a community and an official node faulty, n7 quick-started at 300
+            env: NET_FAULT=delay NET_FAULT_DELAY_MS=400 NET_FAULT_JITTER_MS=200 NET_FAULT_NODES=3,4 CONTRACTS=1 TARGET_SEQ=1500 CANDIDACY_PAUSE=1
+            contracts: true
+          - name: s1-reorder
+            manual: true   # exp/stage1-fixes experiment (scratch): a community and an official node faulty, n7 quick-started at 300
+            env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=3,4 CONTRACTS=1 TARGET_SEQ=1500
+            contracts: true
+          - name: s1-reorder-pause
+            manual: true   # exp/stage1-fixes experiment (scratch): a community and an official node faulty, n7 quick-started at 300
+            env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=3,4 CONTRACTS=1 TARGET_SEQ=1500 CANDIDACY_PAUSE=1
+            contracts: true
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
             manual: true

@@ -79,6 +79,8 @@
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
 #        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up.
 #        delay: NET_FAULT_DELAY_MS (default 250) +- NET_FAULT_JITTER_MS (default 150), normal distribution
+#        CANDIDACY_PAUSE=1: the nodes of this build (not BIN_ALT) run with [consensus] candidacy_pause=on,
+#        candidacy_pause_rounds=CANDIDACY_PAUSE_ROUNDS (default 300) (experiment, exp/stage1-fixes)
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
@@ -683,6 +685,14 @@ snapshot_section() {
     return 0
 }
 
+# the [consensus] section of node i (experiment): candidacy pause on the nodes of this build
+consensus_section() {
+    local i=$1
+    [ "${CANDIDACY_PAUSE:-0}" = 1 ] || return 0
+    alt_node "$i" && return 0
+    printf "\n[consensus]\ncandidacy_pause=on\ncandidacy_pause_rounds=%s\n" "${CANDIDACY_PAUSE_ROUNDS:-300}"
+}
+
 for i in $(seq 1 "$ALL_NODES"); do
     dir="$WORK/n$i"
     : > "$dir/hosts.txt"
@@ -712,6 +722,7 @@ ajax_port=0
 diag_port=$((9400 + i))
 $(storage_section "$i")
 $(snapshot_section "$i")
+$(consensus_section "$i")
 
 [Core]
 Filter="%Severity% >= info"
