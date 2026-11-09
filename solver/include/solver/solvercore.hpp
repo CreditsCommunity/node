@@ -103,6 +103,11 @@ public:
     void gotRoundInfoRequest(const cs::PublicKey& requester, cs::RoundNumber requester_round);
     void gotRoundInfoReply(bool next_round_started, const cs::PublicKey& respondent);
 
+    // diagnostics only: a block stored (or a deferred block replaced) by the blockchain; when a
+    // stage-3 failure was logged for the same sequence and the block differs from the one this
+    // node signed, logs the network's block with the same fields as the "stage3 inputs" line
+    void onBlockStored(const csdb::Pool& pool);
+
     // Solver3 "public" extension
     void gotStageOne(const cs::StageOne& stage);
     void gotStageTwo(const cs::StageTwo& stage);
@@ -336,6 +341,18 @@ private:
     // diagnostics only: the "stage3 inputs" line of our last stage 3, logged at info level only when
     // a peer's stage 3 fails the final check (at debug level every round)
     std::string stage3InputsLine_;
+    // diagnostics only: how chooseTimeStamp() chose the block timestamp of our last stage 3
+    // (last block timestamp, every stage-1 timestamp with its fate, N, mean, dispersion), logged
+    // with the inputs line; the fields of our block as (name, value) pairs and the hash we signed,
+    // to compare with the block the network stores for that sequence
+    std::string stage3TimeStampLine_;
+    std::vector<std::pair<std::string, std::string>> stage3InputsFields_;
+    cs::Bytes stage3InputsBlockHash_;
+    // diagnostics only: armed by the first stage-3 failure of a round with the fields above, read
+    // and cleared by onBlockStored() when the network's block of that sequence arrives
+    cs::Sequence stage3DiagSeq_ = 0;
+    cs::Bytes stage3DiagBlockHash_;
+    std::vector<std::pair<std::string, std::string>> stage3DiagFields_;
     bool realTrustedChanged_;
     cs::Bytes tempRealTrusted_;
 

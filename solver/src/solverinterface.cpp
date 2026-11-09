@@ -71,6 +71,9 @@ void SolverCore::init(
 
 void SolverCore::subscribeToSignals() {
     psmarts->subscribeToSignals(pnode);
+    // diagnostics only: the network's block of a sequence whose stage 3 failed on this node
+    cs::Connector::connect(&pnode->getBlockChain().storeBlockEvent, this, &SolverCore::onBlockStored);
+    cs::Connector::connect(&pnode->getBlockChain().lastBlockReplacedEvent, this, &SolverCore::onBlockStored);
 }
 
 void SolverCore::gotConveyerSync(cs::RoundNumber rNum) {
@@ -203,6 +206,9 @@ void SolverCore::nextRound(bool updateRound) {
     trueStageThreeStorage.clear();
     stage3Failures_.clear();
     stage3InputsLine_.clear();
+    stage3TimeStampLine_.clear();
+    stage3InputsFields_.clear();
+    stage3InputsBlockHash_.clear();
     trusted_candidates.clear();
     realTrustedChanged_ = false;
     tempRealTrusted_.clear();
@@ -513,8 +519,27 @@ void SolverCore::logStage3Failure(const cs::StageThree& stageFrom, uint8_t patte
         }
     }
     if (stage3Failures_.empty() && !stage3InputsLine_.empty()) {
-        // the first failure of the iteration: what we signed, to compare with the other side's line
+        // the first failure of the iteration: what we signed, to compare with the other side's line,
+        // how the timestamp was chosen, and arm the comparison with the block the network stores
         cslog() << kLogPrefix_ << stage3InputsLine_;
+        if (!stage3TimeStampLine_.empty()) {
+            cslog() << kLogPrefix_ << stage3TimeStampLine_;
+        }
+        if (!stage3InputsFields_.empty() && !stage3InputsBlockHash_.empty()) {
+            stage3DiagSeq_ = 0;
+            for (const auto& [name, value] : stage3InputsFields_) {
+                if (name == "seq") {
+                    try {
+                        stage3DiagSeq_ = static_cast<cs::Sequence>(std::stoull(value));
+                    }
+                    catch (...) {
+                        stage3DiagSeq_ = 0;
+                    }
+                }
+            }
+            stage3DiagFields_ = stage3InputsFields_;
+            stage3DiagBlockHash_ = stage3InputsBlockHash_;
+        }
     }
     stage3Failures_.emplace_back(stageFrom.sender, pattern);
     if (stage3Failures_.size() > kS3SplitMaxFailures) {

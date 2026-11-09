@@ -13,6 +13,10 @@
 #include <csnode/walletsstate.hpp>
 #include <lib/system/logger.hpp>
 
+#include <base58.h>
+
+#include <algorithm>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <sstream>
@@ -23,6 +27,95 @@
 namespace
 {
     const char* log_prefix = "SolverCore: ";
+
+    // diagnostics only (stage-3 lines): short forms of keys and hashes
+    std::string diagShortKey(const cs::PublicKey& key) {
+        return EncodeBase58(key.data(), key.data() + key.size()).substr(0, 8);
+    }
+
+    std::string diagShort8(const cs::Byte* data, size_t size) {
+        if (size == 0) {
+            return "-";
+        }
+        return cs::Utils::byteStreamToHex(data, std::min<size_t>(size, 4));
+    }
+
+    std::string diagHash8(const cs::Bytes& bytes) {
+        if (bytes.empty()) {
+            return "-";
+        }
+        const cs::Hash h = cscrypto::calculateHash(bytes.data(), bytes.size());
+        return diagShort8(h.data(), h.size());
+    }
+
+    // The hashed fields of a block as (name, value) pairs, in the order of the "stage3 inputs"
+    // line, so that the block this node signed and the block the network stores for the same
+    // sequence print alike and can be compared field by field. Read-only.
+    std::vector<std::pair<std::string, std::string>> diagBlockFields(const csdb::Pool& blk) {
+        std::vector<std::pair<std::string, std::string>> fields;
+        const auto& trxs = blk.transactions();
+        cs::Bytes txSigs;
+        cs::Bytes txFees;
+        txSigs.reserve(trxs.size() * sizeof(cs::Signature));
+        txFees.reserve(trxs.size() * 2);
+        for (const auto& t : trxs) {
+            const cs::Signature& sig = t.signature();
+            txSigs.insert(txSigs.end(), sig.cbegin(), sig.cend());
+            auto fee = t.counted_fee();
+            const uint16_t rawFee = fee.get_raw();
+            txFees.push_back(static_cast<uint8_t>(rawFee & 0xFF));
+            txFees.push_back(static_cast<uint8_t>(rawFee >> 8));
+        }
+        const cs::Bytes prevHash = blk.previous_hash().to_binary();
+        std::string ts;
+        if (blk.user_field_ids().count(BlockChain::kFieldTimestamp) > 0) {
+            ts = blk.user_field(BlockChain::kFieldTimestamp).value<std::string>();
+        }
+        std::string reward;
+        if (blk.user_field_ids().count(BlockChain::kFieldBlockReward) > 0) {
+            reward = blk.user_field(BlockChain::kFieldBlockReward).value<std::string>();
+        }
+        // the round confirmations: the signatures of the previous round's trusted on this round's
+        // table, as the node holds them; zero signatures are counted apart
+        cs::Bytes confSigs;
+        size_t zeroSigs = 0;
+        for (const auto& s : blk.roundConfirmations()) {
+            confSigs.insert(confSigs.end(), s.cbegin(), s.cend());
+            if (s == cs::Zero::signature) {
+                ++zeroSigs;
+            }
+        }
+        std::ostringstream confMask;
+        confMask << std::hex << std::uppercase << blk.roundConfirmationMask();
+        fields.emplace_back("seq", std::to_string(blk.sequence()));
+        fields.emplace_back("prev", diagShort8(prevHash.data(), prevHash.size()));
+        fields.emplace_back("ts", ts.empty() ? std::string("-") : ts);
+        fields.emplace_back("reward", reward.empty() ? std::string("-") : cs::Utils::byteStreamToHex(reinterpret_cast<const cs::Byte*>(reward.data()), reward.size()));
+        fields.emplace_back("tx", std::to_string(trxs.size()));
+        fields.emplace_back("txIds", diagHash8(txSigs));
+        fields.emplace_back("fees", diagHash8(txFees));
+        fields.emplace_back("newWallets", std::to_string(blk.newWallets().size()));
+        fields.emplace_back("smartSigs", std::to_string(blk.smartSignatures().size()));
+        fields.emplace_back("conf", std::to_string(static_cast<int>(blk.numberConfirmations())) + '/' + std::to_string(blk.roundConfirmations().size()));
+        fields.emplace_back("confMask", confMask.str());
+        fields.emplace_back("confSigs", diagHash8(confSigs) + (zeroSigs ? "(" + std::to_string(zeroSigs) + " zero)" : std::string()));
+        fields.emplace_back("realTrusted", cs::TrustedMask::toString(cs::Utils::bitsToMask(blk.numberTrusted(), blk.realTrusted())));
+        fields.emplace_back("version", std::to_string(static_cast<int>(blk.version())));
+        fields.emplace_back("roundCost", blk.roundCost().to_string());
+        fields.emplace_back("bootstrap", BlockChain::isBootstrap(blk) ? "1" : "0");
+        return fields;
+    }
+
+    std::string diagJoin(const std::vector<std::pair<std::string, std::string>>& fields) {
+        std::string s;
+        for (const auto& [name, value] : fields) {
+            s += ' ';
+            s += name;
+            s += '=';
+            s += value;
+        }
+        return s;
+    }
 }
 
 namespace cs {
@@ -230,12 +323,53 @@ uint64_t SolverCore::lastTimeStamp() {
 }
 
 std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
+    // Diagnostics only (the "stage3 timestamp" line): every stage-1 timestamp with its fate in
+    // this computation. The arithmetic below is the original one: the diagnostics read the same
+    // values in the same order and change nothing.
+    struct TsDiag {
+        uint8_t sender;
+        std::string raw;
+        const char* fate;
+        double x;
+    };
+    std::vector<TsDiag> diag;
+    diag.reserve(stageOneStorage.size());
+    const char* fallback = nullptr;
+    double diagDisp = 0.0;
+    int diagN0 = 0;
+    std::string chosen;
+    const auto finish = [&](int64_t lastTimeStamp, double mean, int N) {
+        // the surviving stamps are those still in the list: an included stamp whose value is no
+        // longer there was dropped as an outlier (equal values share the same fate)
+        const cs::Conveyer& conveyer = cs::Conveyer::instance();
+        std::ostringstream os;
+        os << "stage3 timestamp: R-" << conveyer.currentRoundNumber() << " last=" << lastTimeStamp
+            << " chosen=" << chosen << " N=" << N << '/' << diagN0 << std::fixed << std::setprecision(3)
+            << " mean=" << mean << " disp=" << diagDisp;
+        if (fallback != nullptr) {
+            os << " fallback=" << fallback;
+        }
+        for (const auto& d : diag) {
+            os << " [T" << static_cast<int>(d.sender) << ':'
+                << (conveyer.isConfidantExists(d.sender) ? diagShortKey(conveyer.confidantByIndex(d.sender)) : std::string("?"))
+                << ':' << (d.raw.empty() ? std::string("-") : d.raw) << ':' << d.fate;
+            if (std::strcmp(d.fate, "in") == 0 || std::strcmp(d.fate, "outlier") == 0) {
+                os << ':' << std::setprecision(0) << d.x;
+            }
+            os << ']';
+        }
+        stage3TimeStampLine_ = os.str();
+        return chosen;
+    };
+
     int64_t lastTimeStamp;
     try {
       lastTimeStamp = std::stoll(pnode->getBlockChain().getLastTimeStamp());
     } catch(...) {
         csdebug() << "ChooseTimeStamp - Timestamp was announced as zero";
-      return std::to_string(0);
+        chosen = std::to_string(0);
+        fallback = "no-last-timestamp";
+        return finish(0, 0.0, 0);
     }
 
     std::list<double> stamps;
@@ -243,20 +377,26 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
     double mean = 0.0;
     int N = 0;
     for (auto& it : stageOneStorage) {
+        diag.push_back({it.sender, it.roundTimeStamp, "sender-out-of-range", 0.0});
         if (it.sender >= cs::Conveyer::instance().confidantsCount()) {
             continue;
         }
+        diag.back().fate = it.roundTimeStamp.empty() ? "empty" : "masked";
         if (!it.roundTimeStamp.empty() && mask[it.sender] != cs::ConfidantConsts::InvalidConfidantIndex) {
             int64_t tStamp;
+            diag.back().fate = "invalid";
             try {
                 tStamp = std::stoll(it.roundTimeStamp);
             } catch(...) {
                 cswarning() << log_prefix << "incompatible timestamp received from [" << (int)it.sender << "]";
                 continue;
             }
+            diag.back().fate = "not-after-last";
             if (tStamp > lastTimeStamp) {
                 double x = static_cast<double>(tStamp - lastTimeStamp);
+                diag.back().x = x;
                 if (x > DBL_EPSILON) {
+                    diag.back().fate = "in";
                     stamps.push_back(x);
                     sx += x;
                     sx2 += x * x;
@@ -266,6 +406,7 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
 
         }
     }
+    diagN0 = N;
 
     bool isDrop = true;
     while (isDrop) {
@@ -286,17 +427,27 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
                 sx0 += static_cast<int64_t>(tStamp);
             }
 
+            for (auto& d : diag) {
+                if (std::strcmp(d.fate, "in") == 0) {
+                    d.fate = "outlier";
+                }
+            }
             if (N0 > 0) {
-                return std::to_string(sx0/N0);
+                chosen = std::to_string(sx0/N0);
+                fallback = "plain-mean-of-all";
+                return finish(lastTimeStamp, mean, 0);
             }
             else {
-                return std::to_string(lastTimeStamp + 1);
+                chosen = std::to_string(lastTimeStamp + 1);
+                fallback = "last+1";
+                return finish(lastTimeStamp, mean, 0);
             }
 
         }
         double N_1 = 1. / N;
         mean = sx * N_1;
         double disp = sx2 * N_1 - mean * mean;
+        diagDisp = disp;
         isDrop = false;
         for (auto it = stamps.begin(), end = stamps.end(); it != end;) {
             double x = *it;
@@ -312,7 +463,13 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
 
     auto meanTimeStamp = static_cast<int64_t>(lastTimeStamp + mean + 0.5);
     //csdebug() << "finish: " << meanTimeStamp;
-    return std::to_string(meanTimeStamp);
+    chosen = std::to_string(meanTimeStamp);
+    for (auto& d : diag) {
+        if (std::strcmp(d.fate, "in") == 0 && std::find(stamps.cbegin(), stamps.cend(), d.x) == stamps.cend()) {
+            d.fate = "outlier";
+        }
+    }
+    return finish(lastTimeStamp, mean, N);
 }
 
 
@@ -635,57 +792,63 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
     // signed, sent or stored.
     {
         const csdb::Pool& blk = deferredBlock_;
-        const auto& trxs = blk.transactions();
-        cs::Bytes txSigs;
-        cs::Bytes txFees;
-        txSigs.reserve(trxs.size() * sizeof(cs::Signature));
-        txFees.reserve(trxs.size() * 2);
-        for (const auto& t : trxs) {
-            const cs::Signature& sig = t.signature();
-            txSigs.insert(txSigs.end(), sig.cbegin(), sig.cend());
-            auto fee = t.counted_fee();
-            const uint16_t rawFee = fee.get_raw();
-            txFees.push_back(static_cast<uint8_t>(rawFee & 0xFF));
-            txFees.push_back(static_cast<uint8_t>(rawFee >> 8));
-        }
-        auto short8 = [](const cs::Byte* data, size_t size) -> std::string {
-            if (size == 0) {
-                return "-";
-            }
-            return cs::Utils::byteStreamToHex(data, std::min<size_t>(size, 4));
-        };
-        auto hash8 = [&short8](const cs::Bytes& bytes) -> std::string {
-            if (bytes.empty()) {
-                return "-";
-            }
-            const cs::Hash h = cscrypto::calculateHash(bytes.data(), bytes.size());
-            return short8(h.data(), h.size());
-        };
-        const cs::Bytes prevHash = blk.previous_hash().to_binary();
+        // the hashed fields of the block, in the order of diagBlockFields(); the "stage3 network
+        // block" line prints the same fields for the block the network stores for this sequence
+        stage3InputsFields_ = diagBlockFields(blk);
+        stage3InputsBlockHash_ = lastHashBin;
         const cs::PoolMetaInfo& meta = justCreatedRoundPackage_.poolMetaInfo();
 
         std::ostringstream line;
         line << "stage3 inputs: R-" << conveyer.currentRoundNumber()
             << " iter=" << static_cast<int>(stage3.iteration)
-            << " seq=" << seq
-            << " prev=" << short8(prevHash.data(), prevHash.size())
-            << " ts=" << meta.timestamp
-            << " reward=" << (meta.reward.empty() ? std::string("-") : cs::Utils::byteStreamToHex(meta.reward.data(), meta.reward.size()))
-            << " tx=" << trxs.size()
-            << " txIds=" << hash8(txSigs)
-            << " fees=" << hash8(txFees)
-            << " charMask=" << hash8(block_characteristic->mask) << '/' << block_characteristic->mask.size()
-            << " newWallets=" << blk.newWallets().size()
-            << " smartSigs=" << blk.smartSignatures().size()
-            << " conf=" << static_cast<int>(blk.numberConfirmations()) << '/' << blk.roundConfirmations().size()
+            << diagJoin(stage3InputsFields_)
+            << " metaTs=" << meta.timestamp
+            << " charMask=" << diagHash8(block_characteristic->mask) << '/' << block_characteristic->mask.size()
             << " writer=" << static_cast<int>(stage3.writer)
-            << " block=" << short8(stage3.blockHash.data(), stage3.blockHash.size())
-            << " round=" << short8(stage3.roundHash.data(), stage3.roundHash.size())
-            << " trusted=" << short8(stage3.trustedHash.data(), stage3.trustedHash.size())
+            << " block=" << diagShort8(stage3.blockHash.data(), stage3.blockHash.size())
+            << " round=" << diagShort8(stage3.roundHash.data(), stage3.roundHash.size())
+            << " trusted=" << diagShort8(stage3.trustedHash.data(), stage3.trustedHash.size())
             << " mask=" << cs::TrustedMask::toString(stage3.realTrustedMask);
         stage3InputsLine_ = line.str();
         csdebug() << log_prefix << stage3InputsLine_;
+        if (!stage3TimeStampLine_.empty()) {
+            csdebug() << log_prefix << stage3TimeStampLine_;
+        }
     }
+}
+
+void SolverCore::onBlockStored(const csdb::Pool& pool) {
+    // Diagnostics only. Armed by logStage3Failure() with the fields of the block this node signed
+    // in the round whose stage 3 failed; when the blockchain stores (or takes over) another block
+    // of that sequence, the network's block is logged with the same fields and the names of the
+    // fields that differ. Read-only: the block is not changed. Disarmed in any case, so at most one
+    // line per diagnosed round; a block of another sequence does not touch the armed state.
+    if (stage3DiagSeq_ == 0 || !pool.is_valid() || pool.sequence() != stage3DiagSeq_) {
+        return;
+    }
+    const cs::Bytes hash = pool.hash().to_binary();
+    const cs::Sequence seq = stage3DiagSeq_;
+    const auto ours = std::move(stage3DiagFields_);
+    const cs::Bytes signedHash = std::move(stage3DiagBlockHash_);
+    stage3DiagSeq_ = 0;
+    stage3DiagFields_.clear();
+    stage3DiagBlockHash_.clear();
+    if (hash == signedHash) {
+        return;  // the block we signed: nothing to compare
+    }
+    const auto theirs = diagBlockFields(pool);
+    std::string differs;
+    for (const auto& [name, value] : theirs) {
+        for (const auto& [ourName, ourValue] : ours) {
+            if (ourName == name && ourValue != value) {
+                differs += (differs.empty() ? "" : ",") + name;
+            }
+        }
+    }
+    cslog() << kLogPrefix_ << "stage3 network block: seq=" << seq << " hash=" << diagShort8(hash.data(), hash.size())
+        << " (we signed " << diagShort8(signedHash.data(), signedHash.size()) << ")" << diagJoin(theirs)
+        << " differs=" << (differs.empty() ? std::string("none") : differs)
+        << " (ts and reward also change with the real trusted mask when the writer retried stage 3)";
 }
 
 void SolverCore::uploadNewStates([[maybe_unused]] std::vector<csdb::Transaction> newStates) {
