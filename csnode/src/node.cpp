@@ -3090,6 +3090,34 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
     sendConfidants(MsgTypes::FirstStage, cs::Conveyer::instance().currentRoundNumber(), subRound_, stageOneInfo.signature, stageOneInfo.message);
 
     csmeta(csdetails) << "Sent message size " << stageOneInfo.message.size();
+
+#ifdef CREDITS_TESTNET
+    // test-network builds only (exp/stage1-fixes experiment, never to be merged): ./testnet-replay-round
+    // holds "<period> <delay ms>"; in every period-th round, delay ms after its first stage 1 was
+    // sent, this confidant processes the round's package again with updateRound = true, as the
+    // same-round replacement by a fuller package does (SolverCore::nextRound(true): stage 1 again)
+    const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
+    if (testnetReplay_ && !testnetReplayDone_ && testnetReplay_->roundTable().round == round) {
+        if (std::ifstream marker("testnet-replay-round"); marker) {
+            cs::RoundNumber period = 0;
+            int delayMs = 0;
+            if (marker >> period >> delayMs && period > 0 && round % period == 0) {
+                testnetReplayDone_ = true;
+                auto replay = testnetReplay_;
+                const cs::PublicKey from = testnetReplaySender_;
+                cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy, [this, replay, from, round]() {
+                    if (cs::Conveyer::instance().currentRoundNumber() != round || stageThreeSent_) {
+                        cslog() << "NODE> testnet: round package R-" << round << " not processed again (round over)";
+                        return;
+                    }
+                    cslog() << "NODE> testnet: round package R-" << round << " processed again (replacement)";
+                    cs::RoundPackage copy = *replay;
+                    performRoundPackage(copy, from, true);
+                });
+            }
+        }
+    }
+#endif
 }
 
 void Node::getStageOne(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
@@ -4240,6 +4268,15 @@ void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& 
         isBootstrapRound_ = false;
         cslog() << "NODE> Bootstrap off";
     }
+
+#ifdef CREDITS_TESTNET
+    // test-network builds only (exp/stage1-fixes experiment): the package sendStageOne() may replay
+    if (!updateRound) {
+        testnetReplay_ = std::make_shared<cs::RoundPackage>(rPackage);
+        testnetReplaySender_ = sender;
+        testnetReplayDone_ = false;
+    }
+#endif
 
     csmeta(csdetails) << "done\n";
 }
