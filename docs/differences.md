@@ -291,6 +291,18 @@ consensus rules.
   balances such a node computes for those callers, and makes them those of the nodes that took
   part in the rounds.
 
+- **Known state corrections.** The lineage of the published pruned snapshots synced the dice-contract
+  blocks of October 2026 with the official replay rule above, so it holds one contract-state fee
+  (0.008740234375 CS) less for `7hWM6wvs…` than the majority that executed the contract. That wallet
+  is a confidant in half of the rounds, and every reward split a community node signs for it differs
+  from the majority's by that fee, which puts the node in the stage-3 minority. `csnode/statecorrection`
+  keeps a table of such known differences. A correction is applied once, at the first block that
+  proves it: the wallet is a trusted confidant of the block, the block's stored reward split (signed
+  by the majority) differs from the one this node's stakes give, and it is reproduced exactly with
+  the delta applied. A node whose state is already right never applies it, an applied correction is
+  never applied twice, and a block that neither value explains is only logged. The node logs the
+  block that proved the correction and the wallet's new balance.
+
 Official nodes on the side that keeps its block behave as before; mixed networks do not fork (CI:
 equal state digests with official binaries on half of the nodes, and the same share of signed
 rounds for both).

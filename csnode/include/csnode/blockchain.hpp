@@ -392,7 +392,7 @@ public:
     void getTransactionsUntill(Transactions& transactions, csdb::Address address, csdb::TransactionID id, uint16_t flagg);
     void getAccountRegTime(uint64_t& aTime, csdb::Address address);
     void setBlocksToBeRemoved(cs::Sequence number);
-    double getStakingCoefficient(cs::StakingCoefficient coeff);
+    static double getStakingCoefficient(cs::StakingCoefficient coeff);
 
     std::string printWalletCaches();
 

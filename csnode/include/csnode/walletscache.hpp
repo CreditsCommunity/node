@@ -129,6 +129,10 @@ private:
     WalletData getWalletData(const PublicKey&);
     WalletData getWalletData(const csdb::Address&);
 
+    // applies the known state corrections a block proves (csnode/statecorrection.hpp), before the
+    // block's own changes
+    void applyKnownStateCorrections(const csdb::Pool& pool, const cs::ConfidantsKeys& confidants);
+
     double load(const csdb::Transaction& tr, const BlockChain& blockchain, const uint64_t timeStamp, bool inverse);
 
     double loadTrxForSource(const csdb::Transaction& tr,
