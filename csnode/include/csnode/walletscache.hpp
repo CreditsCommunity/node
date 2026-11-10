@@ -91,6 +91,10 @@ private:
 
     std::unique_ptr<Staking> staking_;
 
+    // per entry of the known state corrections (csnode/statecorrection.hpp): the blocks that proved
+    // nothing for it although the reward split differed, counted for the rate-limited warning
+    std::vector<uint64_t> stateCorrectionMisses_;
+
     friend class WalletsCache_Serializer;
 };
 
@@ -128,6 +132,10 @@ public:
 private:
     WalletData getWalletData(const PublicKey&);
     WalletData getWalletData(const csdb::Address&);
+
+    // applies the known state corrections a block proves (csnode/statecorrection.hpp), before the
+    // block's own changes
+    void applyKnownStateCorrections(const csdb::Pool& pool, const cs::ConfidantsKeys& confidants, const BlockChain& blockchain);
 
     double load(const csdb::Transaction& tr, const BlockChain& blockchain, const uint64_t timeStamp, bool inverse);
 

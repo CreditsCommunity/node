@@ -93,6 +93,7 @@ add_library(csnode
   include/csnode/serializers_helper.hpp
   include/csnode/apihandler_serializer.hpp
   include/csnode/roundstat_serializer.hpp
+  include/csnode/statecorrection.hpp
   src/blockchain.cpp
   src/blockchain_serializer.cpp
   src/node.cpp
@@ -100,6 +101,7 @@ add_library(csnode
   src/conveyer.cpp
   src/transactionspacket.cpp
   src/walletscache.cpp
+  src/statecorrection.cpp
   src/walletscache_serializer.cpp
   src/walletsids.cpp
   src/walletsids_serializer.cpp
