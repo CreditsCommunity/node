@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #181 | docs: the design documents of snapshot serving over p2p and of backward sync (`docs/specs`), each with a note on what was implemented and where the code differs |
 
 ## community.18.1 — 2026-11-09
 
