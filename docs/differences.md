@@ -109,7 +109,7 @@ from the Thrift definitions of the fork
 | Field | Value |
 |---|---|
 | `9: optional i64 networkUuid` | The chain identifier: the first 8 bytes of the hash of block 1, read as a little-endian unsigned 64-bit number (`BlockChain::uuid()`). It is the same on every node of a network, so a client such as a wallet can tell mainnet from a test network. Pruned nodes and nodes started from a snapshot know it too (it is in the checkpoint). Left out while the node does not know it yet (an empty database before block 1). Thrift has no unsigned type: the same 64 bits travel as a signed number, so mainnet, `11024959585341937636`, arrives as `-7421784488367613980`; add 2^64 to a negative value (or mask with `0xFFFFFFFFFFFFFFFF`) to get the unsigned one. |
-| `10: optional string communityVersion` | The package version, the first line of the `VERSION` file, for example `4.2.532-community.18.1`. Without a `VERSION` file it is `4.2.<protocol>.<minor>`. Always set by the community node. |
+| `10: optional string communityVersion` | The package version, the first line of the `VERSION` file, for example `4.2.532-community.18.2`. Without a `VERSION` file it is `4.2.<protocol>.<minor>`. Always set by the community node. |
 
 The official node sets neither field, and clients built from the official definitions ignore them,
 so a client can detect a community node by the presence of `communityVersion`. A local clone made

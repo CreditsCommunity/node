@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.18.1 or earlier.
+Everything listed here is in release 4.2.532-community.18.2 or earlier.
 
 ## Storage
 
@@ -143,6 +143,10 @@ Everything listed here is in release 4.2.532-community.18.1 or earlier.
   stage-1 messages made the confidants build different blocks and left the node in the stage-3
   minority. A replacement on the writer side and in a bootstrap round still signs twice.
   [#178](https://github.com/CreditsCommunity/node/pull/178)
+- **Known state correction.** A table of proven state differences (one entry: wallet `7hWM6wvs`,
+  one contract-state fee) is applied on mainnet only, only where the stored block reward split
+  proves it and a node's own state does not already match, so a node synced from scratch is not
+  changed. [#184](https://github.com/CreditsCommunity/node/pull/184)
 
 ## Diagnostics
 

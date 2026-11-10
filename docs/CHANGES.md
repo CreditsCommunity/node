@@ -42,10 +42,20 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.18.2 — 2026-11-10
+
+Release 18.2 is a point release of 18: the protocol and the announced minor version (18) are unchanged. It applies one known state correction on mainnet: the balance of wallet `7hWM6wvs` lacks one contract-state fee, which made community nodes the stage-3 minority in every round where that wallet is a confidant. It also carries the CI and documentation changes merged since 18.1.
+
 | PR | Change |
 |---|---|
+| release | community.18.2, a point release of 18: `MINOR_NODE_VERSION` stays 18, the package and the tag carry 4.2.532-community.18.2 |
+| #184 | state correction: `csnode/statecorrection`, a table of known state differences (one entry: `7hWM6wvs`, +0.008740234375 CS, mainnet only, from block 176,760,929, with optional counterpart adjustments); applied at a block where the wallet is a trusted confidant, only if the stored reward split differs from the one this node's stakes give and is reproduced exactly with the delta, so a correct state is never changed and a correction is never applied twice |
+| #183 | ci: the macOS job of `mainnet-join.yml` runs on macos-15 |
 | #181 | docs: the design documents of snapshot serving over p2p and of backward sync (`docs/specs`), each with a note on what was implemented and where the code differs |
 | #182 | ci: `mainnet-join.yml`, the Linux, Windows and macOS packages each start on mainnet with an empty database, fetch their snapshot over p2p from a named source and must log the same state digests (run with a `mainnet-join-*` tag or manually) |
+| #180 | tests: the `PollUntil` deadline test tolerates a slow runner (test only) |
 
 ## community.18.1 — 2026-11-09
 
