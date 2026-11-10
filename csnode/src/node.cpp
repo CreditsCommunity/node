@@ -3087,6 +3087,50 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
     csdebug() << "Stage one Signature R-" << cs::Conveyer::instance().currentRoundNumber() << "[" << static_cast<int>(stageOneInfo.sender)
         << "]";// : " << cs::Utils::byteStreamToHex(stageOneInfo.signature.data(), stageOneInfo.signature.size());
 
+#ifdef CREDITS_TESTNET
+    // test-network builds only (ci/testnet/run.sh STAGE1_DELAY_*): the stage 1 sent to the seats
+    // named in ./testnet-stage1-delay ("<ms> [all|seat,seat,...]") leaves that many ms later, so
+    // that a confidant whose stage 1 reaches the others late can be reproduced
+    if (std::ifstream hook("testnet-stage1-delay"); hook) {
+        int delayMs = 0;
+        std::string seats;
+        hook >> delayMs;
+        std::getline(hook, seats);
+        if (delayMs > 0) {
+            const cs::Conveyer& conveyer = cs::Conveyer::instance();
+            const bool all = seats.find("all") != std::string::npos || seats.find_first_of("0123456789") == std::string::npos;
+            cs::PublicKeys now;
+            cs::PublicKeys later;
+            for (size_t i = 0; i < conveyer.confidantsCount(); ++i) {
+                bool delayed = all;
+                if (!delayed) {
+                    std::string list = seats;
+                    std::replace(list.begin(), list.end(), ',', ' ');
+                    std::istringstream is(list);
+                    for (int seat; is >> seat;) {
+                        delayed = delayed || seat == static_cast<int>(i);
+                    }
+                }
+                (delayed ? later : now).push_back(conveyer.confidantByIndex(i));
+            }
+            const cs::RoundNumber round = conveyer.currentRoundNumber();
+            cslog() << "NODE> test hook: stage 1 of R-" << round << "." << static_cast<int>(subRound_) << " T" << static_cast<int>(stageOneInfo.sender)
+                    << " delayed " << delayMs << " ms to " << later.size() << " of " << conveyer.confidantsCount() << " confidants";
+            if (!now.empty()) {
+                sendBroadcastIfNoConnection(now, MsgTypes::FirstStage, round, subRound_, stageOneInfo.signature, stageOneInfo.message);
+            }
+            cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy,
+                [this, later, round, subRound = subRound_, signature = stageOneInfo.signature, message = stageOneInfo.message]() {
+                    if (cs::Conveyer::instance().currentRoundNumber() != round || subRound != subRound_) {
+                        cslog() << "NODE> test hook: stage 1 of R-" << round << " not sent to " << later.size() << " confidants, the round is over";
+                        return;
+                    }
+                    sendBroadcastIfNoConnection(later, MsgTypes::FirstStage, round, subRound, signature, message);
+                });
+            return;
+        }
+    }
+#endif
     sendConfidants(MsgTypes::FirstStage, cs::Conveyer::instance().currentRoundNumber(), subRound_, stageOneInfo.signature, stageOneInfo.message);
 
     csmeta(csdetails) << "Sent message size " << stageOneInfo.message.size();

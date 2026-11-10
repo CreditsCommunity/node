@@ -55,6 +55,10 @@ on:
       node_alt_ref:
         description: 'Branch or commit of this repository built and run by the even nodes, the odd nodes run this run''s node; "official" = the official 4.2.532 node with the CI test-network hooks (the second nightly run uses it; empty = all the same)'
         default: ''
+      extra_env:
+        description: 'More run.sh settings, KEY=VALUE separated by spaces (e.g. "NET_FAULT=delay NET_FAULT_NODES=3 NET_FAULT_DIR=egress STAGE1_DELAY_NODES=3")'
+        required: false
+        type: string
       restart_nodes:
         description: 'Nodes stopped and restarted together in the restart test, e.g. "6 7" (empty = the last node)'
         default: ''
@@ -316,6 +320,7 @@ jobs:
           CONTRACT_LOAD: ${{ inputs.contract_load || '' }}
           SAMPLE_CONTRACTS: ${{ inputs.sample_contracts || '0' }}
           RESTART_NODES: ${{ inputs.restart_nodes || '' }}
+          EXTRA_ENV: ${{ inputs.extra_env || '' }}
           FUND: '1'
           LOAD_SECONDS: ${{ inputs.sample_contracts == '1' && '60' || '300' }}
           WORK: ${{ github.workspace }}/testnet-run
@@ -325,6 +330,9 @@ jobs:
             IFS=, read -r CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE <<< "$CONTRACT_LOAD"
             export CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE
           fi
+          for kv in $EXTRA_ENV; do
+            case "$kv" in [A-Z_]*=*) export "$kv"; echo "extra: $kv" ;; *) echo "bad extra_env entry '$kv'"; exit 1 ;; esac
+          done
           ci/testnet/run.sh build/client/node
 
       - name: Resource usage

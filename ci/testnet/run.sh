@@ -77,7 +77,13 @@
 #        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
-#        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
+#        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up.
+#        delay: NET_FAULT_DELAY_MS (default 250) +- NET_FAULT_JITTER_MS (default 150), normal distribution.
+#        NET_FAULT_DIR (default both): egress = only what the faulty nodes send is affected, ingress =
+#        only what is sent to them
+#        STAGE1_DELAY_NODES (comma separated, default none; nodes of this build): those nodes send their
+#        stage 1 STAGE1_DELAY_MS (default 2500) ms late to the seats STAGE1_DELAY_SEATS (default all, or
+#        confidant indices comma separated), the test hook of Node::sendStageOne (./testnet-stage1-delay)
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
@@ -428,6 +434,10 @@ NET_FAULT_NODES=${NET_FAULT_NODES:-}
 NET_FAULT_AT=${NET_FAULT_AT:-150}
 NET_FAULT_SECONDS=${NET_FAULT_SECONDS:-0}
 NET_FAULT_PCT=${NET_FAULT_PCT:-10}
+NET_FAULT_DIR=${NET_FAULT_DIR:-both}
+STAGE1_DELAY_NODES=${STAGE1_DELAY_NODES:-}
+STAGE1_DELAY_MS=${STAGE1_DELAY_MS:-2500}
+STAGE1_DELAY_SEATS=${STAGE1_DELAY_SEATS:-all}
 SLOW_NODES=${SLOW_NODES:-}
 SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
@@ -441,7 +451,7 @@ case "$NET_FAULT" in
     "") NETEM="" ;;
     loss) NETEM="loss ${NET_FAULT_PCT}%" ;;
     corrupt) NETEM="corrupt ${NET_FAULT_PCT}%" ;;
-    delay) NETEM="delay 250ms 150ms distribution normal" ;;
+    delay) NETEM="delay ${NET_FAULT_DELAY_MS:-250}ms ${NET_FAULT_JITTER_MS:-150}ms distribution normal" ;;
     reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50% duplicate 5%" ;;
     duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
     partition) NETEM="loss 100%" ;;
@@ -449,6 +459,7 @@ case "$NET_FAULT" in
     *) echo "bad NET_FAULT '$NET_FAULT'"; exit 1 ;;
 esac
 [ -z "$NET_FAULT" ] || [ -n "$NET_FAULT_NODES" ] || { echo "NET_FAULT needs NET_FAULT_NODES"; exit 1; }
+case "$NET_FAULT_DIR" in both|egress|ingress) ;; *) echo "bad NET_FAULT_DIR '$NET_FAULT_DIR'"; exit 1 ;; esac
 WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
@@ -727,6 +738,11 @@ done
 # test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
 [ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
 [ "$CORRUPT_NODE" -eq 0 ] || : > "$WORK/n$CORRUPT_NODE/testnet-corrupt-pieces"
+for i in ${STAGE1_DELAY_NODES//,/ }; do
+    alt_node "$i" && { echo "STAGE1_DELAY_NODES: n$i runs BIN_ALT, which has no test hook"; exit 1; }
+    echo "$STAGE1_DELAY_MS ${STAGE1_DELAY_SEATS//,/ }" > "$WORK/n$i/testnet-stage1-delay"
+    echo "stage-1 delay: n$i sends its stage 1 $STAGE1_DELAY_MS ms late to seats $STAGE1_DELAY_SEATS"
+done
 if [ "$JOIN_SOURCES" = file ]; then
     for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
         echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$WORK/n$JOIN_NODE/snapshot_sources.txt"
@@ -781,9 +797,9 @@ net_fault_on() {
     sudo tc qdisc add dev lo parent 1:4 handle 40: netem $NETEM
     sudo tc filter add dev lo parent 1:0 protocol ip prio 1 handle 0x40 fw flowid 1:4
     for i in ${NET_FAULT_NODES//,/ }; do
-        sudo iptables -t mangle -A OUTPUT -m cgroup --path "cstest-$i" -j MARK --set-mark 0x40 \
+        [ "$NET_FAULT_DIR" = ingress ] || sudo iptables -t mangle -A OUTPUT -m cgroup --path "cstest-$i" -j MARK --set-mark 0x40 \
             || echo "net fault: cannot mark the packets of n$i (no xt_cgroup), only those sent to it"
-        sudo tc filter add dev lo parent 1:0 protocol ip prio 2 u32 \
+        [ "$NET_FAULT_DIR" = egress ] || sudo tc filter add dev lo parent 1:0 protocol ip prio 2 u32 \
             match ip dport $((BASE_PORT + i)) 0xffff flowid 1:4
     done
 }
