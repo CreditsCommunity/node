@@ -151,6 +151,8 @@ public:
 
     // consensus communication
     void sendStageOne(const cs::StageOne&);
+    // sends the own stage 1 again directly to every confidant a little later (see node.cpp)
+    void resendStageOne(const cs::StageOne&);
     void sendStageTwo(cs::StageTwo&);
     void sendStageThree(cs::StageThree&);
 

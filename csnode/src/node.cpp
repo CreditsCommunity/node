@@ -3132,8 +3132,42 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
     }
 #endif
     sendConfidants(MsgTypes::FirstStage, cs::Conveyer::instance().currentRoundNumber(), subRound_, stageOneInfo.signature, stageOneInfo.message);
+    resendStageOne(stageOneInfo);
 
     csmeta(csdetails) << "Sent message size " << stageOneInfo.message.size();
+}
+
+// The stage 1 goes to a confidant over the connection to it, or, without one, through the relay
+// network only (Transport::sendBroadcastIfNoConnection); a confidant this node cannot be connected
+// to yet (a connection just being opened, a node behind NAT with its first round as a confidant)
+// may get it late, after the others gave up waiting at stage 2. The same signed message is sent
+// again directly to every confidant a little later: Transport::sendDirect queues it on the
+// connection being opened and delivers it as soon as that connection is up. A receiver that holds
+// the message already ignores it (SolverCore::gotStageOne: same timestamp), so nothing the
+// consensus computes changes; the receivers only get the message sooner.
+void Node::resendStageOne(const cs::StageOne& stageOneInfo) {
+    constexpr int kResendDelaysMs[] = {400, 1200};
+    const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
+    for (int delayMs : kResendDelaysMs) {
+        cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy,
+            [this, round, subRound = subRound_, sender = stageOneInfo.sender, signature = stageOneInfo.signature, message = stageOneInfo.message, delayMs]() {
+                const cs::Conveyer& conveyer = cs::Conveyer::instance();
+                if (myLevel_ != Level::Confidant || conveyer.currentRoundNumber() != round || subRound != subRound_
+                    || !conveyer.isConfidantExists(sender) || conveyer.confidantByIndex(sender) != nodeIdKey_) {
+                    return;
+                }
+                size_t sent = 0;
+                for (const auto& key : conveyer.confidants()) {
+                    if (key == nodeIdKey_) {
+                        continue;
+                    }
+                    transport_->sendDirect(formPacket(BaseFlags::Compressed, MsgTypes::FirstStage, round, subRound, signature, message), key);
+                    ++sent;
+                }
+                csdebug() << "NODE> stage 1 of R-" << round << "." << static_cast<int>(subRound) << " sent again directly to " << sent
+                          << " confidants after " << delayMs << " ms";
+            });
+    }
 }
 
 void Node::getStageOne(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
