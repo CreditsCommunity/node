@@ -83,7 +83,9 @@
 #        only what is sent to them
 #        STAGE1_DELAY_NODES (comma separated, default none; nodes of this build): those nodes send their
 #        stage 1 STAGE1_DELAY_MS (default 2500) ms late to the seats STAGE1_DELAY_SEATS (default all, or
-#        confidant indices comma separated), the test hook of Node::sendStageOne (./testnet-stage1-delay)
+#        confidant indices comma separated), the test hook of Node::sendStageOne (./testnet-stage1-delay);
+#        their stage-1 replies to requests are delayed as much. STAGE1_RESEND=0: the nodes of this
+#        build do not send their stage 1 again directly (Node::resendStageOne off, the behaviour before)
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
@@ -438,6 +440,7 @@ NET_FAULT_DIR=${NET_FAULT_DIR:-both}
 STAGE1_DELAY_NODES=${STAGE1_DELAY_NODES:-}
 STAGE1_DELAY_MS=${STAGE1_DELAY_MS:-2500}
 STAGE1_DELAY_SEATS=${STAGE1_DELAY_SEATS:-all}
+STAGE1_RESEND=${STAGE1_RESEND:-1}
 SLOW_NODES=${SLOW_NODES:-}
 SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
@@ -743,6 +746,12 @@ for i in ${STAGE1_DELAY_NODES//,/ }; do
     echo "$STAGE1_DELAY_MS ${STAGE1_DELAY_SEATS//,/ }" > "$WORK/n$i/testnet-stage1-delay"
     echo "stage-1 delay: n$i sends its stage 1 $STAGE1_DELAY_MS ms late to seats $STAGE1_DELAY_SEATS"
 done
+if [ "$STAGE1_RESEND" = 0 ]; then
+    for i in $(seq 1 "$ALL_NODES"); do
+        alt_node "$i" || : > "$WORK/n$i/testnet-stage1-no-resend"
+    done
+    echo "stage-1 resend: off on the nodes of this build"
+fi
 if [ "$JOIN_SOURCES" = file ]; then
     for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
         echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$WORK/n$JOIN_NODE/snapshot_sources.txt"

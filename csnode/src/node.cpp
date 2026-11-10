@@ -3127,6 +3127,7 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
                     }
                     sendBroadcastIfNoConnection(later, MsgTypes::FirstStage, round, subRound, signature, message);
                 });
+            resendStageOne(stageOneInfo);
             return;
         }
     }
@@ -3147,6 +3148,12 @@ void Node::sendStageOne(const cs::StageOne& stageOneInfo) {
 // consensus computes changes; the receivers only get the message sooner.
 void Node::resendStageOne(const cs::StageOne& stageOneInfo) {
     constexpr int kResendDelaysMs[] = {400, 1200};
+#ifdef CREDITS_TESTNET
+    // test-network builds only (ci/testnet/run.sh STAGE1_RESEND=0): the behaviour before this change
+    if (std::ifstream off("testnet-stage1-no-resend"); off) {
+        return;
+    }
+#endif
     const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
     for (int delayMs : kResendDelaysMs) {
         cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy,
@@ -3508,6 +3515,29 @@ void Node::sendStageReply(const uint8_t sender, const cs::Signature& signature, 
         return;
     }
 
+#ifdef CREDITS_TESTNET
+    // test-network builds only: a stage-1 reply leaves as late as the stage 1 itself (./testnet-stage1-delay),
+    // so that the request the others make at stage 2 cannot shortcut the delay
+    if (msgType == MsgTypes::FirstStage) {
+        if (std::ifstream hook("testnet-stage1-delay"); hook) {
+            int delayMs = 0;
+            hook >> delayMs;
+            if (delayMs > 0) {
+                const cs::RoundNumber round = conveyer.currentRoundNumber();
+                cslog() << "NODE> test hook: stage-1 reply of R-" << round << " to T" << static_cast<int>(requester) << " delayed " << delayMs << " ms";
+                cs::Timer::singleShot(delayMs, cs::RunPolicy::CallQueuePolicy,
+                    [this, round, requester, subRound = subRound_, signature, message]() {
+                        const cs::Conveyer& c = cs::Conveyer::instance();
+                        if (c.currentRoundNumber() != round || subRound != subRound_ || !c.isConfidantExists(requester)) {
+                            return;
+                        }
+                        sendBroadcastIfNoConnection(c.confidantByIndex(requester), MsgTypes::FirstStage, round, subRound, signature, message);
+                    });
+                return;
+            }
+        }
+    }
+#endif
     sendBroadcastIfNoConnection(conveyer.confidantByIndex(requester), msgType, cs::Conveyer::instance().currentRoundNumber(), subRound_, signature, message);
     csmeta(csdetails) << "done";
 }
