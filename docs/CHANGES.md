@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #182 | ci: `mainnet-join.yml`, the Linux, Windows and macOS packages each start on mainnet with an empty database, fetch their snapshot over p2p from a named source and must log the same state digests (run with a `mainnet-join-*` tag or manually) |
 
 ## community.18.1 — 2026-11-09
 
