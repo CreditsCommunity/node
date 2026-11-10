@@ -45,6 +45,7 @@ lines under the new release.
 | PR | Change |
 |---|---|
 | #181 | docs: the design documents of snapshot serving over p2p and of backward sync (`docs/specs`), each with a note on what was implemented and where the code differs |
+| #182 | ci: `mainnet-join.yml`, the Linux, Windows and macOS packages each start on mainnet with an empty database, fetch their snapshot over p2p from a named source and must log the same state digests (run with a `mainnet-join-*` tag or manually) |
 
 ## community.18.1 — 2026-11-09
 
