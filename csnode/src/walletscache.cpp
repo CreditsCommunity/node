@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <map>
+#include <sstream>
 
 #include <blockchain.hpp>
 #include <csdb/amount_commission.hpp>
@@ -164,7 +165,7 @@ void WalletsCache::Updater::loadNextBlock(const csdb::Pool& pool,
     }
 
     if (!inverse) {
-        applyKnownStateCorrections(pool, confidants);
+        applyKnownStateCorrections(pool, confidants, blockchain);
     }
 
     auto& transactions = pool.transactions();
@@ -455,70 +456,84 @@ void WalletsCache::Updater::fundConfidantsWalletsWithExecFee(const csdb::Transac
     );
 }
 
-void WalletsCache::Updater::applyKnownStateCorrections(const csdb::Pool& pool, const cs::ConfidantsKeys& confidants) {
+void WalletsCache::Updater::applyKnownStateCorrections(const csdb::Pool& pool, const cs::ConfidantsKeys& confidants,
+                                                       const BlockChain& blockchain) {
     const auto& corrections = knownStateCorrections();
     if (corrections.empty() || confidants.empty()) {
         return;
     }
-    bool prepared = false;
-    std::vector<csdb::Amount> rewards;
-    cs::Bytes realTrusted;
-    std::vector<csdb::Amount> stakes;
-    csdb::Amount mined = 0;
+    // cheap filters first: the network and the first block any entry can be proven at
+    const uint64_t uuid = blockchain.uuid();
+    bool candidate = false;
     for (const auto& c : corrections) {
-        auto it = std::find(confidants.begin(), confidants.end(), c.wallet);
-        if (it == confidants.end()) {
-            continue;
+        if (c.networkUuid == uuid && pool.sequence() >= c.fromSequence &&
+            std::find(confidants.begin(), confidants.end(), c.wallet) != confidants.end()) {
+            candidate = true;
+            break;
         }
-        const size_t idx = static_cast<size_t>(it - confidants.begin());
-        if (!prepared) {
-            prepared = true;
-            realTrusted = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
-            rewards = getRewardDistribution(pool);
-            if (realTrusted.size() != confidants.size() || rewards.size() != confidants.size()) {
-                return;
-            }
-            for (const auto& r : rewards) {
-                mined += r;
-            }
-            if (mined <= csdb::Amount{ 0 }) {
-                return;
-            }
-            for (size_t i = 0; i < confidants.size(); ++i) {
-                if (realTrusted[i] == kUntrustedMarker) {
-                    stakes.emplace_back(0);
-                    continue;
-                }
-                auto wd = getWalletData(confidants[i]);
-                stakes.push_back(confidantStake(wd.balance_, wd.delegateSources_.get()));
-            }
-            // the stored split is the one the writer computed from the majority's stakes
-            if (blockRewardSplit(stakes, realTrusted, mined) == rewards) {
-                return;  // this node's stakes give the stored split: nothing to correct
-            }
-        }
-        if (realTrusted[idx] == kUntrustedMarker) {
-            continue;
-        }
-        auto wd = getWalletData(c.wallet);
-        std::vector<csdb::Amount> corrected = stakes;
-        corrected[idx] = confidantStake(wd.balance_ + c.delta, wd.delegateSources_.get());
-        if (blockRewardSplit(corrected, realTrusted, mined) != rewards) {
-            static uint64_t unexplained = 0;
-            if (unexplained++ % 1000 == 0) {
-                cswarning() << kLogPrefix << "block " << pool.sequence() << ": the stored reward split differs from this node's stakes, "
-                    << "and the known correction (" << c.note << ") does not explain it (" << unexplained << " such blocks so far)";
-            }
-            continue;
-        }
-        wd.balance_ += c.delta;
-        data_.multiWallets_->onWalletCacheUpdated(wd);
-        logOperation("Known state correction applied: +", c.wallet, c.delta);
-        cslog() << kLogPrefix << "block " << pool.sequence() << " proves the known state correction (" << c.note << "): balance of "
-            << EncodeBase58(c.wallet.data(), c.wallet.data() + c.wallet.size()) << " += " << c.delta.to_string()
-            << " -> " << wd.balance_.to_string() << "; this node's reward split now equals the stored one";
-        return;  // one correction per block: the stakes computed above are stale now
     }
+    if (!candidate) {
+        return;
+    }
+
+    const cs::Bytes realTrusted = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
+    const std::vector<csdb::Amount> rewards = getRewardDistribution(pool);
+    std::map<cs::PublicKey, WalletData> read;  // keeps delegateSources_ alive while deciding
+    StateCorrectionBlock block;
+    block.networkUuid = uuid;
+    block.sequence = pool.sequence();
+    block.stakingOn = Consensus::stakingOn;   // as SolverCore::setBlockReward
+    block.confidants = &confidants;
+    block.realTrusted = &realTrusted;
+    block.storedReward = &rewards;
+    const auto decision = decideKnownStateCorrection(corrections, block, [&](const cs::PublicKey& key) {
+        auto it = read.find(key);
+        if (it == read.end()) {
+            it = read.emplace(key, getWalletData(key)).first;
+        }
+        return StateCorrectionWallet{ it->second.balance_, it->second.delegateSources_.get() };
+    });
+    if (decision.verdict == StateCorrectionVerdict::None) {
+        return;
+    }
+
+    const auto& c = corrections[decision.entry];
+    if (decision.verdict != StateCorrectionVerdict::Apply) {
+        auto& misses = data_.stateCorrectionMisses_;
+        if (misses.size() < corrections.size()) {
+            misses.resize(corrections.size(), 0);
+        }
+        if (misses[decision.entry]++ % 1000 == 0) {
+            if (decision.verdict == StateCorrectionVerdict::Unexplained) {
+                cswarning() << kLogPrefix << "block " << pool.sequence() << ": the stored reward split differs from this node's stakes, "
+                    << "and the known correction (" << c.note << ") does not explain it (" << misses[decision.entry] << " such blocks so far)";
+            }
+            else {
+                cswarning() << kLogPrefix << "block " << pool.sequence() << " proves the known state correction (" << c.note
+                    << "), but a counterpart balance is below its adjustment: nothing applied (" << misses[decision.entry]
+                    << " such blocks so far)";
+            }
+        }
+        return;
+    }
+
+    // the proven wallet and its counterparts, in one step
+    auto wd = getWalletData(c.wallet);
+    wd.balance_ += c.delta;
+    data_.multiWallets_->onWalletCacheUpdated(wd);
+    logOperation("Known state correction applied: +", c.wallet, c.delta);
+    std::ostringstream counterpartsLog;
+    for (const auto& adj : c.counterparts) {
+        auto cd = getWalletData(adj.wallet);
+        cd.balance_ += adj.delta;
+        data_.multiWallets_->onWalletCacheUpdated(cd);
+        logOperation("Known state correction applied (counterpart): ", adj.wallet, adj.delta);
+        counterpartsLog << ", balance of " << EncodeBase58(adj.wallet.data(), adj.wallet.data() + adj.wallet.size()) << " += "
+                        << adj.delta.to_string() << " -> " << cd.balance_.to_string();
+    }
+    cslog() << kLogPrefix << "block " << pool.sequence() << " proves the known state correction (" << c.note << "): balance of "
+        << EncodeBase58(c.wallet.data(), c.wallet.data() + c.wallet.size()) << " += " << c.delta.to_string()
+        << " -> " << wd.balance_.to_string() << counterpartsLog.str() << "; this node's reward split now equals the stored one";
 }
 
 std::vector<csdb::Amount> WalletsCache::Updater::getRewardDistribution(const csdb::Pool& pool) {

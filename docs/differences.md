@@ -292,16 +292,32 @@ consensus rules.
   part in the rounds.
 
 - **Known state corrections.** The lineage of the published pruned snapshots synced the dice-contract
-  blocks of October 2026 with the official replay rule above, so it holds one contract-state fee
-  (0.008740234375 CS) less for `7hWM6wvs…` than the majority that executed the contract. That wallet
-  is a confidant in half of the rounds, and every reward split a community node signs for it differs
-  from the majority's by that fee, which puts the node in the stage-3 minority. `csnode/statecorrection`
-  keeps a table of such known differences. A correction is applied once, at the first block that
-  proves it: the wallet is a trusted confidant of the block, the block's stored reward split (signed
-  by the majority) differs from the one this node's stakes give, and it is reproduced exactly with
-  the delta applied. A node whose state is already right never applies it, an applied correction is
-  never applied twice, and a block that neither value explains is only logged. The node logs the
-  block that proved the correction and the wallet's new balance.
+  blocks of 2026-06-05 with the official replay rule above. The payout 176760929.2 (block
+  176,760,929) pays `MooNRor8…` the win of its call 176760925.1, whose fee already includes the
+  emitted transaction's fee. The replay of that contract state failed, the stale `ref_execute`
+  still pointed to the previous successful call, by `7hWM6wvs…`, and the payout's contract-state
+  fee (0.008740234375 CS) was charged to `7hWM6wvs…` as well: that lineage holds one fee less for
+  `7hWM6wvs…` than the majority that executed the contract. `MooNRor8…` was the expected
+  counterpart, but the nodes of the majority report the same `MooNRor8…` balance as that lineage
+  (public API of 8 majority and 3 minority nodes at block 187,731,527, 2026-11-10, with `7hWM6wvs…`
+  one fee apart on the same calls), so there is none to correct. `7hWM6wvs…` is a confidant in half
+  of the rounds, and every reward split a community node signs for it differs from the majority's
+  by that fee, which puts the node in the stage-3 minority. `csnode/statecorrection` keeps a table
+  of such known differences: the proven wallet, its delta, and optional counterpart adjustments
+  applied in the same step (counterparts are not proven by the reward split; they come from the
+  transaction that caused the difference). An entry applies only on its network (the chain uuid
+  of mainnet, also known to nodes started from a snapshot; never on the test network or private
+  networks) and from the block that caused it (176,760,929). A correction is applied once, at the
+  first block that proves it: the proven wallet is a trusted confidant of the block, staking is
+  on, the block's stored reward split (signed by the majority) differs from the one this node's
+  stakes give, and it is reproduced exactly with the delta applied. If a counterpart's balance is
+  below its adjustment, nothing is applied and a warning is logged: no balance is made negative. A
+  node whose state is already right never applies it, an applied correction is never applied
+  twice, and a block that neither value explains is only logged (rate-limited per entry). The node
+  logs the block that proved the correction and the new balances of every wallet it changed.
+  Rounds where the trusted majority is the uncorrected group may still put a corrected node in the
+  minority: the correction makes the node agree with the network majority, not with every round's
+  trusted majority.
 
 Official nodes on the side that keeps its block behave as before; mixed networks do not fork (CI:
 equal state digests with official binaries on half of the nodes, and the same share of signed
