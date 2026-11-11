@@ -14,9 +14,11 @@ Counter state.
 
 It also deploys Caller, whose callCounter() reaches Counter through invokeExternalContract, and
 calls it once; the result is only reported. Contract-to-contract calls do not work with the
-mainnet node and executor: the node refuses methods declaring @UsingContract
-(Violations::SubsequentCall), and executor build 1518 fails an undeclared invokeExternalContract
-with an AccessControlException (its configuration is created lazily inside the contract sandbox).
+mainnet node and executor: executor build 1518 fails every invokeExternalContract, declared or
+not, with an AccessControlException (its configuration is created lazily inside the contract
+sandbox). The node does not refuse methods declaring @UsingContract: it looks for an annotation
+named "Contract", while 1518 reports com.credits.scapi.annotations.UsingContract, so the call
+reaches the executor. Violations::SubsequentCall applies only to calls that list usedContracts.
 
 ContractAllMethodsGet must report the @Getter annotations of samples/contracts/Counter.java.
 
@@ -158,8 +160,7 @@ public class Dice extends SmartContract {
 }
 """
 
-# no @UsingContract: the node refuses any call to a method that declares one (Violations::SubsequentCall,
-# checked by the API and by IterValidator), so the call is a plain invokeExternalContract
+# a plain invokeExternalContract, without @UsingContract
 CALLER = """import com.credits.scapi.v0.SmartContract;
 
 public class Caller extends SmartContract {
@@ -178,7 +179,8 @@ public class Caller extends SmartContract {
 }
 """
 
-# the same call declared with @UsingContract: the node refuses it (Violations::SubsequentCall)
+# the same call declared with @UsingContract: the annotation name does not match what the node looks
+# for, so the call reaches the executor and fails there like the undeclared one
 CALLER_DECLARED = """import com.credits.scapi.annotations.UsingContract;
 import com.credits.scapi.v0.SmartContract;
 
