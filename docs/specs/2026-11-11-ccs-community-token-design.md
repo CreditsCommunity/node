@@ -54,7 +54,10 @@ Verified in `smart-contract-api` and from what we know of the mainnet.
 
 **What it cannot do:**
 - **It cannot see blocks, rounds, confidants or rewards.** Participation in consensus must therefore be reported to it (section 7).
-- **It cannot call other contracts.** Cross-contract calls are disabled on mainnet in practice. So token, reserve, market, registry, service payments, committee and participation ledger must all live in **one contract**.
+- **It cannot call other contracts, and nothing passes between two contracts, not even CS.** A contract deals only with wallets: a wallet calls or pays it, and it pays a wallet. So:
+  - token, reserve, market, registry, service payments, committee and participation ledger must all live in **one contract**;
+  - a service can be paid only from a wallet, never by another contract;
+  - a replacement contract cannot receive the reserve directly (section 10).
 
 **Risks to design and test for:**
 - **Emitted CS transactions:**
@@ -212,15 +215,16 @@ The parameters are automatic and nobody can change them. A committee exists only
 **Powers:** three of the five must approve, each with an ordinary call from their own wallet.
 - **Pause:** buy, transfer, registry and service payments stop at once. Selling back to CS stays open. The pause expires by itself after 14 days unless renewed.
 - **Restore:** ends a pause.
-- **Replace:**
+- **Replace** **[owner: the reserve moves through the holders' wallets]**:
   - the committee names the address of a new contract that is already deployed;
-  - the new contract carries the balances and stocks of the old one, which anyone can verify through the API;
-  - after a 14-day notice the old contract sends its CS reserve and stocks to that address and stops for good;
-  - during the notice everyone can sell back and leave.
+  - after a 14-day notice the old contract enters **exit mode**: no purchases, transfers, registry or service payments, only the two operations below; its reserve and floor fund never move as a whole;
+  - **exit:** a holder sells CCS back to the old contract for CS, as always;
+  - **move:** in one wallet action, the old contract takes the holder's CCS and pays the holder's share of reserve and floor fund to the holder's wallet. The wallet then pays that CS into the new contract, which credits the equivalent new CCS;
+  - **how the new contract recognises movers:** it cannot read the old one, so community nodes read the moves from the old contract and confirm them to the new one, with the same quorum as participation reports (section 7). A deposit that is not matched by a confirmed move is an ordinary purchase;
+  - node wallets move automatically after the operator confirms in the setup or the wallet; for everyone else it is one button in the wallet. Holders who do nothing stay on the old contract and can always exit;
+  - each mover pays two ordinary CS transaction fees.
 
-**What the committee cannot do:** change parameters, move funds anywhere other than a replacement announced 14 days earlier, assign CCS, or stop sales back to CS.
-
-**How the balances move** **[proposal]**: the old contract cannot be read by the new one, so the replacement is deployed with the final balances of the old contract, frozen at the start of the notice. During the notice the old contract accepts only sales back to CS, and the new contract replays those sales before it opens.
+**What the committee cannot do:** change parameters, move funds, assign CCS, or stop sales back to CS.
 
 ## 11. Economic simulation (before any code)
 
