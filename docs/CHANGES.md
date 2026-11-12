@@ -44,6 +44,7 @@ lines under the new release.
 
 | PR | Change |
 |---|---|
+| #187 | docs: `AGENTS.md` and `CLAUDE.md` for coding agents: build, tests, CI, conventions and the mainnet constraints (documentation only) |
 | #186 | ci: the comments of `ci/testnet/contracts.py` say why contract-to-contract calls fail: executor 1518 fails every `invokeExternalContract`; the node does not refuse `@UsingContract` methods (comments only) |
 
 ## community.18.2 — 2026-11-10
