@@ -205,7 +205,11 @@
 #        official nodes take the trusted seats as on mainnet. COMMUNITY_BOOTSTRAP says what the
 #        community nodes may do meanwhile: none (default) - nothing, the network must stay stalled
 #        until the official nodes are back; trusted - their own trusted.txt also lists every community
-#        node, the network must restart without them
+#        node, the network must restart without them; config - the community nodes run the community
+#        bootstrap fallback ([community_bootstrap] confidants = every community key, stall_minutes =
+#        COMMUNITY_STALL_MINUTES, default 2), the network must restart without them. COMMUNITY_BOOTSTRAP=config
+#        also runs without OFFICIAL_STOP_AT: the fallback must then never act (no "COMMUNITY BOOTSTRAP:"
+#        table started or taken), and with OFFICIAL_STOP_AT never before the official nodes stop
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -310,7 +314,8 @@ OFFICIAL_STOP_AT=${OFFICIAL_STOP_AT:-0}
 OFFICIAL_STOP_MINUTES=${OFFICIAL_STOP_MINUTES:-5}
 OFFICIAL_FUND=${OFFICIAL_FUND:-0}
 COMMUNITY_BOOTSTRAP=${COMMUNITY_BOOTSTRAP:-none}
-case "$COMMUNITY_BOOTSTRAP" in none|trusted) ;; *) echo "COMMUNITY_BOOTSTRAP must be none or trusted, got '$COMMUNITY_BOOTSTRAP'"; exit 1 ;; esac
+case "$COMMUNITY_BOOTSTRAP" in none|trusted|config) ;; *) echo "COMMUNITY_BOOTSTRAP must be none, trusted or config, got '$COMMUNITY_BOOTSTRAP'"; exit 1 ;; esac
+COMMUNITY_STALL_MINUTES=${COMMUNITY_STALL_MINUTES:-2}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -759,6 +764,18 @@ if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$COMMUNITY_BOOTSTRAP" = trusted ]; then
     echo "official stop: the community nodes list $(grep -c . "$WORK/n1/trusted.txt") initial confidants, the official nodes $TRUSTED_NODES"
 fi
 
+# COMMUNITY_BOOTSTRAP=config: the community bootstrap fallback on every node of this build, listing
+# every node of this build (the official nodes, even, have no such option)
+if [ "$COMMUNITY_BOOTSTRAP" = config ]; then
+    listed=""
+    for j in $(seq 1 "$NODES"); do alt_node "$j" || listed="$listed${listed:+,}${KEYS[$((j - 1))]}"; done
+    for i in $(seq 1 "$NODES"); do
+        alt_node "$i" && continue
+        printf '\n[community_bootstrap]\nconfidants=%s\nstall_minutes=%s\n' "$listed" "$COMMUNITY_STALL_MINUTES" >> "$WORK/n$i/config.ini"
+    done
+    echo "community bootstrap: on in every node of this build, $(tr ',' '\n' <<<"$listed" | grep -c .) keys listed, stall_minutes=$COMMUNITY_STALL_MINUTES"
+fi
+
 # test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
 [ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
 [ "$CORRUPT_NODE" -eq 0 ] || : > "$WORK/n$CORRUPT_NODE/testnet-corrupt-pieces"
@@ -1077,6 +1094,13 @@ official_stop() {
     for i in $OFFICIAL_NODES; do wait "${PIDS[$i]}" 2>/dev/null || true; REPORTED_DOWN[$i]=1; done
     local t_kill s0 b0 first_t=0 first_seq=0 c end
     t_kill=$(date +%s)
+    # the fallback must not have acted while the official nodes ran
+    for i in $COMMUNITY_NODES; do
+        if grep -aq 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log"; then
+            off_fail="${off_fail:+$off_fail; }n$i used the community bootstrap while the official nodes ran"
+            grep -a 'COMMUNITY BOOTSTRAP' "$WORK/n$i/node.log" | head -3
+        fi
+    done
     s0=$(community_max)
     b0=$(bootstrap_lines)
     echo "official stop: killed $(printf 'n%s ' $OFFICIAL_NODES)at once (round $seen); community head $s0, COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
@@ -2433,6 +2457,12 @@ if [ -n "$forks" ]; then
     exit 1
 fi
 
+# the community bootstrap fallback in a network that never lost its official nodes: never used
+if [ "$COMMUNITY_BOOTSTRAP" = config ] && [ "$OFFICIAL_STOP_AT" -eq 0 ]; then
+    used=$(grep -alE 'COMMUNITY BOOTSTRAP: (starting|taking)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+    [ -z "$used" ] || { grep -ah 'COMMUNITY BOOTSTRAP' "$WORK"/n*/node.log | head -5; echo "FAIL: the community bootstrap acted on $used"; exit 1; }
+    echo "community bootstrap: never used ($(grep -ah 'NODE> Bootstrap on' "$WORK"/n*/node.log | wc -l) regular bootstrap lines on all nodes)"
+fi
 [ "$OFFICIAL_STOP_AT" -eq 0 ] || echo "OFFICIAL STOP RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
 
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
