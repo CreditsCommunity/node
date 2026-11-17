@@ -47,6 +47,7 @@ const std::string BLOCK_NAME_HOST_ADDRESS = "host_address";
 const std::string BLOCK_NAME_POOL_SYNC = "pool_sync";
 const std::string BLOCK_NAME_STORAGE = "storage";
 const std::string BLOCK_NAME_SNAPSHOT = "snapshot";
+const std::string BLOCK_NAME_COMMUNITY_BOOTSTRAP = "community_bootstrap";
 const std::string BLOCK_NAME_API = "api";
 const std::string BLOCK_NAME_CONVEYER = "conveyer";
 const std::string BLOCK_NAME_EVENT_REPORTER = "event_report";
@@ -1084,6 +1085,7 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.snapshotData_ = parseSnapshotData(config);
+        result.communityBootstrapData_ = parseCommunityBootstrapData(config);
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -1355,6 +1357,54 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
     return result;
 }
 
+CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property_tree::ptree& config) {
+    CommunityBootstrapData result;
+    if (!config.count(BLOCK_NAME_COMMUNITY_BOOTSTRAP)) {
+        return result;
+    }
+    const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_COMMUNITY_BOOTSTRAP);
+    static const std::set<std::string> known = {"confidants", "stall_minutes"};
+    for (const auto& [key, value] : data) {
+        if (!known.count(key)) {
+            cswarning() << "config: [community_bootstrap] " << key << " is not a setting of this version, ignored";
+        }
+    }
+    if (data.count("confidants")) {
+        std::vector<std::string> keys;
+        boost::split(keys, data.get<std::string>("confidants"), boost::is_any_of(", \t"), boost::token_compress_on);
+        for (const auto& key : keys) {
+            if (key.empty()) {
+                continue;
+            }
+            std::vector<uint8_t> bytes;
+            if (!DecodeBase58(key, bytes) || bytes.size() != cscrypto::kPublicKeySize) {
+                cswarning() << "config: [community_bootstrap] confidants: " << key << " is not a node key, ignored";
+                continue;
+            }
+            cs::PublicKey publicKey;
+            std::copy(bytes.begin(), bytes.end(), publicKey.begin());
+            if (std::find(result.confidants.begin(), result.confidants.end(), publicKey) == result.confidants.end()) {
+                result.confidants.push_back(publicKey);
+            }
+        }
+    }
+    if (data.count("stall_minutes")) {
+        const auto text = data.get<std::string>("stall_minutes");
+        try {
+            size_t pos = 0;
+            const unsigned long long value = std::stoull(text, &pos);
+            if (pos != text.size() || value < 1 || value > 10'080) {
+                throw std::out_of_range(text);
+            }
+            result.stallMinutes = static_cast<size_t>(value);
+        }
+        catch (const std::exception&) {
+            cswarning() << "config: [community_bootstrap] stall_minutes=" << text << " is not 1..10080, using " << result.stallMinutes;
+        }
+    }
+    return result;
+}
+
 void Config::readApiData(const boost::property_tree::ptree& config) {
     if (!config.count(BLOCK_NAME_API)) {
         return;
@@ -1534,6 +1584,14 @@ bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs) {
     return !(lhs == rhs);
 }
 
+bool operator==(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs) {
+    return lhs.confidants == rhs.confidants && lhs.stallMinutes == rhs.stallMinutes;
+}
+
+bool operator!=(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs) {
+    return !(lhs == rhs);
+}
+
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs) {
     return lhs.maxPacketLifeTime == rhs.maxPacketLifeTime;
 }
@@ -1583,6 +1641,7 @@ bool operator==(const Config& lhs, const Config& rhs) {
         lhs.poolSyncData_ == rhs.poolSyncData_ &&
         lhs.apiData_ == rhs.apiData_ &&
         lhs.snapshotData_ == rhs.snapshotData_ &&
+        lhs.communityBootstrapData_ == rhs.communityBootstrapData_ &&
         lhs.alwaysExecuteContracts_ == rhs.alwaysExecuteContracts_ &&
         lhs.syncContractExecution_ == rhs.syncContractExecution_ &&
         lhs.compatibleVersion_ == rhs.compatibleVersion_ &&

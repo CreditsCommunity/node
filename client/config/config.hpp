@@ -98,6 +98,15 @@ struct SnapshotData {
     size_t fetchRateKbps = 0;                       // 0: unlimited
 };
 
+// [community_bootstrap]: a liveness fallback, off unless confidants lists keys
+// (csnode/include/csnode/communitybootstrap.hpp). After stall_minutes without a block, a round or a
+// regular bootstrap, the node may start and take a bootstrap table of initial confidants and these
+// keys, signed by its starter instead of the project. Read again by the config observer.
+struct CommunityBootstrapData {
+    std::vector<cs::PublicKey> confidants;          // community keys; empty: the fallback is off
+    size_t stallMinutes = 30;                       // minutes without progress before it may act, 1..10080
+};
+
 struct ApiData {
     // on by default:
     uint16_t port = 9090;
@@ -252,6 +261,10 @@ public:
         return storageData_;
     }
 
+    const CommunityBootstrapData& getCommunityBootstrapSettings() const {
+        return communityBootstrapData_;
+    }
+
     const ApiData& getApiSettings() const {
         return apiData_;
     }
@@ -393,6 +406,8 @@ private:
 public:
     // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
+    // the [community_bootstrap] section, off when it is missing or lists no valid key
+    static CommunityBootstrapData parseCommunityBootstrapData(const boost::property_tree::ptree& config);
     // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
     static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
 private:
@@ -448,6 +463,7 @@ private:
     PoolSyncData poolSyncData_;
     StorageData storageData_;
     SnapshotData snapshotData_;
+    CommunityBootstrapData communityBootstrapData_;
     ApiData apiData_;
 
     bool showBalanceChange_ = false;
@@ -497,6 +513,9 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs);
 
 bool operator==(const SnapshotData& lhs, const SnapshotData& rhs);
 bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs);
+
+bool operator==(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs);
+bool operator!=(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs);
 
 
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs);
