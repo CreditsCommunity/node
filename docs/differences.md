@@ -122,6 +122,49 @@ The official node has it only in its monitor and wallet builds. The cache follow
 standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
 rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
 
+### Community bootstrap fallback (expert option, off by default)
+
+Only the initial confidants (the `init_trusted` list, or special order 2) may restart a stalled
+network with a bootstrap table, and a table with any other key needs the project's signature. If
+all official nodes become unavailable at once, the initial confidants still running may be too few
+(fewer than 4), and the network stays stalled until the official nodes are back.
+
+The `[community_bootstrap]` section of `config.ini` adds a liveness fallback. It is off unless
+`confidants` lists keys:
+
+```ini
+[community_bootstrap]
+; community node keys (base58), comma or space separated; empty or missing: off
+confidants=<key1>,<key2>,...
+; minutes without progress before the fallback may act (1 to 10080, default 30)
+stall_minutes=30
+```
+
+With the list set, and only after `stall_minutes` in which the node saw no new block, no round
+package and no regular bootstrap table, and while no neighbour reports a block above its own:
+
+- a node whose key is an initial confidant or listed may start a bootstrap table of the initial
+  confidants and listed nodes that hold the highest block, as an initial confidant does; the table
+  is signed by its starter, not by the project;
+- a node with the list takes such a table only if it has more than half of the listed keys, each
+  key is an initial confidant or listed, and the starter's signature checks. The round window and
+  the stall check of every unsigned table still apply, and a node takes at most one such table per
+  half `round_elapse_time` unless it is larger.
+
+In normal operation nothing changes: blocks and round packages keep the fallback closed, a regular
+bootstrap table is handled exactly as before and always replaces a community one, and blocks,
+hashes and validation are unchanged. Official nodes, and community nodes without the list, drop a
+community table (it holds a key that is not an initial confidant and is not signed by the
+project); they then take the blocks written meanwhile through ordinary sync once they are back,
+as the `official-stop-*` scenarios of the robustness workflow check.
+
+Every node that should take part needs the same list: it only helps when more than half of the
+listed nodes are running. The set-up scripts and the Docker image do not offer the option; edit
+`config.ini` by hand (in Docker, `~/.credits/config.ini`). The risk it brings: if a network
+partition cuts more than half of the listed nodes off from the official nodes for longer than
+`stall_minutes`, while the official nodes keep producing blocks, the listed nodes restart on their
+own and the two sides write different blocks. Keep `stall_minutes` long.
+
 ## Start-up behaviour
 
 - **A banner names the release.** At start the console and the log show the CREDITS logo with
