@@ -44,6 +44,7 @@ lines under the new release.
 
 | PR | Change |
 |---|---|
+| #188 | csnode: community bootstrap fallback, an expert option off by default (`[community_bootstrap] confidants=`, `stall_minutes=`): after a long stall without blocks, rounds or regular bootstraps, nodes with the list may restart the network with a table of initial and listed keys signed by its starter; official nodes then sync the blocks. CI: `official-stop-*` and `community-bootstrap-quiet` robustness scenarios (consensus-adjacent, reviewed before merge) |
 | #187 | docs: `AGENTS.md` and `CLAUDE.md` for coding agents: build, tests, CI, conventions and the mainnet constraints (documentation only) |
 | #186 | ci: the comments of `ci/testnet/contracts.py` say why contract-to-contract calls fail: executor 1518 fails every `invokeExternalContract`; the node does not refuse `@UsingContract` methods (comments only) |
 
