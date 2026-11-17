@@ -211,6 +211,8 @@ def main():
     parser.add_argument("--amount", type=int, default=60000)
     parser.add_argument("--low-stake-nodes", type=int, default=0)
     parser.add_argument("--low-amount", type=int, default=1000)
+    # the even nodes' amount (0 = --amount): with official even nodes, more stake takes them the seats
+    parser.add_argument("--even-amount", type=int, default=0)
     parser.add_argument("--load-seconds", type=int, default=0)
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)
@@ -228,7 +230,9 @@ def main():
 
     failures = 0
     def funded(i):
-        return args.low_amount if i > len(nodes) - args.low_stake_nodes else args.amount
+        if i > len(nodes) - args.low_stake_nodes:
+            return args.low_amount
+        return args.even_amount if args.even_amount and i % 2 == 0 else args.amount
 
     for i, node in enumerate(nodes, 1):
         ok, message = send(client, master, node.pk, funded(i))

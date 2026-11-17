@@ -497,6 +497,20 @@ jobs:
           - name: bootstrap-livelock-rewards
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 REWARD_ROUND=100 LOAD_SECONDS=2400 TARGET_SEQ=3000
             manual: true
+          # if all official nodes become unavailable at once (node_alt_ref=official; run by name): 5
+          # official even nodes with more stake hold the trusted seats, 5 community odd nodes; n1-n5 are
+          # the genesis initial confidants. They are killed in a round they hold the majority of, stay
+          # down 5 minutes and start again. Without extra keys the network must stay stalled until
+          # they are back; with every community key in the community nodes' own trusted.txt the
+          # community nodes must restart it, and the official nodes must then take the same blocks
+          - name: official-stop-stalled
+            env: NODES=10 TRUSTED_NODES=5 OFFICIAL_STOP_AT=400 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=none RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          - name: official-stop-trusted
+            env: NODES=10 TRUSTED_NODES=5 OFFICIAL_STOP_AT=400 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=trusted RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
             official: 'no'   # needs a feature of this fork on an even node
