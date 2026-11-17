@@ -8,6 +8,7 @@
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
 #        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
+#        (INITIAL_NODES, comma separated: these nodes instead)
 #        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
 #        ROUND_ELAPSE_MS (default 20000): round_elapse_time of every node
 #        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
@@ -246,6 +247,12 @@ case "$TRUSTED_NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
     *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
 esac
+# INITIAL_NODES (comma separated, TRUSTED_NODES of them): these nodes are the initial confidants
+# instead of the first TRUSTED_NODES, e.g. a set the official (even) nodes hold the majority of
+INITIAL_NODES=${INITIAL_NODES:-$(seq -s, 1 "$TRUSTED_NODES")}
+[ "$(tr ',' '\n' <<<"$INITIAL_NODES" | sort -un | grep -c .)" -eq "$TRUSTED_NODES" ] \
+    || { echo "INITIAL_NODES must name $TRUSTED_NODES distinct nodes, got '$INITIAL_NODES'"; exit 1; }
+is_initial() { [[ ",$INITIAL_NODES," == *",$1,"* ]]; }
 # ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i, diag 9400 + i
 [ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
     || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
@@ -715,7 +722,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
-        [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
+        ! is_initial "$j" || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
         [ "$j" -ne "$i" ] && echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
@@ -757,8 +764,8 @@ done
 if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$COMMUNITY_BOOTSTRAP" = trusted ]; then
     for i in $(seq 1 "$NODES"); do
         official_node "$i" && continue
-        for j in $(seq $((TRUSTED_NODES + 1)) "$NODES"); do
-            official_node "$j" || echo "${KEYS[$((j - 1))]}" >> "$WORK/n$i/trusted.txt"
+        for j in $(seq 1 "$NODES"); do
+            is_initial "$j" || official_node "$j" || echo "${KEYS[$((j - 1))]}" >> "$WORK/n$i/trusted.txt"
         done
     done
     echo "official stop: the community nodes list $(grep -c . "$WORK/n1/trusted.txt") initial confidants, the official nodes $TRUSTED_NODES"
