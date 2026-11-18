@@ -270,3 +270,67 @@ TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnes) {
 TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnesAsync) {
     checkReplacedBlocksAreLoaded(true);
 }
+
+// The recovery path of BlockChain::removeLastBlock(): when the removed block cannot be read back, the
+// node removes it with pool_remove_last_repair(). That path must forget the block in the read cache
+// too, and a node restarted afterwards (the storage rescan fills the cache again) must read the blocks
+// saved after the removal, not the removed ones.
+namespace {
+
+csdb::Pool competing(const csdb::PoolHash& prev, cs::Sequence seq) {
+    csdb::Pool p(prev, seq);
+    p.add_user_field(1, std::string(100, static_cast<char>('z' - seq)));
+    EXPECT_TRUE(p.compose());
+    return p;
+}
+
+void checkRepairedBlockIsForgotten(bool asyncWrites) {
+    auto db = std::make_shared<MemoryDb>();
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    opt.writeBatchSize = 100;
+    opt.asyncWrites = asyncWrites;
+
+    const auto own = chain(4);
+    csdb::Pool other;
+    {
+        csdb::Storage storage;
+        ASSERT_TRUE(storage.open(opt));
+        for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+        ASSERT_TRUE(storage.flush());
+        ASSERT_EQ(storage.pool_load(3).hash(), own[3].hash());    // #3 now in the read cache
+
+        ASSERT_TRUE(storage.pool_remove_last_repair(3, own[3].hash()));
+        EXPECT_EQ(storage.size(), 3u);
+        EXPECT_EQ(storage.last_hash(), own[2].hash());
+        EXPECT_FALSE(storage.pool_load(3).is_valid()) << "the repaired block is still read from the cache";
+        EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+
+        other = competing(own[2].hash(), 3);
+        ASSERT_NE(other.hash(), own[3].hash());
+        ASSERT_TRUE(storage.pool_save(other));
+        EXPECT_EQ(storage.pool_load(3).hash(), other.hash());
+        ASSERT_TRUE(storage.flush());
+        storage.close();
+    }
+
+    // restart: the rescan reads every stored block and fills the cache from the database
+    csdb::Storage storage;
+    ASSERT_TRUE(storage.open(opt));
+    EXPECT_EQ(storage.size(), 4u);
+    EXPECT_EQ(storage.last_hash(), other.hash());
+    EXPECT_EQ(storage.pool_load(3).hash(), other.hash());
+    EXPECT_EQ(storage.pool_load(other.hash()).sequence(), 3u);
+    EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+    storage.close();
+}
+
+}  // namespace
+
+TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacement) {
+    checkRepairedBlockIsForgotten(false);
+}
+
+TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacementAsync) {
+    checkRepairedBlockIsForgotten(true);
+}
