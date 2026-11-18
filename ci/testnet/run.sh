@@ -2275,6 +2275,7 @@ fi
 # is for a scenario that provokes a reorg deeper than [params] max_auto_rollback on purpose.
 reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
 echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
+echo "UNWINDS REFUSED: $(grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null | wc -l) competing block(s) not vouched for by the node's confidants"
 guarded=$(grep -al 'LONGEST-CHAIN GUARD' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
 if [ -n "$guarded" ] && [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
     grep -ah 'LONGEST-CHAIN GUARD' "$WORK"/n*/node.log | head -3

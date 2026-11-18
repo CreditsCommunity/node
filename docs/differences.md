@@ -280,32 +280,38 @@ consensus rules.
   silently. The node keeps running and does not crash-loop; it simply stays on its chain until an
   operator decides.
 
-  Two extra checks sharpen this. First, a competing block that is **not a bootstrap block** triggers a
-  rollback only if its round confirmations verify against the confidants of the node's own last block —
-  the authority it already trusts — exactly as the block verifier checks a block from the network. A
-  block whose confirmations the node does not recognise cannot make it unwind; an honest micro-fork
-  still works, because the honest competing block at the same height was produced by the same elected trusted group. Second, a **bootstrap
-  block** carries no such confirmations and cannot be checked locally, so for it the depth bound plus
-  the operator is the only defence — which is exactly what this feature provides.
+  Before any of this, the competing block itself must be vouched for by authority the node already
+  recognises, or the node does not unwind at all, not even by one block. A competing block that is
+  **not a bootstrap block** needs round confirmations from a majority of the confidants of the node's
+  own last block, checked as the block verifier checks a block from the network, but more strictly
+  (no one-entry confirmation masks). An honest micro-fork passes, because the honest competing block
+  at the same height was produced by the same elected trusted group. A **bootstrap block** carries no
+  such confirmations, and its bootstrap flag alone proves nothing, so it passes only when it is
+  authenticated locally: its own signatures verify and its confidants are exactly those of a round
+  table this node itself accepted in the last few rounds. Otherwise the node keeps its chain and the
+  operator decides. Everything that passes is still subject to the depth bound.
 
   This is a local safety bound only: it changes how far this node unwinds on its own, never what a
   block contains or what the node accepts in normal operation, so it is invisible to other nodes and a
   mixed official/community network behaves exactly as before. Two settings tune it, both in `[params]`:
-  `max_auto_rollback=` sets the bound (default 1000; 0 means no bound, the official behaviour), and
-  `allow_deep_rollback=true` accepts a deliberate deep switch without any bound. The
+  `max_auto_rollback=` sets the bound (default 1000; 0 removes the depth bound, the authority check
+  stays), and
+  `allow_deep_rollback=true` accepts a deliberate switch: it lifts both the depth bound and the
+  check above, since the other chain's blocks are confirmed by confidants this node does not hold. The
   `CS_ALLOW_DEEP_ROLLBACK` environment variable does the same as the latter, for a one-off run. Either
   way the node must be restarted to apply the change.
 
-  **Interplay with the community bootstrap fallback.** The opt-in community bootstrap fallback
-  (PR #188, not merged yet) relies on the longer chain winning after a partition: the other side
-  unwinds its blocks down to the fork point. With this bound, a branch that would make a node unwind
-  more than `max_auto_rollback` blocks stops and waits for the operator instead, which is the safe
-  default for an unattended node, since locally a wanted and an unwanted longer chain look the same.
-  To keep the two features coherent, the guard has a hook (`setCommunityBootstrapFloor`): a node
-  that has itself taken a community bootstrap table may unwind back to the sequence it held when it
-  took the table without hitting the bound, because taking that table was already the operator's
-  decision. The fallback sets this hook once both changes are merged; until then, and below that
-  sequence, the ordinary bound applies and the operator decides.
+  **After a partition, and the community bootstrap fallback.** When both sides of a split keep
+  producing blocks, each side's blocks are confirmed by its own confidants. On reconnection a node on
+  the shorter side does not follow the longer chain on its own, whatever the depth, because that
+  chain's blocks are not confirmed by any confidants it holds: it keeps its chain and logs it, and the
+  operator sets `allow_deep_rollback` to switch. The official node unwinds to the longer chain without
+  asking. A single node or a minority that cannot reach consensus while cut off builds no branch and
+  simply syncs forward when it reconnects. The opt-in community bootstrap fallback (PR #188, not
+  merged yet) expects the longer chain to win after a partition; with this change that switch is an
+  operator decision. The guard keeps a hook for it (`setCommunityBootstrapFloor`): a node that took a
+  community bootstrap table may unwind back to the sequence where it took it without hitting the depth
+  bound, but only for blocks that pass the authority check above.
 
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
   with a request that takes exactly as long as the others wait for its stage-3. Depending on a few

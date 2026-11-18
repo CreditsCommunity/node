@@ -845,18 +845,14 @@ void BlockChain::setCommunityBootstrapFloor(cs::Sequence seq) {
 bool BlockChain::guardAutoRollback() {
     // operator override: accept a deliberate deep switch. Config ([params] allow_deep_rollback) or the
     // CS_ALLOW_DEEP_ROLLBACK environment variable; either one is enough.
-    static const bool allowDeepEnv = [] {
-        const char* v = std::getenv("CS_ALLOW_DEEP_ROLLBACK");
-        return v != nullptr && *v != '\0';
-    }();
-    const auto* config = cs::ConfigHolder::instance().config();
-    if (allowDeepEnv || (config != nullptr && config->allowDeepRollback())) {
+    if (deepRollbackApproved()) {
         return true;
     }
+    const auto* config = cs::ConfigHolder::instance().config();
     const uint64_t maxDepth = (config != nullptr) ? config->maxAutoRollbackDepth()
                                                   : Consensus::MaxAutoRollbackDepth;
     if (maxDepth == 0) {
-        return true; // max_auto_rollback=0: no bound, the official node's behaviour
+        return true; // max_auto_rollback=0: no depth bound (the authority gate still applies)
     }
 
     const cs::Sequence tip = lastSequence_.load();
@@ -896,15 +892,84 @@ bool BlockChain::guardAutoRollback() {
 // confirm our last block; a block without confirmations from that group fails and never triggers an
 // unwind. Bootstrap blocks carry no such confirmations and are handled by the depth floor plus operator,
 // so callers must check isBootstrap() before relying on this.
+bool BlockChain::deepRollbackApproved() {
+    static const bool allowDeepEnv = [] {
+        const char* v = std::getenv("CS_ALLOW_DEEP_ROLLBACK");
+        return v != nullptr && *v != '\0';
+    }();
+    const auto* config = cs::ConfigHolder::instance().config();
+    return allowDeepEnv || (config != nullptr && config->allowDeepRollback());
+}
+
 bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
-    std::string reason;
-    const auto trustedConfidants = getLastBlock().confidants();
-    const bool ok = cs::BlockVerifier::verifyConfirmations(competing, trustedConfidants, reason);
-    if (!ok) {
+    // Strict pre-checks for the unwind decision only; BlockVerifier::verifyConfirmations keeps the
+    // exceptions it has for normal block validation (sequence < 2, one-entry masks), which must not be
+    // enough to make this node unwind its own chain.
+    const auto fail = [&competing](const char* why) {
         csdebug() << kLogPrefix << "competing block #" << competing.sequence()
-                  << " not confirmed by our last block's confidants: " << reason;
+                  << " not confirmed by our last block's confidants: " << why;
+        return false;
+    };
+    if (!competing.is_valid() || competing.sequence() < 2) {
+        return fail("no confirmations to check");
     }
-    return ok;
+    const auto trustedConfidants = getLastBlock().confidants();
+    if (competing.numberConfirmations() == 0 || competing.roundConfirmations().empty()) {
+        return fail("no round confirmations");
+    }
+    const auto confMask = cs::Utils::bitsToMask(competing.numberConfirmations(), competing.roundConfirmationMask());
+    if (confMask.size() <= 1 || confMask.size() != trustedConfidants.size()) {
+        return fail("confirmation mask does not match our last block's confidants");
+    }
+    const size_t confirming = NodeUtils::realTrustedValue(confMask);
+    if (competing.roundConfirmations().size() != confirming) {
+        return fail("confirmation count does not match its mask");
+    }
+    if (confirming * 2 <= trustedConfidants.size()) {
+        return fail("fewer than a majority of our confidants confirm it");
+    }
+    std::string reason;
+    if (!cs::BlockVerifier::verifyConfirmations(competing, trustedConfidants, reason)) {
+        return fail(reason.c_str());
+    }
+    return true;
+}
+
+bool BlockChain::isBootstrapAuthenticatedLocally(const csdb::Pool& competing) const {
+    std::string reason;
+    if (!cs::BlockVerifier::verifySignatures(competing, reason)) {
+        csdebug() << kLogPrefix << "bootstrap block #" << competing.sequence() << " signatures: " << reason;
+        return false;
+    }
+    const auto& confidants = competing.confidants();
+    if (confidants.empty()) {
+        return false;
+    }
+    // a round table this node accepted itself (its bootstrap table was checked when it was taken)
+    const auto& conveyer = cs::Conveyer::instance();
+    if (conveyer.currentRoundTable().confidants == confidants) {
+        return true;
+    }
+    const cs::RoundNumber current = conveyer.currentRoundNumber();
+    for (cs::RoundNumber back = 0; back < 3 && back <= current; ++back) {
+        const cs::RoundTable* table = conveyer.roundTable(current - back);
+        if (table != nullptr && table->confidants == confidants) {
+            return true;
+        }
+    }
+    csdebug() << kLogPrefix << "bootstrap block #" << competing.sequence()
+              << " names confidants of no round table this node accepted";
+    return false;
+}
+
+bool BlockChain::competingBlockMayTriggerUnwind(const csdb::Pool& competing) const {
+    if (deepRollbackApproved()) {
+        return true; // operator path: a deliberate switch to a chain confirmed by other confidants
+    }
+    if (BlockChain::isBootstrap(competing)) {
+        return isBootstrapAuthenticatedLocally(competing);
+    }
+    return hasTrustedConfirmations(competing);
 }
 
 // - remove the last block from the top of blockchain
@@ -2415,23 +2480,23 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 cserror() << "BLOCKCHAIN> new pool\'s prev. hash is empty, don\'t write it, do not any harm to our blockchain";
                 return false;
             }
-            if (compromiseLastBlock(pool.previous_hash())) {
-                csdebug() << kLogPrefix << "compromise own last block and cancel store operation";
+            if (!competingBlockMayTriggerUnwind(pool)) {
+                // a competing block not vouched for by authority this node recognises (no strict
+                // confirmations by our last block's confidants, or a bootstrap flag that is not
+                // authenticated locally): never unwind our own chain for it, not even by marking our
+                // last block uncertain (which would let a later replacement remove it).
+                cslog() << kLogPrefix << "competing block #" << poolSequence
+                        << " is not authenticated by this node's confidants, keep own last block";
             }
-            else if (!BlockChain::isBootstrap(pool) && !hasTrustedConfirmations(pool)) {
-                // a non-bootstrap competing block not vouched for by authority this node recognises
-                // (its confirmations do not verify against our last block's confidants): never unwind
-                // our own chain for it. A block that only vouches for itself cannot make us roll back.
-                csdebug() << kLogPrefix << "competing block #" << poolSequence
-                          << " is not confirmed by our trusted confidants, keep own last block";
+            else if (compromiseLastBlock(pool.previous_hash())) {
+                csdebug() << kLogPrefix << "compromise own last block and cancel store operation";
             }
             else {
                 //if (lastSequence + 5ULL < cs::Conveyer::instance().currentRoundNumber()) {
                 //    arrangeBlocksInCache();
                 //}
-                // bootstrap block (not locally verifiable), or a competing block confirmed by our
-                // trusted confidants: unwind, but only within the depth bound that removeLastBlock
-                // enforces; beyond it the block is kept and the operator decides.
+                // authenticated competing block: unwind, but only within the depth bound that
+                // removeLastBlock enforces; beyond it the block is kept and the operator decides.
                 csdebug() << kLogPrefix << "remove own last block and cancel store operation";
                 removeLastBlock();
             }

@@ -260,9 +260,26 @@ public:
     // already trusts - the confidants of its own current last block - exactly as BlockVerifier checks
     // them. A non-bootstrap competing block that fails this check never triggers a rollback: it is not
     // vouched for by any authority this node recognises (a self-signed block vouches only for itself).
-    // A bootstrap block carries no such confirmations and cannot be checked locally; for it the depth
-    // floor plus the operator override is the only defence, so callers gate it on isBootstrap() first.
+    // A bootstrap block carries no such confirmations; competingBlockMayTriggerUnwind() sends it to
+    // isBootstrapAuthenticatedLocally() instead, so a bootstrap flag never opens a weaker gate.
+    // Strict for the unwind decision: a confirmation mask of more than one entry, of the same size as our
+    // last block's confidants, with as many signatures as it marks, and a majority of them confirming.
     bool hasTrustedConfirmations(const csdb::Pool& competing) const;
+
+    // True if a bootstrap-flagged competing block is authenticated locally: its own signatures verify
+    // against its confidants AND those confidants are exactly the confidants of a round table this node
+    // itself accepted (the current round or the two before it). A bootstrap flag alone is a bit anyone
+    // can set, so an unauthenticated bootstrap block never triggers an automatic unwind.
+    bool isBootstrapAuthenticatedLocally(const csdb::Pool& competing) const;
+
+    // The single gate for an automatic unwind in response to a competing block: the operator override,
+    // or a non-bootstrap block with trusted confirmations, or a locally authenticated bootstrap block.
+    // A block that passes is still subject to the depth bound inside removeLastBlock().
+    bool competingBlockMayTriggerUnwind(const csdb::Pool& competing) const;
+
+    // The operator has approved a deliberate deep switch: [params] allow_deep_rollback=true or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable. It lifts both the authority gate and the depth bound.
+    static bool deepRollbackApproved();
 
     // A node that has just adopted a community bootstrap table (the opt-in liveness fallback) records
     // here the sequence it held when it took the table; the guard then lets it unwind back to that
@@ -276,6 +293,8 @@ public:
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
     void test_resetRollbackEpisode() { rollbackEpisode_ = false; rollbackHighWater_ = 0; }
+    // make `block` the node's last block (the deferred one), as getLastBlock() returns it
+    void test_setLastBlock(const csdb::Pool& block) { deferredBlock_ = block; lastSequence_ = block.sequence(); }
 #endif
 
     const cs::MultiWallets& multiWallets() const;

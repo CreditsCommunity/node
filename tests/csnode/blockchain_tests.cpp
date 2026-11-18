@@ -14,6 +14,9 @@
 #include <csnode/blockchain_serializer.hpp>
 #include <csnode/configholder.hpp>
 #include <consensus.hpp>
+#include <cscrypto/cscrypto.hpp>
+#include <csnode/conveyer.hpp>
+#include <csnode/odatastream.hpp>
 
 #include <csdb/amount_commission.hpp>
 #include <csdb/currency.hpp>
@@ -402,4 +405,134 @@ TEST(BlockChain, LongestChainGuardCommunityBootstrapFloor) {
     // at or below the table sequence the ordinary bound takes over again and refuses
     chain.test_setLastSequence(tableSeq);
     EXPECT_FALSE(chain.guardAutoRollback());
+}
+
+namespace {
+struct GuardKeys {
+    std::vector<cs::PublicKey> pub;
+    std::vector<cs::PrivateKey> priv;
+};
+
+GuardKeys guardKeys(size_t n) {
+    EXPECT_TRUE(cscrypto::cryptoInit());
+    GuardKeys k;
+    for (size_t i = 0; i < n; ++i) {
+        cs::PublicKey p;
+        k.priv.push_back(cscrypto::generateKeyPair(p));
+        k.pub.push_back(p);
+    }
+    return k;
+}
+
+// a block of `seq` whose confidants are `keys`, all of them signing; when `prev` is given it carries
+// round confirmations by the confidants of `prev` selected in `confirmMask` (bit i = confidant i)
+csdb::Pool guardBlock(cs::Sequence seq, const GuardKeys& keys, const GuardKeys* prev = nullptr,
+                      uint64_t confirmMask = 0, bool bootstrap = false, bool corruptSignature = false) {
+    csdb::Pool p(csdb::PoolHash{}, seq);
+    p.set_confidants(keys.pub);
+    p.add_number_trusted(static_cast<uint8_t>(keys.pub.size()));
+    p.add_real_trusted((1ull << keys.pub.size()) - 1);
+    p.add_user_field(200, std::string("payload"));  // an id no block field uses
+    BlockChain::setBootstrap(p, bootstrap);
+    if (prev) {
+        cs::Bytes trustedToHash;
+        cs::ODataStream stream(trustedToHash);
+        stream << seq;
+        stream << keys.pub;
+        const cs::Hash h = cscrypto::calculateHash(trustedToHash.data(), trustedToHash.size());
+        std::vector<cs::Signature> confirmations;
+        for (size_t i = 0; i < prev->priv.size(); ++i) {
+            if (confirmMask >> i & 1) {
+                confirmations.push_back(cscrypto::generateSignature(prev->priv[i], h.data(), h.size()));
+            }
+        }
+        p.add_number_confirmations(static_cast<uint8_t>(prev->pub.size()));
+        p.add_confirmation_mask(confirmMask);
+        p.add_round_confirmations(confirmations);
+    }
+    auto probe = p.clone();
+    EXPECT_TRUE(probe.compose());
+    cs::Hash hash{};
+    const auto hb = probe.hash().to_binary();
+    std::copy(hb.begin(), hb.end(), hash.begin());
+    std::vector<cs::Signature> sigs;
+    for (const auto& k : keys.priv) {
+        sigs.push_back(cscrypto::generateSignature(k, hash.data(), hash.size()));
+    }
+    if (corruptSignature) {
+        sigs.front()[0] ^= 0xff;
+    }
+    p.set_signatures(sigs);
+    EXPECT_TRUE(p.compose());
+    return csdb::Pool::from_binary(p.to_binary());
+}
+
+BlockChain& guardChain() {
+    static const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    static const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    static BlockChain chain(genesis, start);
+    return chain;
+}
+}  // namespace
+
+// A non-bootstrap competing block may make the node unwind only with confirmations by a majority of
+// the confidants of the node's own last block; stricter than block validation (no one-entry masks).
+TEST(BlockChain, CompetingBlockNeedsStrictTrustedConfirmations) {
+    installDefaultConfig();
+    auto& chain = guardChain();
+    const auto ours = guardKeys(3);
+    const auto next = guardKeys(3);
+    chain.test_setLastBlock(guardBlock(20, ours));
+
+    EXPECT_TRUE(chain.hasTrustedConfirmations(guardBlock(21, next, &ours, 0b111)));
+    EXPECT_TRUE(chain.hasTrustedConfirmations(guardBlock(21, next, &ours, 0b011)));   // 2 of 3
+    EXPECT_FALSE(chain.hasTrustedConfirmations(guardBlock(21, next, &ours, 0b001)));  // a minority
+    EXPECT_FALSE(chain.hasTrustedConfirmations(guardBlock(21, next)));                // none
+    const auto strangers = guardKeys(3);
+    EXPECT_FALSE(chain.hasTrustedConfirmations(guardBlock(21, next, &strangers, 0b111)));  // keys we do not trust
+    const auto four = guardKeys(4);
+    EXPECT_FALSE(chain.hasTrustedConfirmations(guardBlock(21, next, &four, 0b1111)));      // mask of another size
+    EXPECT_TRUE(chain.competingBlockMayTriggerUnwind(guardBlock(21, next, &ours, 0b111)));
+    EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(guardBlock(21, next, &strangers, 0b111)));
+}
+
+// The bootstrap flag is a bit anyone can set: a bootstrap-flagged competing block passes the gate
+// only when it is authenticated locally (valid own signatures AND the confidants of a round table this
+// node accepted), never on the flag alone, and never more easily than a normal block.
+TEST(BlockChain, BootstrapFlagAloneNeverTriggersUnwind) {
+    installDefaultConfig();
+    auto& chain = guardChain();
+    const auto ours = guardKeys(3);
+    const auto others = guardKeys(3);
+    chain.test_setLastBlock(guardBlock(30, ours));
+
+    auto& conveyer = cs::Conveyer::instance();
+    cs::RoundTable unrelated;
+    unrelated.round = 1000;
+    unrelated.confidants = guardKeys(3).pub;
+    conveyer.setRound(unrelated.round);
+    conveyer.setTable(unrelated);
+
+    const auto flagged = guardBlock(31, others, nullptr, 0, true);
+    ASSERT_TRUE(BlockChain::isBootstrap(flagged));
+    EXPECT_FALSE(chain.isBootstrapAuthenticatedLocally(flagged));
+    EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(flagged));
+    // the same block without the flag fails too: the flag never opens a gate a normal block cannot pass
+    EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(guardBlock(31, others)));
+
+    // the node took a round table naming exactly these confidants: the bootstrap block is authenticated
+    cs::RoundTable taken;
+    taken.round = 1001;
+    taken.confidants = others.pub;
+    conveyer.setRound(taken.round);
+    conveyer.setTable(taken);
+    EXPECT_TRUE(chain.isBootstrapAuthenticatedLocally(flagged));
+    EXPECT_TRUE(chain.competingBlockMayTriggerUnwind(flagged));
+    // ... but not with a bad signature
+    EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(guardBlock(31, others, nullptr, 0, true, true)));
+
+    // leave the conveyer on a table that matches nothing here
+    unrelated.round = 1002;
+    conveyer.setRound(unrelated.round);
+    conveyer.setTable(unrelated);
 }
