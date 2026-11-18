@@ -176,10 +176,25 @@ listed nodes are running. The set-up scripts and the Docker image do not offer t
 The risk it brings is a partition. If a network partition cuts more than half of the listed nodes
 off from the official nodes for longer than `stall_minutes`, while the official nodes keep
 producing blocks, the listed nodes restart on their own and the two sides write different blocks.
-There is no rule that makes either side yield: when the two sides reconnect, the longer chain
-wins, as for any two chains, and the nodes of the other side unwind their blocks above the fork.
-The transactions of the unwound blocks are reverted; those the other side did not also write must
-be sent again. The `official-partition` scenario of the robustness workflow measures this. Keep
+There is no rule that makes either side yield to the other. What happens at reconnection:
+
+- official nodes follow the longer chain, as for any two chains, and unwind their blocks above the
+  fork; the transactions of those blocks are reverted and must be sent again unless the other
+  side also wrote them;
+- community nodes with the bounded-rollback guard (#189, `allow_deep_rollback=false` by default)
+  do not follow a longer chain they cannot authenticate themselves: a node on the shorter side
+  keeps its chain and waits until its operator approves the switch (`[params]
+  allow_deep_rollback` or `CS_ALLOW_DEEP_ROLLBACK`), after which its blocks above the fork, and
+  their transactions, are reverted.
+
+Measured in the `official-partition` scenarios of the robustness workflow (before #189, community
+side cut off for 6 minutes, `stall_minutes=2`): the two sides did not look each other up again on
+their own after the cut was lifted, each node keeping only its own side as neighbours, so both
+chains went on side by side until the end of the run. With the community nodes restarted after the
+reconnection (`official-partition-restart`), they connected to the official nodes and unwound
+their shorter chain block by block from #950 to #544, then stopped two blocks above the fork
+(#542) and did not take the official blocks: still no single chain. A
+partition with this option on therefore needs operator attention in any case. Keep
 `stall_minutes` long.
 
 ## Start-up behaviour
