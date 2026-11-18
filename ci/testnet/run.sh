@@ -222,7 +222,10 @@
 #        OFFICIAL_PARTITION_MINUTES (default 6), then reconnected. With COMMUNITY_BOOTSTRAP=config the
 #        community side restarts on its own after stall_minutes: two chains until the reconnection.
 #        partition.py reports where they forked, which side the nodes kept and how many blocks and
-#        transactions the other side lost; every node must then end on one chain
+#        transactions the other side lost; every node must then end on one chain. The nodes only
+#        reconnect if they look each other up again: 120 s after the cut is lifted the run reports
+#        how many neighbours each node has. OFFICIAL_PARTITION_RESTART=1: then the community nodes are
+#        restarted (they dial every node of hosts.txt again), as an operator would
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -339,6 +342,7 @@ COMMUNITY_STALL_STARTER=${COMMUNITY_STALL_STARTER:-0}
 COMMUNITY_STARTER=0       # the node given COMMUNITY_STALL_STARTER, set with the configs
 OFFICIAL_PARTITION_AT=${OFFICIAL_PARTITION_AT:-0}
 OFFICIAL_PARTITION_MINUTES=${OFFICIAL_PARTITION_MINUTES:-6}
+OFFICIAL_PARTITION_RESTART=${OFFICIAL_PARTITION_RESTART:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -1272,6 +1276,21 @@ official_partition() {
     partition_off
     part_done=2
     echo "partition: reconnected (community head $c, official head $o)"
+    # have the two sides found each other again? (each node logs its neighbour count with its blocks)
+    sleep 120
+    for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
+        echo "partition: 120 s after the reconnection n$i has $(grep -a 'neighbour nodes = ' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*neighbour nodes = ([0-9]+).*/\1/') neighbours, head $(seq_of "$i")"
+    done
+    if [ "$OFFICIAL_PARTITION_RESTART" = 1 ]; then
+        echo "partition: restarting $(printf 'n%s ' $COMMUNITY_NODES)(community head $(community_max), official head $(official_max))"
+        for i in $COMMUNITY_NODES; do kill -TERM "${PIDS[$i]}"; REPORTED_DOWN[$i]=1; done
+        for i in $COMMUNITY_NODES; do
+            wait "${PIDS[$i]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
+        done
+        for i in $COMMUNITY_NODES; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+        echo "partition: community nodes started again"
+    fi
 }
 
 while :; do
