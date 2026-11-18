@@ -1284,7 +1284,16 @@ official_partition() {
     if [ "$OFFICIAL_PARTITION_RESTART" = 1 ]; then
         echo "partition: restarting $(printf 'n%s ' $COMMUNITY_NODES)(community head $(community_max), official head $(official_max))"
         for i in $COMMUNITY_NODES; do kill -TERM "${PIDS[$i]}"; REPORTED_DOWN[$i]=1; done
+        # a trusted node waits for its round before it exits, and with most of the round's
+        # confidants stopping that round never ends: SIGKILL after 60 s
+        local t_stop
+        t_stop=$(date +%s)
         for i in $COMMUNITY_NODES; do
+            while kill -0 "${PIDS[$i]}" 2>/dev/null && [ $(( $(date +%s) - t_stop )) -lt 60 ]; do sleep 1; done
+            if kill -0 "${PIDS[$i]}" 2>/dev/null; then
+                echo "partition: n$i still running 60 s after SIGTERM, SIGKILL"
+                kill -KILL "${PIDS[$i]}" 2>/dev/null || true
+            fi
             wait "${PIDS[$i]}" 2>/dev/null || true
             pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
         done
