@@ -218,3 +218,55 @@ TEST(StorageWriter, RemovingTheLastQueuedBlockEndsTheFailure) {
     EXPECT_TRUE(db->has(pools[0].hash()));
     storage.close();
 }
+
+// A chain reorganisation below the deferred block: the node removes stored blocks and saves the
+// competing ones at the same sequences. pool_load(sequence) must then return the new blocks, not the
+// removed ones still held by the storage's read cache (the stale block made the next consistency
+// check fail for ever, and the node stopped two blocks above the fork point).
+namespace {
+
+void checkReplacedBlocksAreLoaded(bool asyncWrites) {
+    auto db = std::make_shared<MemoryDb>();
+    csdb::Storage storage;
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    opt.writeBatchSize = 100;
+    opt.asyncWrites = asyncWrites;
+    ASSERT_TRUE(storage.open(opt));
+
+    const auto own = chain(5);
+    for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+    for (cs::Sequence s = 0; s < 5; ++s) ASSERT_EQ(storage.pool_load(s).hash(), own[s].hash());
+
+    // unwind to #2, then the competing #3 and #4
+    ASSERT_EQ(storage.pool_remove_last().hash(), own[4].hash());
+    ASSERT_EQ(storage.pool_remove_last().hash(), own[3].hash());
+    std::vector<csdb::Pool> other;
+    csdb::PoolHash prev = own[2].hash();
+    for (cs::Sequence s = 3; s < 5; ++s) {
+        csdb::Pool p(prev, s);
+        p.add_user_field(1, std::string(100, static_cast<char>('z' - s)));
+        ASSERT_TRUE(p.compose());
+        ASSERT_NE(p.hash(), own[s].hash());
+        prev = p.hash();
+        other.push_back(p);
+        ASSERT_TRUE(storage.pool_save(p));
+    }
+
+    EXPECT_EQ(storage.pool_load(3).hash(), other[0].hash());
+    EXPECT_EQ(storage.pool_load(4).hash(), other[1].hash());
+    EXPECT_EQ(storage.pool_load(4).previous_hash(), storage.pool_load(3).hash());
+    EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+    EXPECT_FALSE(storage.pool_load(own[4].hash()).is_valid());
+    storage.close();
+}
+
+}  // namespace
+
+TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnes) {
+    checkReplacedBlocksAreLoaded(false);
+}
+
+TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnesAsync) {
+    checkReplacedBlocksAreLoaded(true);
+}
