@@ -11,7 +11,9 @@
 
 #include <base58.h>
 #include <config.hpp>
+#include <cscrypto/cscrypto.hpp>
 #include <csnode/communitybootstrap.hpp>
+#include <csnode/idatastream.hpp>
 
 using cs::CommunityBootstrapGate;
 using cs::communityTableWeight;
@@ -170,27 +172,215 @@ TEST(CommunityBootstrap, OpenOnlyWhenConfiguredStalledAndNoNeighbourAhead) {
     EXPECT_FALSE(isCommunityFallbackOpen(true, true, true));    // behind a neighbour: sync instead
 }
 
-TEST(CommunityBootstrap, OneTablePerHalfRoundElapseUnlessHeavier) {
+TEST(CommunityBootstrap, OneTablePerHalfRoundElapseUnlessHeavierFromALowerStarter) {
     CommunityBootstrapGate gate;
     gate.onLastSequence(500, 0);
     const auto w5 = communityTableWeight(kInitial, kCommunity, table({1, 3, 5, 7, 9}));
     const auto w4 = communityTableWeight(kInitial, kCommunity, table({1, 3, 5, 7}));
     const uint64_t t = kStall;
-    EXPECT_TRUE(gate.mayTake(w4, t, kElapse));
-    gate.onTaken(w4, t);
+    EXPECT_TRUE(gate.mayTake(w4, key(1), t, kElapse));
+    gate.onTaken(w4, key(1), t);
     // a repeat or a lighter table right after: dropped, so a listed key cannot force restarts
-    EXPECT_FALSE(gate.mayTake(w4, t + 1, kElapse));
-    EXPECT_FALSE(gate.mayTake(w4 - 1, t + kElapse / 2 - 1, kElapse));
-    // a heavier one at once: the table of more nodes wins
-    EXPECT_TRUE(gate.mayTake(w5, t + 1, kElapse));
-    gate.onTaken(w5, t + 1);
-    EXPECT_FALSE(gate.mayTake(w4, t + 2, kElapse));
+    EXPECT_FALSE(gate.mayTake(w4, key(1), t + 1, kElapse));
+    EXPECT_FALSE(gate.mayTake(w4 - 1, key(1), t + kElapse / 2 - 1, kElapse));
+    // a heavier one of the same starter at once: the table of more nodes wins
+    EXPECT_TRUE(gate.mayTake(w5, key(1), t + 1, kElapse));
+    gate.onTaken(w5, key(1), t + 1);
+    EXPECT_FALSE(gate.mayTake(w4, key(1), t + 2, kElapse));
     // the starter's repeat, a round_elapse_time later
-    EXPECT_TRUE(gate.mayTake(w5, t + 1 + kElapse, kElapse));
-    EXPECT_TRUE(gate.mayTake(w4, t + 1 + kElapse / 2, kElapse));
+    EXPECT_TRUE(gate.mayTake(w5, key(1), t + 1 + kElapse, kElapse));
+    EXPECT_TRUE(gate.mayTake(w4, key(1), t + 1 + kElapse / 2, kElapse));
     // progress forgets the tables of this stall
     gate.onProgress(t + 3);
-    EXPECT_TRUE(gate.mayTake(w4, t + 4, kElapse));
+    EXPECT_TRUE(gate.mayTake(w4, key(3), t + 4, kElapse));
+}
+
+// A hostile listed key above the starter pads its table with keys of stopped nodes: heavier, but it
+// cannot displace the running table; a lower starter that saw more nodes can
+TEST(CommunityBootstrap, AHigherListedKeyCannotDisplaceATableByPaddingIt) {
+    const std::set<cs::PublicKey> initial = keys({1, 2, 4, 6, 8});
+    const std::set<cs::PublicKey> community = keys({3, 5, 7, 9, 11, 13, 15});  // 4 make a majority
+    CommunityBootstrapGate gate;
+    gate.onLastSequence(500, 0);
+    const uint64_t t = kStall;
+    const auto running = table({3, 5, 7, 9});
+    ASSERT_TRUE(isCommunityTable(initial, community, running));
+    const auto wRunning = communityTableWeight(initial, community, running);
+    ASSERT_TRUE(gate.mayTake(wRunning, running.front(), t, kElapse));
+    gate.onTaken(wRunning, running.front(), t);
+    // key 5 pads with the stopped 2, 4, 6, 8, 11, 13: more keys, heavier, refused within the window
+    const auto padded = table({2, 4, 5, 6, 7, 8, 9, 11, 13});
+    ASSERT_TRUE(isCommunityTable(initial, community, padded));
+    ASSERT_GT(communityTableWeight(initial, community, padded), wRunning);
+    EXPECT_FALSE(gate.mayTake(communityTableWeight(initial, community, padded), key(5), t + 1, kElapse));
+    // the same starter, or a lower one, that saw more nodes: taken
+    const auto more = table({3, 5, 7, 9, 11});
+    EXPECT_TRUE(gate.mayTake(communityTableWeight(initial, community, more), key(3), t + 1, kElapse));
+    const auto lower = table({1, 3, 5, 7, 9});
+    EXPECT_TRUE(gate.mayTake(communityTableWeight(initial, community, lower), key(1), t + 1, kElapse));
+    // after half a round_elapse_time any table: a repeat is needed when a round fails
+    EXPECT_TRUE(gate.mayTake(communityTableWeight(initial, community, padded), key(5), t + kElapse / 2, kElapse));
+}
+
+TEST(CommunityBootstrap, ANeighbourOneBlockAheadHoldsTheGateOnlyForAFurtherStall) {
+    using cs::isNeighbourAhead;
+    EXPECT_FALSE(isNeighbourAhead(500, 500, kStall, kStall));
+    EXPECT_FALSE(isNeighbourAhead(499, 500, kStall, kStall));
+    // two blocks ahead: always, this node is behind
+    EXPECT_TRUE(isNeighbourAhead(502, 500, 100 * kStall, kStall));
+    // one block ahead: sync gets it in seconds; while it does not, only for a further stall_minutes
+    EXPECT_TRUE(isNeighbourAhead(501, 500, kStall, kStall));
+    EXPECT_TRUE(isNeighbourAhead(501, 500, 2 * kStall - 1, kStall));
+    EXPECT_FALSE(isNeighbourAhead(501, 500, 2 * kStall, kStall));
+}
+
+TEST(CommunityBootstrap, AClockJumpIsProgress) {
+    constexpr uint64_t kGap = 5 * kMinute;
+    constexpr uint64_t kWall = 1'700'000'000'000ULL;
+    CommunityBootstrapGate gate;
+    gate.onClock(0, kWall, kGap);
+    gate.onLastSequence(500, 0);
+    // looks every round_elapse_time while stalled: no jump
+    for (uint64_t t = kElapse; t <= kStall; t += kElapse) {
+        gate.onClock(t, kWall + t, kGap);
+    }
+    ASSERT_TRUE(gate.isStalled(kStall, kStall));
+    // the host slept for an hour: the wall clock jumped (the steady one may not count the sleep)
+    gate.onClock(kStall + kElapse, kWall + kStall + kElapse + 60 * kMinute, kGap);
+    EXPECT_FALSE(gate.isStalled(kStall + kElapse + 1, kStall));
+    EXPECT_TRUE(gate.isStalled(2 * kStall + kElapse, kStall));
+    // a wall clock set back, and a steady clock jump, as well
+    for (const bool wallBack : {true, false}) {
+        CommunityBootstrapGate other;
+        other.onClock(0, kWall, kGap);
+        other.onLastSequence(500, 0);
+        for (uint64_t t = kElapse; t <= kStall; t += kElapse) {
+            other.onClock(t, kWall + t, kGap);
+        }
+        ASSERT_TRUE(other.isStalled(kStall, kStall));
+        const uint64_t steady = wallBack ? kStall + kElapse : kStall + 10 * kMinute;
+        const uint64_t wall = wallBack ? kWall + kStall - 10 * kMinute : kWall + kStall + kElapse;
+        other.onClock(steady, wall, kGap);
+        EXPECT_FALSE(other.isStalled(steady, kStall)) << (wallBack ? "wall clock set back" : "steady clock jump");
+    }
+}
+
+// lists of even size: the starter must not drop the key that holds the majority of the list
+TEST(CommunityBootstrap, AnEvenSetKeepsItsMajorityOfTheList) {
+    using cs::dropForOddTable;
+    const std::set<cs::PublicKey> initial = keys({2, 4, 6, 8, 10});
+    const std::set<cs::PublicKey> six = keys({1, 3, 5, 7, 9, 11});
+    // 4 of 6 listed left: dropping one leaves 3, not more than half: kept even
+    EXPECT_FALSE(dropForOddTable(initial, six, table({1, 3, 5, 7})));
+    // 6 of 6: 5 still hold the majority, the official rule applies
+    EXPECT_TRUE(dropForOddTable(initial, six, table({1, 3, 5, 7, 9, 11})));
+    // a list of 10, 6 left: kept; 8 left: dropped to 7
+    const std::set<cs::PublicKey> ten = keys({1, 3, 5, 7, 9, 11, 13, 15, 17, 19});
+    EXPECT_FALSE(dropForOddTable(initial, ten, table({1, 3, 5, 7, 9, 11})));
+    EXPECT_TRUE(dropForOddTable(initial, ten, table({1, 3, 5, 7, 9, 11, 13, 15})));
+    // odd sets are never touched; regular sets (no list, or initial keys only) as in the official code
+    EXPECT_FALSE(dropForOddTable(initial, six, table({1, 3, 5, 7, 9})));
+    EXPECT_TRUE(dropForOddTable(initial, {}, table({2, 4, 6, 8})));
+    EXPECT_TRUE(dropForOddTable(initial, six, table({2, 4, 6, 8})));
+}
+
+namespace {
+struct Starter {
+    cs::PublicKey pub;
+    cs::PrivateKey priv;
+};
+
+// keys live in sodium's guarded memory: the library must be initialised first
+std::vector<Starter> makeStarters(size_t n) {
+    EXPECT_TRUE(cscrypto::cryptoInit());
+    std::vector<Starter> result(n);
+    for (auto& s : result) {
+        s.priv = cscrypto::generateKeyPair(s.pub);
+    }
+    std::sort(result.begin(), result.end(), [](const Starter& a, const Starter& b) { return a.pub < b.pub; });
+    return result;
+}
+
+// what Node::getBootstrapTable reads of a table with a key that is not an initial confidant: the
+// count, the keys, the signature over bootstrapSignedBytes(round, count and keys); the rest ignored
+bool readsAsCommunityTable(const cs::Bytes& payload, cs::RoundNumber rNum, const std::set<cs::PublicKey>& initial,
+                           const std::set<cs::PublicKey>& community) {
+    cs::IDataStream stream(payload.data(), payload.size());
+    uint8_t confSize = 0;
+    stream >> confSize;
+    cs::PublicKeys confidants;
+    for (int i = 0; i < confSize; ++i) {
+        cs::PublicKey k;
+        stream >> k;
+        confidants.push_back(k);
+    }
+    cs::Signature sig;
+    stream >> sig;
+    if (!stream.isValid() || confidants.empty()) {
+        return false;
+    }
+    const size_t signedLen = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
+    const cs::Bytes buf = cs::bootstrapSignedBytes(rNum, payload.data(), signedLen);
+    return isCommunityTable(initial, community, confidants)
+           && cscrypto::verifySignature(sig, confidants.front(), buf.data(), buf.size());
+}
+}  // namespace
+
+TEST(CommunityBootstrap, TheStartersTableVerifiesAsTheReceiverReadsIt) {
+    const auto s = makeStarters(5);
+    std::set<cs::PublicKey> listed;
+    for (const auto& st : s) {
+        listed.insert(st.pub);
+    }
+    const std::set<cs::PublicKey> initial = keys({200, 201, 202, 203, 204});
+    const cs::RoundNumber round = 123'456;
+    const cs::Bytes payload = cs::makeCommunityTable(round, listed, s.front().priv, 0x01020304);
+    // count, keys, signature, 4 random bytes
+    ASSERT_EQ(payload.size(), 1 + 5 * cscrypto::kPublicKeySize + cscrypto::kSignatureSize + sizeof(uint32_t));
+    EXPECT_EQ(payload[0], 5);
+    EXPECT_TRUE(readsAsCommunityTable(payload, round, initial, listed));
+    // signed by another listed key than the first: not its starter's table
+    const cs::Bytes notStarter = cs::makeCommunityTable(round, listed, s[1].priv, 0x01020304);
+    EXPECT_FALSE(readsAsCommunityTable(notStarter, round, initial, listed));
+    // a key changed after signing
+    cs::Bytes altered = payload;
+    altered[1 + cscrypto::kPublicKeySize] ^= 1;
+    EXPECT_FALSE(readsAsCommunityTable(altered, round, initial, listed));
+}
+
+// The p2p layer drops a broadcast whose bytes it has seen (Host::IsDuplicate, SHA1 of the data): the
+// starter's repeat in the same round must differ, and still verify
+TEST(CommunityBootstrap, ARepeatInTheSameRoundIsANewMessage) {
+    const auto s = makeStarters(4);
+    std::set<cs::PublicKey> listed;
+    for (const auto& st : s) {
+        listed.insert(st.pub);
+    }
+    const std::set<cs::PublicKey> initial = keys({200, 201, 202, 203, 204});
+    const cs::RoundNumber round = 777;
+    const cs::Bytes first = cs::makeCommunityTable(round, listed, s.front().priv, 1);
+    const cs::Bytes repeat = cs::makeCommunityTable(round, listed, s.front().priv, 2);
+    EXPECT_NE(first, repeat);
+    EXPECT_NE(cscrypto::calculateHash(first.data(), first.size()), cscrypto::calculateHash(repeat.data(), repeat.size()));
+    EXPECT_TRUE(readsAsCommunityTable(first, round, initial, listed));
+    EXPECT_TRUE(readsAsCommunityTable(repeat, round, initial, listed));
+    // only the random bytes differ: the signature is deterministic
+    const size_t signedEnd = first.size() - sizeof(uint32_t);
+    EXPECT_TRUE(std::equal(first.begin(), first.begin() + signedEnd, repeat.begin()));
+}
+
+// a table recorded in one round and sent again in another: the round is in the signed bytes
+TEST(CommunityBootstrap, ATableReplayedFromAnotherRoundDoesNotVerify) {
+    const auto s = makeStarters(4);
+    std::set<cs::PublicKey> listed;
+    for (const auto& st : s) {
+        listed.insert(st.pub);
+    }
+    const std::set<cs::PublicKey> initial = keys({200, 201, 202, 203, 204});
+    const cs::Bytes payload = cs::makeCommunityTable(1000, listed, s.front().priv, 42);
+    EXPECT_TRUE(readsAsCommunityTable(payload, 1000, initial, listed));
+    EXPECT_FALSE(readsAsCommunityTable(payload, 1001, initial, listed));
+    EXPECT_FALSE(readsAsCommunityTable(payload, 999, initial, listed));
 }
 
 namespace {

@@ -1096,20 +1096,29 @@ void Node::onCommunityProgress() {
 bool Node::isCommunityFallbackOpen() {
     const auto& settings = cs::ConfigHolder::instance().config()->getCommunityBootstrapSettings();
     const cs::Sequence lastSeq = blockChain_.getLastSeq();
+    const uint64_t stallMs = uint64_t(settings.stallMinutes) * 60'000ULL;
+    // a jump of the clocks between two looks (host suspended, clock set) is progress: the node then
+    // watches again before it acts on what it saw before. The looks come every round_elapse_time
+    const uint64_t maxGapMs = std::max<uint64_t>(5 * 60'000ULL, 3 * cs::ConfigHolder::instance().config()->roundElapseTime());
+    const uint64_t wallMs = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch()).count());
     bool stalled = false;
+    uint64_t sinceProgress = 0;
     {
         std::lock_guard lock(communityMutex_);
         const uint64_t now = stat_.msSinceStart();
+        communityGate_.onClock(now, wallMs, maxGapMs);
         communityGate_.onLastSequence(lastSeq, now);
-        stalled = communityGate_.isStalled(now, uint64_t(settings.stallMinutes) * 60'000ULL);
+        stalled = communityGate_.isStalled(now, stallMs);
+        sinceProgress = communityGate_.msSinceProgress(now);
     }
     if (settings.confidants.empty() || !stalled) {
         return false;
     }
     // a neighbour with a later block: this node is behind and syncs, the network is not stalled
     bool ahead = false;
-    transport_->forEachNeighbour([&ahead, lastSeq](const cs::PublicKey&, cs::Sequence seq, cs::RoundNumber) {
-        if (seq > lastSeq) {
+    transport_->forEachNeighbour([&ahead, lastSeq, sinceProgress, stallMs](const cs::PublicKey&, cs::Sequence seq, cs::RoundNumber) {
+        if (cs::isNeighbourAhead(seq, lastSeq, sinceProgress, stallMs)) {
             ahead = true;
         }
     });
@@ -1121,12 +1130,12 @@ bool Node::takeCommunityTable(const cs::PublicKeys& table, bool own) {
     const uint64_t elapse = cs::ConfigHolder::instance().config()->roundElapseTime();
     std::lock_guard lock(communityMutex_);
     const uint64_t now = stat_.msSinceStart();
-    if (!communityGate_.mayTake(weight, now, elapse)) {
+    if (table.empty() || !communityGate_.mayTake(weight, table.front(), now, elapse)) {
         cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "not starting" : "dropping") << " a table of " << table.size()
-                << " keys: one at least as heavy was taken less than half a round_elapse_time ago";
+                << " keys: another was taken less than half a round_elapse_time ago, and this one is not heavier with a starter key not above its starter's";
         return false;
     }
-    communityGate_.onTaken(weight, now);
+    communityGate_.onTaken(weight, table.front(), now);
     cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "starting" : "taking") << " a table of " << table.size()
             << " keys after " << communityGate_.msSinceProgress(now) / 1000 << " s without a block, a round or a regular bootstrap";
     return true;
@@ -1185,13 +1194,9 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
             cswarning() << "malformed bootstrap round table, ignore";
             return;
         }
-        const size_t signed_buf_len = sizeof(cs::RoundNumber) + signed_subdata_len;
-        cs::Bytes buf;
-        buf.reserve(signed_buf_len);
-        auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
-        std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(buf));
-        ptr = payload.data();
-        std::copy(ptr, ptr + signed_subdata_len, std::back_inserter(buf));
+        // the same bytes as the community starter signs (cs::makeCommunityTable); the stream read
+        // signed_subdata_len bytes of the payload already, so they are there
+        const cs::Bytes buf = cs::bootstrapSignedBytes(rNum, payload.data(), signed_subdata_len);
         if (cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size())) {
             currentWeight = cs::kSignedBootstrapWeight;
             signedTable = true;
@@ -3933,6 +3938,7 @@ void Node::sendRoundTable(cs::RoundPackage& rPackage) {
     csdebug() << "Round " << rPackage.roundTable().round << ", Confidants count " << rPackage.roundTable().confidants.size();
     csdebug() << "Hashes count: " << rPackage.roundTable().hashes.size();
 
+    onCommunityProgress();  // this node's own round package
     performRoundPackage(rPackage, solver_->getPublicKey(), false);
 }
 
@@ -4201,6 +4207,10 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
 
     cs::Signatures poolSignatures;
     cs::PublicKeys confidants;
+    // progress for the community bootstrap fallback: a package whose signatures this node checked
+    // and accepted; one taken unchecked (a bootstrap round, the first rounds, a node lagging behind)
+    // is not, and the blocks it leads to are progress anyway
+    bool signaturesAccepted = false;
 
     if (!isBootstrapRound()) {
         if (rPackage.roundTable().round > 2/* && confirmationList_.size() > 0*/) { //Here we have problems when the trusted have the first block and the others do not!!!
@@ -4224,7 +4234,8 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
                 }
             }
 
-            if (!receivingSignatures(rPackage, confidants) && storedRound == getBlockChain().getLastSeq()) {
+            signaturesAccepted = receivingSignatures(rPackage, confidants);
+            if (!signaturesAccepted && storedRound == getBlockChain().getLastSeq()) {
                 return;
             }
         }
@@ -4238,6 +4249,9 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     currentRoundTableMessage_.round = rPackage.roundTable().round;
     currentRoundTableMessage_.sender = sender;
     currentRoundTableMessage_.message = cs::Bytes(data, data + size);
+    if (signaturesAccepted) {
+        onCommunityProgress();
+    }
     performRoundPackage(rPackage, sender, updateRound);
 }
 
@@ -4247,7 +4261,6 @@ void Node::setCurrentRP(const cs::RoundPackage& rp) {
 
 void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& sender, bool updateRound) {
     csdebug() << __func__;
-    onCommunityProgress();
 
     // got round package in any way, reset default round table flag
     confirmationList_.add(rPackage.roundTable().round, false, rPackage.roundTable().confidants, rPackage.poolMetaInfo().realTrustedMask, rPackage.trustedSignatures());
@@ -5472,7 +5485,9 @@ void Node::onRoundTimeElapsed() {
                     };
 
     transport_->forEachNeighbour(std::move(callback));
-    if (actualConfidants.size() % 2 == 0) {
+    // an odd table: the last key of an even set goes, unless a community table would lose its
+    // majority of the list with it (cs::dropForOddTable; without the fallback open, always)
+    if (cs::dropForOddTable(initialConfidants_, listed, cs::PublicKeys(actualConfidants.cbegin(), actualConfidants.cend()))) {
         auto it = actualConfidants.end();
         --it;
         it = actualConfidants.erase(it);
@@ -5539,23 +5554,20 @@ void Node::onRoundTimeElapsed() {
         }
 
         cs::Bytes bin;
-        cs::ODataStream out(bin);
-        out << uint8_t(actualConfidants.size());
-
-        for (const auto& item : actualConfidants) {
-            out << item; 
-        }
         if (communityTable) {
             // signed by this node, the starter: the round, the count and the keys, as a table
-            // signed by the project; its weight stays out of bootStrapWeight_
-            const cs::RoundNumber round = roundPackageCache_.back().roundTable().round;
-            cs::Bytes signedPart;
-            auto* ptr = reinterpret_cast<const uint8_t*>(&round);
-            std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(signedPart));
-            std::copy(bin.cbegin(), bin.cend(), std::back_inserter(signedPart));
-            out << cscrypto::generateSignature(solver_->getPrivateKey(), signedPart.data(), signedPart.size());
+            // signed by the project, then random bytes so that its repeat is a new message; its
+            // weight stays out of bootStrapWeight_
+            bin = cs::makeCommunityTable(roundPackageCache_.back().roundTable().round, actualConfidants, solver_->getPrivateKey(),
+                                         std::random_device{}());
         }
         else {
+            cs::ODataStream out(bin);
+            out << uint8_t(actualConfidants.size());
+
+            for (const auto& item : actualConfidants) {
+                out << item; 
+            }
             cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confs);
             if (currentWeight > bootStrapWeight_) {
                 bootStrapWeight_ = currentWeight;
