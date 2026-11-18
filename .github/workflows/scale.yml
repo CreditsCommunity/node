@@ -170,7 +170,7 @@ jobs:
         with:
           name: testnet-node-${{ github.sha }}
           path: build/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
       # the official 4.2.532 node (CREDITSCOM 4a95aaaf) with only the two hooks a CI test network
       # needs (its starter key and genesis recipient), for the even nodes
@@ -223,7 +223,7 @@ jobs:
         with:
           name: testnet-node-official-${{ github.sha }}
           path: build-alt/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
   network:
     needs: [plan, build]
@@ -356,4 +356,4 @@ jobs:
             testnet-run/n*/config.ini
             testnet-run/resources.tsv
             testnet-run/resources-summary.txt
-          retention-days: 14
+          retention-days: ${{ github.ref_name == 'master' && 14 || 3 }}
