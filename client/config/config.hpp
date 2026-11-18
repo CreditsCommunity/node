@@ -31,6 +31,8 @@ const std::string DEFAULT_PATH_TO_PRIVATE_KEY = "NodePrivate.txt";
 const uint32_t DEFAULT_MIN_NEIGHBOURS = Neighbourhood::kMinNeighbours;
 const uint32_t DEFAULT_MAX_NEIGHBOURS = Neighbourhood::kMaxNeighbours;
 const uint64_t DEFAULT_MAX_UNCORRECTED_BLOCK = 0;
+// keep in step with Consensus::MaxAutoRollbackDepth (solver/include/solver/consensus.hpp)
+const uint64_t DEFAULT_MAX_AUTO_ROLLBACK = 1000;
 const uint32_t DEFAULT_CONNECTION_BANDWIDTH = 1 << 19;
 const uint32_t DEFAULT_OBSERVER_WAIT_TIME = 5 * 60 * 1000;  // ms
 const uint32_t DEFAULT_ROUND_ELAPSE_TIME = 1000 * 60; // ms
@@ -327,6 +329,17 @@ public:
         return maxUncorrectedBlock_;
     }
 
+    // longest-chain guard: the most own confirmed blocks the node will roll back automatically when it
+    // adopts a competing chain during sync, before it stops and waits for the operator.
+    uint64_t maxAutoRollbackDepth() const {
+        return maxAutoRollbackDepth_;
+    }
+
+    // longest-chain guard override: accept a deliberate deep switch without the depth bound.
+    bool allowDeepRollback() const {
+        return allowDeepRollback_;
+    }
+
     bool traverseNAT() const {
         return traverseNAT_;
     }
@@ -430,6 +443,8 @@ private:
     bool restrictNeighbours_ = false;
     uint64_t connectionBandwidth_ = DEFAULT_CONNECTION_BANDWIDTH;
     uint64_t maxUncorrectedBlock_ = DEFAULT_MAX_UNCORRECTED_BLOCK;
+    uint64_t maxAutoRollbackDepth_ = DEFAULT_MAX_AUTO_ROLLBACK;
+    bool allowDeepRollback_ = false;
     bool symmetric_ = false;
 
     EndpointData hostAddressEp_;

@@ -266,6 +266,47 @@ consensus rules.
 
 ## Consensus fixes
 
+- **Bounded automatic rollback.** When a node is behind and syncs a competing chain that forks below
+  its current head, it rolls back its own blocks down to the fork point before taking the other
+  chain. The official node puts no limit on that depth. The community node stops the automatic
+  rollback once it would unwind more than `max_auto_rollback` of its own confirmed blocks (default
+  1000) below the head it had when the rollback started: it leaves its chain intact, logs a prominent
+  alert and waits for the operator. The bound covers every automatic removal path — the sync fork
+  path, the uncertain-block replacement, the antifork cache and the bad-hash reply — because the
+  depth check lives inside the two functions they all go through. The depth is measured against a
+  fixed reference, so forward progress cannot reset it and a node cannot be made to creep past the
+  limit by alternating removals and appends. A reorg this deep is a rare event — a deliberate switch
+  to another network, or a rejected one — and the choice is left to a human instead of happening
+  silently. The node keeps running and does not crash-loop; it simply stays on its chain until an
+  operator decides.
+
+  Two extra checks sharpen this. First, a competing block that is **not a bootstrap block** triggers a
+  rollback only if its round confirmations verify against the confidants of the node's own last block —
+  the authority it already trusts — exactly as the block verifier checks a block from the network. A
+  block whose confirmations the node does not recognise cannot make it unwind; an honest micro-fork
+  still works, because the honest competing block at the same height was produced by the same elected trusted group. Second, a **bootstrap
+  block** carries no such confirmations and cannot be checked locally, so for it the depth bound plus
+  the operator is the only defence — which is exactly what this feature provides.
+
+  This is a local safety bound only: it changes how far this node unwinds on its own, never what a
+  block contains or what the node accepts in normal operation, so it is invisible to other nodes and a
+  mixed official/community network behaves exactly as before. Two settings tune it, both in `[params]`:
+  `max_auto_rollback=` sets the bound (default 1000; 0 means no bound, the official behaviour), and
+  `allow_deep_rollback=true` accepts a deliberate deep switch without any bound. The
+  `CS_ALLOW_DEEP_ROLLBACK` environment variable does the same as the latter, for a one-off run. Either
+  way the node must be restarted to apply the change.
+
+  **Interplay with the community bootstrap fallback.** The opt-in community bootstrap fallback
+  (PR #188, not merged yet) relies on the longer chain winning after a partition: the other side
+  unwinds its blocks down to the fork point. With this bound, a branch that would make a node unwind
+  more than `max_auto_rollback` blocks stops and waits for the operator instead, which is the safe
+  default for an unattended node, since locally a wanted and an unwanted longer chain look the same.
+  To keep the two features coherent, the guard has a hook (`setCommunityBootstrapFloor`): a node
+  that has itself taken a community bootstrap table may unwind back to the sequence it held when it
+  took the table without hitting the bound, because taking that table was already the operator's
+  decision. The fallback sets this hook once both changes are merged; until then, and below that
+  sequence, the ordinary bound applies and the operator decides.
+
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
   with a request that takes exactly as long as the others wait for its stage-3. Depending on a few
   milliseconds, some trusted nodes finish the round with every signature while the others retry

@@ -242,6 +242,42 @@ public:
     static void setBootstrap(csdb::Pool& block, bool is_bootstrap);
     static bool isBootstrap(const csdb::Pool& block);
 
+    // Longest-chain guard. It is called from inside removeLastBlock() and compromiseLastBlock(), so
+    // every automatic rollback of the node's own last block passes through it, whatever the caller
+    // (the sync fork path, the uncertain-replacement path, the antifork cache and the bad-hash reply).
+    // It returns true while the resulting head would stay at or above rollbackHighWater_ -
+    // maxAutoRollbackDepth_, where rollbackHighWater_ is the head captured at the start of the current
+    // rollback episode (the first automatic removal from any path). Once the limit would be crossed it
+    // logs a prominent alert and returns false (keeping the chain intact and leaving the decision to
+    // the operator); it does NOT set any permanent state, so a later legitimate reorg still works.
+    // An operator accepts a deliberate deep switch with the [params] allow_deep_rollback option or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable. A node that has adopted a community bootstrap table
+    // (see setCommunityBootstrapFloor) may unwind freely back to the sequence where it took that table.
+    // Local only: it changes how far this node unwinds, never block content.
+    bool guardAutoRollback();
+
+    // True if the competing block carries round confirmations signed by the confidants the node
+    // already trusts - the confidants of its own current last block - exactly as BlockVerifier checks
+    // them. A non-bootstrap competing block that fails this check never triggers a rollback: it is not
+    // vouched for by any authority this node recognises (a self-signed block vouches only for itself).
+    // A bootstrap block carries no such confirmations and cannot be checked locally; for it the depth
+    // floor plus the operator override is the only defence, so callers gate it on isBootstrap() first.
+    bool hasTrustedConfirmations(const csdb::Pool& competing) const;
+
+    // A node that has just adopted a community bootstrap table (the opt-in liveness fallback) records
+    // here the sequence it held when it took the table; the guard then lets it unwind back to that
+    // point without operator action, since taking the table already was the operator's decision. 0
+    // (the default) means no such table was taken and the ordinary depth bound applies throughout.
+    void setCommunityBootstrapFloor(cs::Sequence seq);
+
+#ifdef TESTING
+    // test-only accessors for the longest-chain guard (inline, no data members: no layout change)
+    void test_setLastSequence(cs::Sequence s) { lastSequence_ = s; }
+    cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
+    bool test_rollbackEpisode() const { return rollbackEpisode_; }
+    void test_resetRollbackEpisode() { rollbackEpisode_ = false; rollbackHighWater_ = 0; }
+#endif
+
     const cs::MultiWallets& multiWallets() const;
 
     /**
@@ -595,6 +631,18 @@ private:
     mutable std::atomic<uint64_t> uuid_ = 0;
     std::atomic<cs::Sequence> lastSequence_;
     cs::Sequence blocksToBeRemoved_ = 0;
+    // longest-chain guard: a fixed reference for the current automatic-rollback episode. When the
+    // first automatic rollback of an episode starts, rollbackHighWater_ records the head we had then;
+    // the node then refuses to unwind automatically below rollbackHighWater_ - MaxAutoRollbackDepth.
+    // The reference is cleared only once the chain climbs back strictly above rollbackHighWater_, so
+    // alternating removals and appends cannot creep past the limit. Purely local bookkeeping; it
+    // never changes any block content.
+    bool rollbackEpisode_ = false;
+    cs::Sequence rollbackHighWater_ = 0;
+    cs::Sequence rollbackLowWater_ = 0;  // lowest head reached in the current episode (for the log)
+    // longest-chain guard runtime state (see setCommunityBootstrapFloor). The depth bound and the
+    // deep-rollback override are read from config ([params] max_auto_rollback / allow_deep_rollback).
+    cs::Sequence communityBootstrapFloor_ = 0;
     std::atomic_bool stop_ = false;
     // the quick-start checkpoint of the last init() is ahead of the blocks on disk
     bool checkpointAheadOfBlocks_ = false;

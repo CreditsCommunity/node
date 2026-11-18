@@ -69,6 +69,8 @@ const std::string PARAM_NAME_COMPATIBLE_VERSION = "compatible_version";
 const std::string PARAM_NAME_TRAVERSE_NAT = "traverse_nat";
 const std::string PARAM_NAME_SYNC_ON = "sync_on";
 const std::string PARAM_NAME_MAX_UNCORRECTED_BLOCK = "max_uncorrected_block";
+const std::string PARAM_NAME_MAX_AUTO_ROLLBACK = "max_auto_rollback";
+const std::string PARAM_NAME_ALLOW_DEEP_ROLLBACK = "allow_deep_rollback";
 const std::string PARAM_NAME_GENERATE_FORK = "generate_fork";
 const std::string PARAM_NAME_IDLE_MODE = "idle_mode";
 const std::string PARAM_NAME_DAEMON_MODE = "daemon_mode";
@@ -997,6 +999,10 @@ Config Config::readFromFile(const std::string& fileName) {
         }
 
         result.maxUncorrectedBlock_ = params.count(PARAM_NAME_MAX_UNCORRECTED_BLOCK) ? params.get<uint64_t>(PARAM_NAME_MAX_UNCORRECTED_BLOCK) : DEFAULT_MAX_UNCORRECTED_BLOCK;
+        result.maxAutoRollbackDepth_ = params.count(PARAM_NAME_MAX_AUTO_ROLLBACK) ? params.get<uint64_t>(PARAM_NAME_MAX_AUTO_ROLLBACK) : DEFAULT_MAX_AUTO_ROLLBACK;
+        if (params.count(PARAM_NAME_ALLOW_DEEP_ROLLBACK) > 0) {
+            result.allowDeepRollback_ = params.get<bool>(PARAM_NAME_ALLOW_DEEP_ROLLBACK);
+        }
         result.generateFork_ = params.count(PARAM_NAME_GENERATE_FORK) ? params.get<bool>(PARAM_NAME_GENERATE_FORK) : false;
 
         if (params.count(PARAM_NAME_SYNC_ON)) {

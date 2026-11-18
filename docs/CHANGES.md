@@ -44,6 +44,7 @@ lines under the new release.
 
 | PR | Change |
 |---|---|
+| #TBD | csnode: bound the automatic rollback depth when adopting a competing chain during sync. The node stops unwinding its own confirmed blocks once it would roll back more than `[params] max_auto_rollback` (default 1000), on every automatic removal path, leaves its chain intact and waits for the operator instead of unwinding without limit. A non-bootstrap competing block triggers a rollback only if its confirmations verify against the node's own last confidants. Configurable depth and an `allow_deep_rollback` / `CS_ALLOW_DEEP_ROLLBACK` operator override. Local only; block content is unchanged (see `docs/differences.md`, "Consensus fixes") |
 | #187 | docs: `AGENTS.md` and `CLAUDE.md` for coding agents: build, tests, CI, conventions and the mainnet constraints (documentation only) |
 | #186 | ci: the comments of `ci/testnet/contracts.py` say why contract-to-contract calls fail: executor 1518 fails every `invokeExternalContract`; the node does not refuse `@UsingContract` methods (comments only) |
 

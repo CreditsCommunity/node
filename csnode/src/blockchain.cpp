@@ -12,6 +12,7 @@
 
 #include <csnode/blockchain.hpp>
 #include <csnode/blockhashes.hpp>
+#include <csnode/blockverifier.hpp>
 #include <csnode/blocktakeover.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
@@ -829,6 +830,83 @@ csdb::Transaction BlockChain::loadTransaction(const csdb::TransactionID& transId
     return transaction;
 }
 
+void BlockChain::setCommunityBootstrapFloor(cs::Sequence seq) {
+    communityBootstrapFloor_ = seq;
+}
+
+// Longest-chain guard: bound the depth of an automatic rollback while adopting a competing chain.
+// A competing chain that asks us to unwind more than the configured bound of own blocks is either a
+// deliberate network switch (a human must confirm it) or a chain that should not be followed:
+// in both cases the safe local action is to stop unwinding and wait for the operator. The depth is
+// measured against a fixed reference (the head when the episode started), not a counter that forward
+// progress could reset, so alternating removals and appends cannot creep past it. It is called from
+// inside removeLastBlock() and compromiseLastBlock(), so every automatic removal is bounded whatever
+// the caller, and rollbackHighWater_ is captured at the first removal from any path.
+bool BlockChain::guardAutoRollback() {
+    // operator override: accept a deliberate deep switch. Config ([params] allow_deep_rollback) or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable; either one is enough.
+    static const bool allowDeepEnv = [] {
+        const char* v = std::getenv("CS_ALLOW_DEEP_ROLLBACK");
+        return v != nullptr && *v != '\0';
+    }();
+    const auto* config = cs::ConfigHolder::instance().config();
+    if (allowDeepEnv || (config != nullptr && config->allowDeepRollback())) {
+        return true;
+    }
+    const uint64_t maxDepth = (config != nullptr) ? config->maxAutoRollbackDepth()
+                                                  : Consensus::MaxAutoRollbackDepth;
+    if (maxDepth == 0) {
+        return true; // max_auto_rollback=0: no bound, the official node's behaviour
+    }
+
+    const cs::Sequence tip = lastSequence_.load();
+    if (!rollbackEpisode_) {
+        rollbackEpisode_ = true;
+        rollbackHighWater_ = tip; // the head we had before this rollback episode began
+        rollbackLowWater_ = tip;
+    }
+
+    // a node that adopted a community bootstrap table (PR #188) may unwind freely back to the sequence
+    // it held when it took the table: taking the table was already the operator's explicit choice, and
+    // after a partition the longer community branch legitimately replaces blocks down to that point.
+    if (communityBootstrapFloor_ != 0 && tip > communityBootstrapFloor_) {
+        return true;
+    }
+
+    // refuse the removal that would take the head below the floor (no wraparound when near genesis)
+    if (rollbackHighWater_ > maxDepth && tip <= rollbackHighWater_ - maxDepth) {
+        cserror() << kLogPrefix << "LONGEST-CHAIN GUARD: a competing chain requires rolling back more than "
+                  << maxDepth << " of our own confirmed blocks (reference head #"
+                  << WithDelimiters(rollbackHighWater_) << ", now #" << WithDelimiters(tip)
+                  << "). Keeping our chain, operator review required. This is either a deliberate longer-chain "
+                  << "switch to be confirmed, or a chain not to be followed. Set [params] "
+                  << "allow_deep_rollback=true (or the CS_ALLOW_DEEP_ROLLBACK environment variable) and restart "
+                  << "to accept a deliberate deep switch.";
+        return false;
+    }
+    return true;
+}
+
+// A competing block legitimately asks us to roll back only if it is vouched for by authority this node
+// already recognises. We verify its round confirmations against the confidants of our own current last
+// block, exactly as BlockVerifier does for a block arriving from the network. Checking the block against
+// the confidants it declares itself (as a self-signature check would) proves nothing: any block
+// names its own keys and signs for itself. A legitimate micro-fork passes, because the honest competing
+// block at the same height was produced by the same deterministically elected trusted group whose keys
+// confirm our last block; a block without confirmations from that group fails and never triggers an
+// unwind. Bootstrap blocks carry no such confirmations and are handled by the depth floor plus operator,
+// so callers must check isBootstrap() before relying on this.
+bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
+    std::string reason;
+    const auto trustedConfidants = getLastBlock().confidants();
+    const bool ok = cs::BlockVerifier::verifyConfirmations(competing, trustedConfidants, reason);
+    if (!ok) {
+        csdebug() << kLogPrefix << "competing block #" << competing.sequence()
+                  << " not confirmed by our last block's confidants: " << reason;
+    }
+    return ok;
+}
+
 // - remove the last block from the top of blockchain
 // - remove pair (hash, sequence) from cache (blockHashes_)
 // - decrement the last sequence by 1
@@ -836,6 +914,14 @@ csdb::Transaction BlockChain::loadTransaction(const csdb::TransactionID& transId
 void BlockChain::removeLastBlock() {
     if (blocksToBeRemoved_ == 0) {
         csmeta(csdebug) << kLogPrefix << "There are no blocks, allowed to be removed";
+        return;
+    }
+    // longest-chain guard: every caller of removeLastBlock is an automatic reorg/sync removal (there is
+    // no operator truncation path), so bound the depth here, once, for all of them. When the limit is
+    // reached the block is kept and the caller sees its own last block unchanged; no permanent state is
+    // set, so a later legitimate reorg still works.
+    if (!guardAutoRollback()) {
+        cswarning() << kLogPrefix << "longest-chain guard kept the last block, automatic rollback stopped";
         return;
     }
     //--blocksToBeRemoved_;
@@ -909,6 +995,9 @@ void BlockChain::removeLastBlock() {
         blockHashes_->remove(remove_hash);
     }
     --lastSequence_;
+    if (rollbackEpisode_ && lastSequence_.load() < rollbackLowWater_) {
+        rollbackLowWater_ = lastSequence_.load();
+    }
 
     csmeta(csdebug) << kLogPrefix << "done";
 }
@@ -925,6 +1014,14 @@ bool BlockChain::compromiseLastBlock(const csdb::PoolHash& desired_hash) {
     if (!last_block.is_valid()) {
         cserror() << kLogPrefix << "can only compromise the deferred block, not flushed yet";
         uncertainLastBlockFlag_ = false;
+        return false;
+    }
+
+    // longest-chain guard: marking the last block uncertain is the first step of an automatic unwind,
+    // so it is bounded here too. Beyond the depth limit the block is kept and the caller falls through
+    // to its keep-own-chain branch.
+    if (!guardAutoRollback()) {
+        cswarning() << kLogPrefix << "longest-chain guard kept the last block, not compromising it";
         return false;
     }
 
@@ -1924,6 +2021,16 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         lastSequence_ = deferredBlock_.sequence();
     }
 
+    // forward progress: the rollback episode ends only once the chain climbs back strictly above the
+    // head it had when the episode began, so the depth cannot creep past the limit by alternating
+    // removals and appends below that head.
+    if (rollbackEpisode_ && lastSequence_.load() > rollbackHighWater_) {
+        rollbackEpisode_ = false;
+        // one line per finished episode: how deep the node actually unwound (measured in CI)
+        cslog() << kLogPrefix << "rollback episode ended: unwound " << (rollbackHighWater_ - rollbackLowWater_)
+                << " block(s) below #" << WithDelimiters(rollbackHighWater_);
+    }
+
     //csdetails() << kLogPrefix << "Pool #" << deferredBlock_.sequence() << ": " << cs::Utils::byteStreamToHex(deferredBlock_.to_binary().data(), deferredBlock_.to_binary().size());
     emit storeBlockEvent(pool);
     if constexpr (false && (pool.transactions_count() > 0 || pool.sequence() % 10 == 0)) {//log code
@@ -2311,10 +2418,20 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
             if (compromiseLastBlock(pool.previous_hash())) {
                 csdebug() << kLogPrefix << "compromise own last block and cancel store operation";
             }
+            else if (!BlockChain::isBootstrap(pool) && !hasTrustedConfirmations(pool)) {
+                // a non-bootstrap competing block not vouched for by authority this node recognises
+                // (its confirmations do not verify against our last block's confidants): never unwind
+                // our own chain for it. A block that only vouches for itself cannot make us roll back.
+                csdebug() << kLogPrefix << "competing block #" << poolSequence
+                          << " is not confirmed by our trusted confidants, keep own last block";
+            }
             else {
                 //if (lastSequence + 5ULL < cs::Conveyer::instance().currentRoundNumber()) {
                 //    arrangeBlocksInCache();
                 //}
+                // bootstrap block (not locally verifiable), or a competing block confirmed by our
+                // trusted confidants: unwind, but only within the depth bound that removeLastBlock
+                // enforces; beyond it the block is kept and the operator decides.
                 csdebug() << kLogPrefix << "remove own last block and cancel store operation";
                 removeLastBlock();
             }
@@ -2797,6 +2914,19 @@ void BlockChain::cacheLastBlocks() {
     cs::Sequence lastSeq;
     while (!incorrectBlocks_.empty() || !selectionFinished_) {
         csinfo() << kLogPrefix << "Starting blocks transferring cycle";
+        // longest-chain guard: stop unwinding own blocks once the competing chain demands a deeper
+        // automatic rollback than allowed; leave the chain intact, abandon this antifork episode
+        // cleanly and wait for the operator. (guardAutoRollback measures depth against the fixed
+        // reference head via lastSequence_, so this counts real own-block removals only.)
+        if (!guardAutoRollback()) {
+            cswarning() << kLogPrefix << "longest-chain guard stopped the antifork rollback; keeping own chain";
+            incorrectBlocks_.clear();
+            selectionFinished_ = true;
+            lastPrevHash_ = csdb::PoolHash();
+            emittingRequest_ = 0;
+            antiForkMode_ = false;
+            return;
+        }
         auto lastBlock = getLastBlock();
         lastSeq = lastBlock.sequence();
         csinfo() << kLogPrefix << "now dealing with " << lastSeq;

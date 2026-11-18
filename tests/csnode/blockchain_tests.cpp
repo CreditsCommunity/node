@@ -12,6 +12,8 @@
 
 #include <csnode/blockchain.hpp>
 #include <csnode/blockchain_serializer.hpp>
+#include <csnode/configholder.hpp>
+#include <consensus.hpp>
 
 #include <csdb/amount_commission.hpp>
 #include <csdb/currency.hpp>
@@ -316,4 +318,88 @@ TEST(BlockChain, ConsensusSettingsDigestCoversEverySetting) {
         changes[i](changed);
         EXPECT_NE(changed.consensusSettingsDigest(), digest) << "change " << i;
     }
+}
+
+namespace {
+// a clean default config so the guard reads the default bound (1000) and no deep-rollback override,
+// independent of any config a prior test in the binary may have set.
+void installDefaultConfig() {
+    cs::ConfigHolder::instance().setConfig(Config{});
+}
+}  // namespace
+
+// The longest-chain guard bounds an automatic rollback at Consensus::MaxAutoRollbackDepth below the
+// head captured when the rollback episode began, and that reference is fixed for the episode.
+TEST(BlockChain, LongestChainGuardBoundsRollbackDepth) {
+    installDefaultConfig();
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.test_resetRollbackEpisode();
+
+    const cs::Sequence head = 5000;
+    const uint64_t depth = Consensus::MaxAutoRollbackDepth;  // default 1000
+    chain.test_setLastSequence(head);
+
+    // the first call captures the high-water reference at the current head
+    ASSERT_TRUE(chain.guardAutoRollback());
+    EXPECT_TRUE(chain.test_rollbackEpisode());
+    EXPECT_EQ(chain.test_rollbackHighWater(), head);
+
+    // unwinding step by step is allowed right up to the floor (head - depth), and the reference does
+    // not move as the head drops, so forward progress cannot reset it
+    chain.test_setLastSequence(head - depth + 1);
+    EXPECT_TRUE(chain.guardAutoRollback());
+    EXPECT_EQ(chain.test_rollbackHighWater(), head);
+
+    // the removal that would take the head to or below the floor is refused
+    chain.test_setLastSequence(head - depth);
+    EXPECT_FALSE(chain.guardAutoRollback());
+
+    // refusing sets no permanent state: a fresh episode from a new head works again
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(head - depth);
+    EXPECT_TRUE(chain.guardAutoRollback());
+    EXPECT_EQ(chain.test_rollbackHighWater(), head - depth);
+}
+
+// Near genesis the bound never underflows: a head below the depth can always be unwound to genesis.
+TEST(BlockChain, LongestChainGuardNoUnderflowNearGenesis) {
+    installDefaultConfig();
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.test_resetRollbackEpisode();
+
+    chain.test_setLastSequence(10);
+    for (cs::Sequence s = 10; s > 0; --s) {
+        chain.test_setLastSequence(s);
+        EXPECT_TRUE(chain.guardAutoRollback()) << "seq " << s;
+    }
+}
+
+// A node that adopted a community bootstrap table may unwind back to the sequence where it took the
+// table, even past the ordinary depth bound; below that point the bound applies again.
+TEST(BlockChain, LongestChainGuardCommunityBootstrapFloor) {
+    installDefaultConfig();
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.test_resetRollbackEpisode();
+
+    const cs::Sequence head = 5000;
+    const cs::Sequence tableSeq = 3500;  // deeper than head - 1000 = 4000
+    chain.test_setLastSequence(head);
+    chain.setCommunityBootstrapFloor(tableSeq);
+    ASSERT_TRUE(chain.guardAutoRollback());  // captures high-water 5000
+
+    // past the ordinary floor (4000) but still above the table sequence: allowed
+    chain.test_setLastSequence(4000);
+    EXPECT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(tableSeq + 1);
+    EXPECT_TRUE(chain.guardAutoRollback());
+
+    // at or below the table sequence the ordinary bound takes over again and refuses
+    chain.test_setLastSequence(tableSeq);
+    EXPECT_FALSE(chain.guardAutoRollback());
 }
