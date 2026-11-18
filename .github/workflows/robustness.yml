@@ -121,7 +121,7 @@ jobs:
         with:
           name: testnet-node-${{ github.sha }}
           path: build/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
       # mixed nodes, as in testnet.yml: the even nodes run a node built from another ref
       - name: Build the node under comparison
@@ -182,7 +182,7 @@ jobs:
         with:
           name: testnet-node-alt-${{ github.sha }}
           path: build-alt/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
   scenario:
     needs: build
@@ -518,6 +518,20 @@ jobs:
             env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_STOP_MINUTES=6 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500
             fixed: true
             manual: true
+          # the same with staggered stall_minutes: the starter (the community node with the lowest key)
+          # 2, the others 3. Its first tables reach nodes whose fallback is still closed: the restart
+          # needs a repeat of the table in the same round to get through (not dropped as a p2p duplicate)
+          - name: official-stop-config-staggered
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_STOP_MINUTES=7 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=3 COMMUNITY_STALL_STARTER=2 RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          # the community nodes cut off from the RUNNING official nodes for 6 minutes (fallback on,
+          # stall_minutes=2): both sides write blocks; after the reconnection the run reports which
+          # side the nodes kept, how many blocks and transactions the other lost, and needs one chain
+          - name: official-partition
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000
+            fixed: true
+            manual: true
           # the fallback on (stall_minutes=1) in a network whose official nodes keep running, under
           # packet loss and the restart test: it must never act
           - name: community-bootstrap-quiet
@@ -634,4 +648,6 @@ jobs:
             testnet-run/resources.tsv
             testnet-run/resources-summary.txt
             testnet-run/sampler.log
-          retention-days: 14
+            testnet-run/partition-*.txt
+          # branch runs (test variants) are kept briefly: Actions storage is shared
+          retention-days: ${{ github.ref_name == 'master' && 14 || 3 }}
