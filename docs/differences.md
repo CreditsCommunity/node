@@ -141,29 +141,46 @@ stall_minutes=30
 ```
 
 With the list set, and only after `stall_minutes` in which the node saw no new block, no round
-package and no regular bootstrap table, and while no neighbour reports a block above its own:
+package whose signatures it checked and accepted, and no regular bootstrap table, and while no
+neighbour reports a block two or more above its own (one above only holds it for a further
+`stall_minutes`, since sync would have fetched that block long before):
 
 - a node whose key is an initial confidant or listed may start a bootstrap table of the initial
   confidants and listed nodes that hold the highest block, as an initial confidant does; the table
   is signed by its starter, not by the project;
 - a node with the list takes such a table only if it has more than half of the listed keys, each
   key is an initial confidant or listed, and the starter's signature checks. The round window and
-  the stall check of every unsigned table still apply, and a node takes at most one such table per
-  half `round_elapse_time` unless it is larger.
+  the stall check of every unsigned table still apply. A node takes one such table per half
+  `round_elapse_time`; within that time only a larger table whose starter (its lowest key) is not
+  above the current table's starter replaces it, so a listed node cannot displace a running table
+  by padding its own with keys of stopped nodes. The starter repeats its table every
+  `round_elapse_time` with new random bytes after the signature, so that a node whose fallback
+  opens later gets the repeat (the transport drops a message it has seen before);
+- of an even set of nodes the starter drops the last key, as the official code does, unless that
+  would leave the table without more than half of the listed keys;
+- a jump of the clock between two checks (the host suspended and resumed, the clock set) counts
+  as progress: the node watches again for `stall_minutes` before it acts.
 
 In normal operation nothing changes: blocks and round packages keep the fallback closed, a regular
 bootstrap table is handled exactly as before and always replaces a community one, and blocks,
-hashes and validation are unchanged. Official nodes, and community nodes without the list, drop a
+hashes and validation are unchanged. A regular table, even one signed by the project, is progress
+like a block: if no block follows it for a further `stall_minutes`, a community table may replace it. Official nodes, and community nodes without the list, drop a
 community table (it holds a key that is not an initial confidant and is not signed by the
 project); they then take the blocks written meanwhile through ordinary sync once they are back,
 as the `official-stop-*` scenarios of the robustness workflow check.
 
 Every node that should take part needs the same list: it only helps when more than half of the
 listed nodes are running. The set-up scripts and the Docker image do not offer the option; edit
-`config.ini` by hand (in Docker, `~/.credits/config.ini`). The risk it brings: if a network
-partition cuts more than half of the listed nodes off from the official nodes for longer than
-`stall_minutes`, while the official nodes keep producing blocks, the listed nodes restart on their
-own and the two sides write different blocks. Keep `stall_minutes` long.
+`config.ini` by hand (in Docker, `~/.credits/config.ini`).
+
+The risk it brings is a partition. If a network partition cuts more than half of the listed nodes
+off from the official nodes for longer than `stall_minutes`, while the official nodes keep
+producing blocks, the listed nodes restart on their own and the two sides write different blocks.
+There is no rule that makes either side yield: when the two sides reconnect, the longer chain
+wins, as for any two chains, and the nodes of the other side unwind their blocks above the fork.
+The transactions of the unwound blocks are reverted; those the other side did not also write must
+be sent again. The `official-partition` scenario of the robustness workflow measures this. Keep
+`stall_minutes` long.
 
 ## Start-up behaviour
 
