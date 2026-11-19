@@ -55,7 +55,9 @@ def amount(a):
 
 
 def monitor(path):
-    req = urllib.request.Request(f"{MONITOR}/{path}", headers={"Accept": "application/json"})
+    # the monitor answers 403 to urllib's default User-Agent (since 2026-11-18): name the client
+    req = urllib.request.Request(f"{MONITOR}/{path}",
+                                 headers={"Accept": "application/json", "User-Agent": "credits-community-ci/1.0"})
     return json.load(urllib.request.urlopen(req, timeout=60))
 
 
