@@ -299,6 +299,8 @@ bool BlockChain::init(
         if (successfulQuickStart) {
             serializationManPtr_->clear();
         }
+        // a new database: the rollback-bound files of a previous one (removed db/) do not apply
+        cs::forkguard::clearAll(cs::forkguard::stateDirFor(path));
         writeGenesisBlock();
     }
     else {
@@ -909,6 +911,9 @@ void BlockChain::beginRollbackEpisode() {
 }
 
 void BlockChain::onHeadAdvanced() {
+    if (pendingHold_.has_value() && lastSequence_.load() != pendingHold_->head) {
+        pendingHold_.reset();  // a refused block that did not stop the chain: no FORK HELD
+    }
     // the rollback episode ends only once the chain climbs back strictly above the head it had when
     // the episode began, so the depth cannot creep past the limit by alternating removals and appends
     // below that head
@@ -953,35 +958,7 @@ void BlockChain::onHeadAdvanced() {
     }
 }
 
-bool BlockChain::recordForkHeld(const char* reason) {
-    const std::string competingHash = competing_.has_value() ? competing_->hash.to_string() : std::string{};
-    const std::string competingPrev = competing_.has_value() ? competing_->previous.to_string() : std::string{};
-    {
-        std::lock_guard l(guardMutex_);
-        if (forkRecord_.has_value() && forkRecord_->hasDismissal() && competing_.has_value() &&
-            forkRecord_->inDismissedBranch(competingHash, competingPrev)) {
-            // a branch the operator dismissed: still refused, never FORK HELD again; follow it by its hashes
-            const size_t before = forkRecord_->branchHashes.size();
-            forkRecord_->addBranchHash(competingHash);
-            const bool grew = forkRecord_->branchHashes.size() != before;
-            const auto now = std::chrono::steady_clock::now();
-            if (lastDismissedLog_ == std::chrono::steady_clock::time_point{} || now - lastDismissedLog_ >= std::chrono::hours(1)) {
-                lastDismissedLog_ = now;
-                csinfo() << kLogPrefix << "competing branch at #" << WithDelimiters(forkRecord_->dismissedSeq) << " ("
-                         << forkRecord_->dismissedHash << ") dismissed by the operator on "
-                         << cs::forkguard::utcTime(forkRecord_->dismissedUnix) << "; still refused (block #"
-                         << WithDelimiters(competing_->seq) << ")";
-            }
-            if (grew) {
-                cs::forkguard::saveForkRecord(guardStateDir_, *forkRecord_);
-            }
-            return false;
-        }
-        if (forkRecord_.has_value() && forkRecord_->held) {
-            return true; // one record per episode: the first refusal
-        }
-    }
-    beginRollbackEpisode();  // FORK HELD ends with the episode
+cs::forkguard::ForkRecord BlockChain::buildForkRecord(const char* reason) {
     cs::forkguard::ForkRecord r;
     {
         std::lock_guard l(guardMutex_);
@@ -992,7 +969,7 @@ bool BlockChain::recordForkHeld(const char* reason) {
     r.held = true;
     r.reason = reason;
     r.sinceUnix = static_cast<int64_t>(std::time(nullptr));
-    r.highWater = rollbackHighWater_;
+    r.highWater = rollbackEpisode_ ? rollbackHighWater_ : lastSequence_.load();
     const cs::Sequence tip = lastSequence_.load();
     r.ourHead = tip;
     r.ourHeadHash = getHashBySequence(tip).to_string();
@@ -1004,7 +981,7 @@ bool BlockChain::recordForkHeld(const char* reason) {
     r.competingHash.clear();
     if (competing_.has_value() && competing_->seq > 0) {
         r.competingSeq = competing_->seq;
-        r.competingHash = competingHash;
+        r.competingHash = competing_->hash.to_string();
         candidate = std::min<cs::Sequence>(competing_->seq - 1, tip);
         if (candidate + 1 == competing_->seq) {
             // the competing block names its previous block: ours at that height is shared or not
@@ -1028,6 +1005,59 @@ bool BlockChain::recordForkHeld(const char* reason) {
             r.peerAddress = peerAddressResolver_(key);
         }
     }
+    return r;
+}
+
+bool BlockChain::recordForkHeld(const char* reason) {
+    const std::string competingHash = competing_.has_value() ? competing_->hash.to_string() : std::string{};
+    const std::string competingPrev = competing_.has_value() ? competing_->previous.to_string() : std::string{};
+    {
+        std::lock_guard l(guardMutex_);
+        if (forkRecord_.has_value() && forkRecord_->hasDismissal() && competing_.has_value() &&
+            forkRecord_->inDismissedBranch(competingHash, competingPrev)) {
+            // a branch the operator dismissed: still refused, never FORK HELD again. The branch is
+            // followed by its hashes only through blocks vouched for by our confidants, so blocks
+            // anyone can forge never grow (or evict from) that list.
+            bool grew = false;
+            if (competing_->vouched) {
+                const size_t before = forkRecord_->branchHashes.size();
+                forkRecord_->addBranchHash(competingHash);
+                grew = forkRecord_->branchHashes.size() != before;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (lastDismissedLog_ == std::chrono::steady_clock::time_point{} || now - lastDismissedLog_ >= std::chrono::hours(1)) {
+                lastDismissedLog_ = now;
+                csinfo() << kLogPrefix << "competing branch at #" << WithDelimiters(forkRecord_->dismissedSeq) << " ("
+                         << forkRecord_->dismissedHash << ") dismissed by the operator on "
+                         << cs::forkguard::utcTime(forkRecord_->dismissedUnix) << "; still refused (block #"
+                         << WithDelimiters(competing_->seq) << ")";
+            }
+            if (grew) {
+                cs::forkguard::saveForkRecord(guardStateDir_, *forkRecord_);
+            }
+            return false;
+        }
+        if (forkRecord_.has_value() && forkRecord_->held) {
+            return true; // one record per episode: the first refusal
+        }
+    }
+    if (std::string(reason) == "authority") {
+        // any sync reply can carry a block not vouched for by our confidants (a peer on a minority
+        // branch): the block is refused at once, but FORK HELD (files, banner, healthcheck) is
+        // reported only if the head stays where it was (promotePendingHold), so that it does not flap
+        if (!pendingHold_.has_value()) {
+            pendingHold_ = PendingHold{buildForkRecord(reason), lastSequence_.load(), std::chrono::steady_clock::now(), 0};
+        }
+        return true;
+    }
+    holdFork(buildForkRecord(reason));
+    return true;
+}
+
+void BlockChain::holdFork(cs::forkguard::ForkRecord r) {
+    pendingHold_.reset();
+    beginRollbackEpisode();  // FORK HELD ends with the episode
+    r.highWater = rollbackHighWater_;
     {
         std::lock_guard l(guardMutex_);
         forkRecord_ = r;
@@ -1039,13 +1069,37 @@ bool BlockChain::recordForkHeld(const char* reason) {
     if (r.reason == "depth") {
         cserror() << kLogPrefix << "LONGEST-CHAIN GUARD: a competing chain requires rolling back more than "
                   << maxDepth << " of our own confirmed blocks (reference head #" << WithDelimiters(rollbackHighWater_)
-                  << ", now #" << WithDelimiters(tip) << "). Keeping our chain: FORK HELD, operator review required.";
+                  << ", now #" << WithDelimiters(r.ourHead) << "). Keeping our chain: FORK HELD, operator review required.";
+    }
+    else if (r.reason == "authority") {
+        cserror() << kLogPrefix << "a competing block #" << WithDelimiters(r.competingSeq)
+                  << " is not vouched for by this node's confidants and the head has not moved since. Keeping our chain: "
+                  << "FORK HELD, operator review required.";
     }
     else {
-        cserror() << kLogPrefix << "a competing block #" << WithDelimiters(r.competingSeq)
-                  << " is not vouched for by this node's confidants. Keeping our chain: FORK HELD, operator review required.";
+        cserror() << kLogPrefix << "the fork record " << cs::forkguard::kForkFile << " could not be read: keeping our "
+                  << "chain, FORK HELD, operator review required.";
     }
     cserror() << kLogPrefix << cs::forkguard::summary(r);
+}
+
+bool BlockChain::promotePendingHold(bool roundStarted) {
+    if (!pendingHold_.has_value()) {
+        return false;
+    }
+    if (lastSequence_.load() != pendingHold_->head) {
+        pendingHold_.reset();  // the head moved: the refused block was no fork this node is stuck on
+        return false;
+    }
+    if (roundStarted) {
+        ++pendingHold_->rounds;
+    }
+    const bool stuck = pendingHold_->rounds >= 2 ||
+                       std::chrono::steady_clock::now() - pendingHold_->since >= std::chrono::minutes(1);
+    if (!stuck) {
+        return false;
+    }
+    holdFork(pendingHold_->record);
     return true;
 }
 
@@ -1149,7 +1203,8 @@ void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, co
 void BlockChain::setGuardStateDir(const std::string& dir) {
     guardStateDir_ = dir;
     const cs::Sequence tip = lastSequence_.load();
-    if (const auto e = cs::forkguard::loadEpisode(dir)) {
+    bool corrupt = false;
+    if (const auto e = cs::forkguard::loadEpisode(dir, &corrupt)) {
         if (tip <= e->highWater) {
             rollbackEpisode_ = true;
             rollbackHighWater_ = e->highWater;
@@ -1161,7 +1216,15 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
             cs::forkguard::clearEpisode(dir);
         }
     }
-    if (auto r = cs::forkguard::loadForkRecord(dir)) {
+    else if (corrupt) {
+        // fail safe: an unreadable reference must not lift the bound, so a new episode starts here
+        cserror() << kLogPrefix << cs::forkguard::kEpisodeFile << " in " << dir << " cannot be read: a rollback "
+                  << "episode starts at the current head #" << WithDelimiters(tip) << " instead";
+        rollbackEpisode_ = false;
+        beginRollbackEpisode();
+    }
+    corrupt = false;
+    if (auto r = cs::forkguard::loadForkRecord(dir, &corrupt)) {
         if (!rollbackEpisode_) {
             r->held = false;  // the chain is past that episode
         }
@@ -1181,7 +1244,28 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
             cs::forkguard::clearForkRecord(dir);
         }
     }
-    approvedBranch_ = cs::forkguard::loadApprovedBranch(dir);
+    else if (corrupt) {
+        // the record is lost: report FORK HELD with what is known and keep refusing through the episode
+        cserror() << kLogPrefix << cs::forkguard::kForkFile << " in " << dir << " cannot be read";
+        {
+            std::lock_guard l(guardMutex_);
+            forkRecord_.reset();
+        }
+        cs::forkguard::ForkRecord r;
+        r.reason = "unreadable";
+        r.sinceUnix = static_cast<int64_t>(std::time(nullptr));
+        r.ourHead = tip;
+        r.ourHeadHash = getHashBySequence(tip).to_string();
+        r.forkPoint = tip;  // unknown; no hash, so --resolve-fork refuses and the operator cuts by hand
+        holdFork(r);
+    }
+    corrupt = false;
+    approvedBranch_ = cs::forkguard::loadApprovedBranch(dir, &corrupt);
+    if (corrupt) {
+        cserror() << kLogPrefix << cs::forkguard::kApprovedFile << " in " << dir << " cannot be read: no branch is "
+                  << "approved; removing it";
+        cs::forkguard::clearApprovedBranch(dir);
+    }
     if (approvedBranch_.has_value()) {
         cslog() << kLogPrefix << "branch approved with --resolve-fork: block #" << WithDelimiters(approvedBranch_->seq)
                 << " (" << approvedBranch_->hash << ") after the fork point #" << WithDelimiters(approvedBranch_->forkPoint);
@@ -2835,7 +2919,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 return false;
             }
             // the competing block being handled, for the fork record if the node refuses to unwind
-            competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash()};
+            competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash(), competingBlockMayTriggerUnwind(pool)};
             struct ClearCompeting {
                 std::optional<CompetingBlock>& c;
                 ~ClearCompeting() { c.reset(); }

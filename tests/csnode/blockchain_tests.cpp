@@ -687,6 +687,12 @@ BlockChain& guardChain() {
     return chain;
 }
 
+// an authority refusal becomes FORK HELD when the head stays put over two round starts
+void stayStuck(BlockChain& chain) {
+    EXPECT_FALSE(chain.promotePendingHold(true));
+    EXPECT_TRUE(chain.promotePendingHold(true));
+}
+
 // the guard chain in a clean state: no episode, no record, no files
 BlockChain& freshGuardChain(const std::string& dir = std::string{}) {
     installDefaultConfig();
@@ -798,6 +804,9 @@ TEST(BlockChain, RefusedCompetingBlockLeavesTheChainUntouched) {
     EXPECT_EQ(chain.getLastSeq(), 20u);
     EXPECT_EQ(chain.getLastHash(), own.hash());
     EXPECT_FALSE(chain.isLastBlockUncertain());
+    EXPECT_FALSE(chain.forkHeld());  // refused at once, reported once the head stays
+    EXPECT_TRUE(chain.forkHoldPending());
+    stayStuck(chain);
     ASSERT_TRUE(chain.forkHeld());
     auto rec = chain.forkHeldRecord();
     EXPECT_EQ(rec->reason, "authority");
@@ -841,6 +850,9 @@ TEST(BlockChain, DismissedForkStaysRefusedAndQuiet) {
 
     auto branch = guardBlock(51, next, &strangers, 0b111, false, false, someHash('a'));
     EXPECT_FALSE(chain.storeBlock(branch, cs::PoolStoreType::Synced));
+    EXPECT_FALSE(chain.forkHeld());  // refused at once, reported once the head stays
+    EXPECT_TRUE(chain.forkHoldPending());
+    stayStuck(chain);
     ASSERT_TRUE(chain.forkHeld());
 
     // no trigger: nothing happens
@@ -883,9 +895,13 @@ TEST(BlockChain, DismissedForkStaysRefusedAndQuiet) {
     // a different branch is reported again, and the earlier dismissal is kept
     auto other = guardBlock(52, next, &strangers, 0b111, false, false, someHash('b'), "other");
     EXPECT_FALSE(chain.storeBlock(other, cs::PoolStoreType::Synced));
+    EXPECT_FALSE(chain.forkHeld());  // refused at once, reported once the head stays
+    EXPECT_TRUE(chain.forkHoldPending());
+    stayStuck(chain);
     ASSERT_TRUE(chain.forkHeld());
     EXPECT_EQ(chain.forkHeldRecord()->competingHash, other.hash().to_string());
-    EXPECT_TRUE(chain.forkHeldRecord()->inDismissedBranch(continued.hash().to_string(), ""));
+    EXPECT_TRUE(chain.forkHeldRecord()->inDismissedBranch(branch.hash().to_string(), ""));
+    EXPECT_FALSE(chain.forkHeldRecord()->inDismissedBranch(continued.hash().to_string(), ""));  // not vouched for: not added
     chain.setGuardStateDir("");
     chain.test_resetRollbackEpisode();
 }
@@ -958,6 +974,9 @@ TEST(BlockChain, ResolveForkApprovesOnlyTheRecordedBlock) {
         EXPECT_FALSE(chain.storeBlock(other, cs::PoolStoreType::Synced));
         EXPECT_EQ(chain.getLastSeq(), 60u);
         EXPECT_EQ(chain.getLastHash(), forkBlock.hash());
+        EXPECT_FALSE(chain.forkHeld());  // refused at once, reported once the head stays
+        EXPECT_TRUE(chain.forkHoldPending());
+        stayStuck(chain);
         EXPECT_TRUE(chain.forkHeld());
         EXPECT_TRUE(chain.approvedBranch().has_value());
         EXPECT_TRUE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
@@ -974,6 +993,9 @@ TEST(BlockChain, ResolveForkApprovesOnlyTheRecordedBlock) {
         EXPECT_EQ(chain.getLastSeq(), 61u);
         EXPECT_EQ(chain.getLastHash(), ownAgain.hash());
         EXPECT_FALSE(chain.isLastBlockUncertain());
+        EXPECT_FALSE(chain.forkHeld());  // refused at once, reported once the head stays
+        EXPECT_TRUE(chain.forkHoldPending());
+        stayStuck(chain);
         EXPECT_TRUE(chain.forkHeld());
         EXPECT_TRUE(chain.approvedBranch().has_value());
     }
@@ -1032,4 +1054,134 @@ TEST(BlockChain, ResolveForkApprovesOnlyTheRecordedBlock) {
         EXPECT_FALSE(chain.approvedBranch().has_value());
     }
     freshGuardChain();
+}
+
+// --resolve-fork acts only on a held fork: a dismissed record is refused, with the remedy
+TEST(BlockChain, ResolvePlanRefusesADismissedRecord) {
+    TempDir dir("plan-dismissed");
+    cs::forkguard::ForkRecord r;
+    r.held = false;
+    r.reason = "authority";
+    r.forkPoint = 99;
+    r.forkPointHash = "AB";
+    r.dismissedUnix = 1795000000;
+    r.dismissedSeq = 100;
+    r.dismissedHash = "CD";
+    r.addBranchHash("CD");
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.str(), r));
+    std::string error;
+    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());
+    EXPECT_NE(error.find("dismissed on 2026-"), std::string::npos) << error;
+    EXPECT_NE(error.find("--set-bc-top <sequence>"), std::string::npos) << error;
+}
+
+// an unreadable (or empty) file of each kind is reported, never read as "nothing there": the episode
+// fails safe (a new one at the head), the fork record stays FORK HELD, an approval is dropped
+TEST(BlockChain, CorruptGuardFilesFailSafe) {
+    for (const std::string content : {std::string("{ not json"), std::string()}) {
+        SCOPED_TRACE(content.empty() ? "empty" : "garbage");
+        TempDir dir("corrupt");
+        const auto write = [&](const char* name) { std::ofstream(dir.path / name, std::ios::binary) << content; };
+        bool corrupt = false;
+
+        write(cs::forkguard::kEpisodeFile);
+        EXPECT_FALSE(cs::forkguard::loadEpisode(dir.str(), &corrupt).has_value());
+        EXPECT_TRUE(corrupt);
+        write(cs::forkguard::kForkFile);
+        EXPECT_FALSE(cs::forkguard::loadForkRecord(dir.str(), &corrupt).has_value());
+        EXPECT_TRUE(corrupt);
+        std::string error;
+        EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());
+        EXPECT_NE(error.find("cannot be read"), std::string::npos) << error;
+        write(cs::forkguard::kApprovedFile);
+        EXPECT_FALSE(cs::forkguard::loadApprovedBranch(dir.str(), &corrupt).has_value());
+        EXPECT_TRUE(corrupt);
+        // a missing file is not corrupt
+        EXPECT_FALSE(cs::forkguard::loadEpisode((dir.path / "none").string(), &corrupt).has_value());
+        EXPECT_FALSE(corrupt);
+
+        auto& chain = freshGuardChain();
+        chain.test_setLastSequence(700);
+        write(cs::forkguard::kEpisodeFile);
+        write(cs::forkguard::kForkFile);
+        write(cs::forkguard::kApprovedFile);
+        chain.setGuardStateDir(dir.str());
+        EXPECT_TRUE(chain.test_rollbackEpisode());          // a new episode at the head
+        EXPECT_EQ(chain.test_rollbackHighWater(), 700u);
+        const auto episode = cs::forkguard::loadEpisode(dir.str(), &corrupt);
+        ASSERT_TRUE(episode.has_value());
+        EXPECT_EQ(episode->highWater, 700u);
+        ASSERT_TRUE(chain.forkHeld());                     // the lost record: still FORK HELD
+        EXPECT_EQ(chain.forkHeldRecord()->reason, "unreadable");
+        EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());  // no hash to check
+        EXPECT_FALSE(chain.approvedBranch().has_value());  // no approval
+        EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
+        freshGuardChain();
+    }
+}
+
+// a restart below the floor of the persisted reference refuses at once; and the files go together
+// when the database they describe is replaced
+TEST(BlockChain, RestartBelowTheFloorAndCleanup) {
+    TempDir dir("floor");
+    auto& chain = freshGuardChain();
+    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {5000}));
+    chain.test_setLastSequence(4800);  // already below 5000 - 100
+    chain.setGuardStateDir(dir.str());
+    EXPECT_EQ(chain.test_rollbackHighWater(), 5000u);
+    EXPECT_FALSE(chain.guardAutoRollback());
+    EXPECT_TRUE(chain.forkHeld());
+    ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), {10, 11, "AB"}));
+    for (const char* f : {cs::forkguard::kEpisodeFile, cs::forkguard::kForkFile, cs::forkguard::kApprovedFile}) {
+        EXPECT_TRUE(std::filesystem::exists(dir.path / f)) << f;
+    }
+    cs::forkguard::clearAll(dir.str());
+    for (const char* f : {cs::forkguard::kEpisodeFile, cs::forkguard::kForkFile, cs::forkguard::kApprovedFile}) {
+        EXPECT_FALSE(std::filesystem::exists(dir.path / f)) << f;
+    }
+    freshGuardChain();
+}
+
+// a block not vouched for, refused while the chain goes on: no FORK HELD, no file, no flap
+TEST(BlockChain, AuthorityRefusalDoesNotFlap) {
+    TempDir dir("flap");
+    auto& chain = freshGuardChain(dir.str());
+    const auto ours = guardKeys(3);
+    const auto next = guardKeys(3);
+    const auto strangers = guardKeys(3);
+    const auto own = guardBlock(70, ours);
+    chain.test_setLastBlock(own);
+    auto stray = guardBlock(71, next, &strangers, 0b111, false, false, someHash('f'));
+    EXPECT_FALSE(chain.storeBlock(stray, cs::PoolStoreType::Synced));  // refused at once
+    EXPECT_TRUE(chain.forkHoldPending());
+    EXPECT_FALSE(chain.forkHeld());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kForkFile));
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
+    EXPECT_FALSE(chain.promotePendingHold(true));  // one round start: not yet
+
+    // the next block of our chain: the refusal is forgotten
+    chain.test_setLastBlock(guardBlock(71, ours, &ours, 0b111, false, false, own.hash()));
+    chain.test_onHeadAdvanced();
+    EXPECT_FALSE(chain.forkHoldPending());
+    EXPECT_FALSE(chain.promotePendingHold(true));
+    EXPECT_FALSE(chain.promotePendingHold(true));
+    EXPECT_FALSE(chain.forkHeld());
+    for (const char* f : {cs::forkguard::kEpisodeFile, cs::forkguard::kForkFile, cs::forkguard::kApprovedFile}) {
+        EXPECT_FALSE(std::filesystem::exists(dir.path / f)) << f;
+    }
+    freshGuardChain();
+}
+
+// forged blocks cannot push the dismissed block out of the remembered hashes
+TEST(BlockChain, DismissedHashIsNeverEvicted) {
+    cs::forkguard::ForkRecord r;
+    r.dismissedHash = "D";
+    r.addBranchHash("D");
+    for (size_t i = 0; i < cs::forkguard::kMaxBranchHashes * 2; ++i) {
+        r.addBranchHash("F" + std::to_string(i));
+    }
+    EXPECT_EQ(r.branchHashes.size(), cs::forkguard::kMaxBranchHashes);
+    EXPECT_TRUE(r.inDismissedBranch("D", ""));
+    EXPECT_TRUE(r.inDismissedBranch("x", "D"));
+    EXPECT_FALSE(r.inDismissedBranch("F0", ""));  // the oldest others did go
 }

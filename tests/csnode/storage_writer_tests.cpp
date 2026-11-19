@@ -374,6 +374,28 @@ TEST(StorageWriter, ResolveForkTruncatesExactlyAtTheRecordedForkPoint) {
         EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
         EXPECT_EQ(db->stored(), 10u);
     }
+    // a fork point below the oldest stored block (pruned): refused too
+    {
+        auto pruned = std::make_shared<MemoryDb>();
+        {
+            csdb::Storage storage;
+            csdb::Storage::OpenOptions opt;
+            opt.db = pruned;
+            ASSERT_TRUE(storage.open(opt));
+            for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+            ASSERT_TRUE(storage.flush());
+            storage.close();
+        }
+        ASSERT_TRUE(pruned->remove(own[1].hash().to_binary()));
+        csdb::Storage storage;
+        storage.set_truncate_check(own[1].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = pruned;
+        opt.newBlockchainTop = 1;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(pruned->stored(), 9u);
+    }
     // the recorded block: everything above #6 goes, #6 stays
     {
         csdb::Storage storage;

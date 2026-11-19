@@ -51,7 +51,7 @@ struct ApprovedBranch {
     std::string hash;       // the recorded competing block
 };
 bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& branch);
-std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir);
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt = nullptr);
 void clearApprovedBranch(const std::string& dir);
 
 struct ForkRecord {
@@ -86,18 +86,22 @@ struct ForkRecord {
     }
     // the competing block (hash, previous hash) belongs to a dismissed branch
     bool inDismissedBranch(const std::string& hash, const std::string& previous) const;
-    // remember one more block hash of a dismissed branch (the oldest go beyond kMaxBranchHashes)
+    // remember one more block hash of a dismissed branch (the oldest go beyond kMaxBranchHashes, never
+    // dismissedHash)
     void addBranchHash(const std::string& hash);
 };
 
 // An empty dir turns persistence off (the functions do nothing and load returns nothing).
 bool saveEpisode(const std::string& dir, const Episode& episode);
-std::optional<Episode> loadEpisode(const std::string& dir);
+// *corrupt (if given) is set when the file exists but cannot be read
+std::optional<Episode> loadEpisode(const std::string& dir, bool* corrupt = nullptr);
 void clearEpisode(const std::string& dir);
 
 bool saveForkRecord(const std::string& dir, const ForkRecord& record);
-std::optional<ForkRecord> loadForkRecord(const std::string& dir);
+std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt = nullptr);
 void clearForkRecord(const std::string& dir);
+// all three files: the database they describe was replaced (wiped, restored from a snapshot)
+void clearAll(const std::string& dir);
 
 // --resolve-fork: the fork point to cut the chain at and the hash the stored block there must have,
 // from the record in dir; nothing (and *error says why) when there is no record or it cannot be

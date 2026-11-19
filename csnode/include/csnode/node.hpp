@@ -476,6 +476,10 @@ private:
     std::optional<cs::Sequence> resolveForkTop();
     // FORK HELD: the time of the last detail line (one a minute at most)
     std::chrono::steady_clock::time_point lastForkHeldDetail_{};
+    void logForkHeldDetail(const std::optional<cs::forkguard::ForkRecord>& forkHeld);
+    // the fork guard's timer (every 5 s, queued to the processor thread): dismiss-fork, pending holds
+    cs::Timer forkGuardTimer_;
+    void onForkGuardTick();
     // snapshot.json of a restored folder against the digest of the loaded caches (design 6.8);
     // false with exit code 4 on a mismatch
     bool verifyAtStart();

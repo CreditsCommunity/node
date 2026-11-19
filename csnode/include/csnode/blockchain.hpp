@@ -306,8 +306,17 @@ public:
     // dismissed (still refused, never reported again; another branch is). False if no fork is held.
     bool dismissFork();
     // the dismiss-fork file next to the database: dismissFork() and remove the file. Called every
-    // round and at start-up; true if a fork was dismissed.
+    // round, every few seconds from a timer and at start-up; true if a fork was dismissed.
     bool checkDismissTrigger();
+
+    // A refusal for a competing block not vouched for by our confidants becomes FORK HELD only if the
+    // head has not moved since, at the second round start after it or a minute later (whichever is
+    // first); a head that moves drops it. Called at every round start (roundStarted) and from a timer.
+    // True if FORK HELD was raised now.
+    bool promotePendingHold(bool roundStarted);
+    bool forkHoldPending() const {
+        return pendingHold_.has_value();
+    }
 
     // the sync reply being stored comes from this peer, which announced this height (for the fork
     // record); cleared with clearSyncSource()
@@ -335,7 +344,7 @@ public:
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
     void test_resetRollbackEpisode() {
-        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); deepOverrideSpent_ = false;
+        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); deepOverrideSpent_ = false; pendingHold_.reset();
         std::lock_guard l(guardMutex_); forkRecord_.reset();
     }
     // make `block` the node's last block (the deferred one), as getLastBlock() returns it
@@ -730,6 +739,7 @@ private:
         cs::Sequence seq = 0;
         csdb::PoolHash hash;
         csdb::PoolHash previous;
+        bool vouched = false;  // passed competingBlockMayTriggerUnwind()
     };
     std::optional<CompetingBlock> competing_;  // the competing block being handled (for the record)
     std::optional<std::pair<cs::PublicKey, cs::Sequence>> syncSource_;
@@ -743,7 +753,18 @@ private:
     void onHeadAdvanced();
     // records the refused fork (once per episode) and logs the alert; reason "depth" or "authority".
     // False (and nothing raised) when the competing block belongs to a branch the operator dismissed.
+    // An "authority" refusal is only kept pending until promotePendingHold() sees the head stuck.
     bool recordForkHeld(const char* reason);
+    cs::forkguard::ForkRecord buildForkRecord(const char* reason);
+    // FORK HELD now: episode, record, file, alert
+    void holdFork(cs::forkguard::ForkRecord record);
+    struct PendingHold {
+        cs::forkguard::ForkRecord record;
+        cs::Sequence head = 0;
+        std::chrono::steady_clock::time_point since;
+        unsigned rounds = 0;
+    };
+    std::optional<PendingHold> pendingHold_;
     // removeLastBlock()/compromiseLastBlock() may go on: an integrity repair, or the guard allows it
     bool mayUnwindLastBlock();
     std::atomic_bool stop_ = false;

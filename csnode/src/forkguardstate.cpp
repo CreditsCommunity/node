@@ -6,6 +6,14 @@
 #include <sstream>
 #include <system_error>
 
+#include <cstdio>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
@@ -16,7 +24,32 @@ using boost::property_tree::ptree;
 
 namespace {
 
-// a small file written whole: to a temporary name first, then renamed over the old one
+// flushes a written file (and, on POSIX, the folder entry of a rename) to the disk
+bool syncFile(std::FILE* f) {
+    if (std::fflush(f) != 0) {
+        return false;
+    }
+#ifdef _WIN32
+    return _commit(_fileno(f)) == 0;
+#else
+    return ::fsync(::fileno(f)) == 0;
+#endif
+}
+
+void syncDir(const fs::path& dir) {
+#ifndef _WIN32
+    const int fd = ::open(dir.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+#else
+    (void)dir;
+#endif
+}
+
+// a small file written whole: to a temporary name first, flushed to the disk, then renamed over the
+// old one, so a crash leaves either the old file or the new one
 bool writeTree(const std::string& dir, const char* name, const ptree& tree) {
     if (dir.empty()) {
         return false;
@@ -24,19 +57,22 @@ bool writeTree(const std::string& dir, const char* name, const ptree& tree) {
     std::error_code ec;
     const fs::path target = fs::path(dir) / name;
     const fs::path tmp = fs::path(dir) / (std::string(name) + ".tmp");
+    std::string text;
     try {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            return false;
-        }
+        std::ostringstream out;
         boost::property_tree::write_json(out, tree);
-        out.close();
-        if (!out) {
-            fs::remove(tmp, ec);
-            return false;
-        }
+        text = out.str();
     }
     catch (const std::exception&) {
+        return false;
+    }
+    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
+    if (f == nullptr) {
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), f) == text.size() && syncFile(f);
+    const bool closed = std::fclose(f) == 0;
+    if (!written || !closed) {
         fs::remove(tmp, ec);
         return false;
     }
@@ -45,16 +81,28 @@ bool writeTree(const std::string& dir, const char* name, const ptree& tree) {
         fs::remove(tmp, ec);
         return false;
     }
+    syncDir(fs::path(dir));
     return true;
 }
 
-std::optional<ptree> readTree(const std::string& dir, const char* name) {
+// the file's tree; nothing when it does not exist. A file that exists but cannot be read sets
+// *corrupt (an empty file, bad JSON, or larger than any record)
+std::optional<ptree> readTree(const std::string& dir, const char* name, bool* corrupt) {
+    if (corrupt) {
+        *corrupt = false;
+    }
     if (dir.empty()) {
         return std::nullopt;
     }
     const fs::path path = fs::path(dir) / name;
     std::error_code ec;
-    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) > 64 * 1024) {
+    if (!fs::exists(path, ec)) {
+        return std::nullopt;
+    }
+    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) > 64 * 1024 || fs::file_size(path, ec) == 0) {
+        if (corrupt) {
+            *corrupt = true;
+        }
         return std::nullopt;
     }
     try {
@@ -64,6 +112,9 @@ std::optional<ptree> readTree(const std::string& dir, const char* name) {
         return tree;
     }
     catch (const std::exception&) {
+        if (corrupt) {
+            *corrupt = true;
+        }
         return std::nullopt;
     }
 }
@@ -94,8 +145,8 @@ bool saveEpisode(const std::string& dir, const Episode& episode) {
     return writeTree(dir, kEpisodeFile, tree);
 }
 
-std::optional<Episode> loadEpisode(const std::string& dir) {
-    const auto tree = readTree(dir, kEpisodeFile);
+std::optional<Episode> loadEpisode(const std::string& dir, bool* corrupt) {
+    const auto tree = readTree(dir, kEpisodeFile, corrupt);
     if (!tree) {
         return std::nullopt;
     }
@@ -105,6 +156,9 @@ std::optional<Episode> loadEpisode(const std::string& dir) {
         return e;
     }
     catch (const std::exception&) {
+        if (corrupt) {
+            *corrupt = true;
+        }
         return std::nullopt;
     }
 }
@@ -121,8 +175,8 @@ bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& b) {
     return writeTree(dir, kApprovedFile, tree);
 }
 
-std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir) {
-    const auto tree = readTree(dir, kApprovedFile);
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt) {
+    const auto tree = readTree(dir, kApprovedFile, corrupt);
     if (!tree) {
         return std::nullopt;
     }
@@ -132,11 +186,17 @@ std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir) {
         b.seq = tree->get<cs::Sequence>("block");
         b.hash = tree->get<std::string>("hash");
         if (b.hash.empty() || b.seq != b.forkPoint + 1) {
+            if (corrupt) {
+                *corrupt = true;
+            }
             return std::nullopt;
         }
         return b;
     }
     catch (const std::exception&) {
+        if (corrupt) {
+            *corrupt = true;
+        }
         return std::nullopt;
     }
 }
@@ -164,8 +224,13 @@ void ForkRecord::addBranchHash(const std::string& hash) {
         }
     }
     branchHashes.push_back(hash);
-    if (branchHashes.size() > kMaxBranchHashes) {
-        branchHashes.erase(branchHashes.begin(), branchHashes.begin() + (branchHashes.size() - kMaxBranchHashes));
+    // the oldest go first, but never the dismissed block itself: forged blocks cannot push it out
+    while (branchHashes.size() > kMaxBranchHashes) {
+        auto victim = branchHashes.begin();
+        if (*victim == dismissedHash && branchHashes.size() > 1) {
+            ++victim;
+        }
+        branchHashes.erase(victim);
     }
 }
 
@@ -202,8 +267,8 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
     return writeTree(dir, kForkFile, tree);
 }
 
-std::optional<ForkRecord> loadForkRecord(const std::string& dir) {
-    const auto tree = readTree(dir, kForkFile);
+std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt) {
+    const auto tree = readTree(dir, kForkFile, corrupt);
     if (!tree) {
         return std::nullopt;
     }
@@ -234,6 +299,9 @@ std::optional<ForkRecord> loadForkRecord(const std::string& dir) {
         return r;
     }
     catch (const std::exception&) {
+        if (corrupt) {
+            *corrupt = true;
+        }
         return std::nullopt;
     }
 }
@@ -242,12 +310,35 @@ void clearForkRecord(const std::string& dir) {
     removeFile(dir, kForkFile);
 }
 
+void clearAll(const std::string& dir) {
+    removeFile(dir, kEpisodeFile);
+    removeFile(dir, kForkFile);
+    removeFile(dir, kApprovedFile);
+}
+
 std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error) {
-    const auto record = loadForkRecord(dir);
+    bool corrupt = false;
+    const auto record = loadForkRecord(dir, &corrupt);
+    if (corrupt) {
+        if (error) {
+            *error = std::string("the fork record (") + kForkFile + ") in " + dir +
+                     " cannot be read: nothing removed. Use --set-bc-top <sequence> after checking with other nodes";
+        }
+        return std::nullopt;
+    }
     if (!record.has_value()) {
         if (error) {
             *error = std::string("no fork record (") + kForkFile + ") in " + dir +
                      ": this node holds no refused fork, nothing to do. To cut the chain at a known block, use --set-bc-top <sequence>";
+        }
+        return std::nullopt;
+    }
+    if (!record->held) {
+        if (error) {
+            *error = record->hasDismissal()
+                ? "the fork was dismissed on " + utcTime(record->dismissedUnix) +
+                  ": nothing held, nothing removed. To cut the chain at a known block, use --set-bc-top <sequence>"
+                : std::string("nothing held, nothing removed. To cut the chain at a known block, use --set-bc-top <sequence>");
         }
         return std::nullopt;
     }
@@ -279,7 +370,7 @@ std::string remedy(const ForkRecord& r) {
     os << "first check the head and the block at #" << r.forkPoint << " with other nodes or the monitor. If this node's "
        << "chain is the right one: create the file " << kDismissTrigger << " next to the db folder (native: touch "
        << kDismissTrigger << " in the node folder; Docker: docker compose exec node touch /data/" << kDismissTrigger
-       << "); the node keeps refusing that branch and stops reporting it. If the other chain is the right one: stop "
+       << "); the running node picks it up within a few seconds, keeps refusing that branch and stops reporting it. If the other chain is the right one: stop "
        << "the node and run once node --config-file config.ini --resolve-fork (Docker: docker compose stop && docker "
        << "compose run --rm node resolve-fork && docker compose up -d), then start it as usual; by hand: --set-bc-top "
        << r.forkPoint << " (Docker: docker compose run --rm node set-bc-top " << r.forkPoint << ").";
@@ -291,6 +382,10 @@ std::string summary(const ForkRecord& r) {
     os << "FORK HELD since " << utcTime(r.sinceUnix) << ": ";
     if (r.reason == "authority") {
         os << "a competing block is not vouched for by this node's confidants";
+    }
+    else if (r.reason == "unreadable") {
+        os << "the fork record " << kForkFile << " could not be read; the fork point is not known (check the chain "
+           << "with other nodes)";
     }
     else {
         os << "a competing chain asks to unwind beyond the automatic bound (reference head #" << r.highWater << ")";

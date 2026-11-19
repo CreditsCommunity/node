@@ -156,6 +156,7 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
     cs::Connector::connect(&snapshotTickTimer_.timeOut, this, &Node::onSnapshotTick);
     cs::Connector::connect(&backfillTimer_.timeOut, this, &Node::onBackfillTick);
+    cs::Connector::connect(&forkGuardTimer_.timeOut, this, &Node::onForkGuardTick);
 
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
@@ -248,6 +249,30 @@ bool Node::initCommon() {
     solver_->startDefault();
     cachesSerializationManager_.bind(stat_);
     return true;
+}
+
+void Node::logForkHeldDetail(const std::optional<cs::forkguard::ForkRecord>& forkHeld) {
+    if (forkHeld.has_value()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (lastForkHeldDetail_ == std::chrono::steady_clock::time_point{} || now - lastForkHeldDetail_ >= std::chrono::minutes(1)) {
+            lastForkHeldDetail_ = now;
+            cswarning() << " " << cs::forkguard::summary(*forkHeld);
+        }
+    }
+    else {
+        lastForkHeldDetail_ = {};
+    }
+}
+
+// every few seconds on the processor thread, rounds or not (an isolated node has none): the
+// dismiss-fork file, a pending refusal the head did not move past, the FORK HELD detail line
+void Node::onForkGuardTick() {
+    if (!good_ || bootstrapping_) {
+        return;
+    }
+    blockChain_.checkDismissTrigger();
+    blockChain_.promotePendingHold(false);
+    logForkHeldDetail(blockChain_.forkHeldRecord());
 }
 
 std::optional<cs::Sequence> Node::resolveForkTop() {
@@ -475,6 +500,8 @@ bool Node::initRunning() {
     initBootstrapRP(initialConfidants_);
     EventReport::sendRunningStatus(*this, Running::Status::Run);
     startBackfill();
+    // the fork guard: dismiss-fork and pending holds also without rounds (an isolated node)
+    forkGuardTimer_.start(5000, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
     return true;
 }
 
@@ -932,6 +959,7 @@ void Node::stop() {
     {
         std::lock_guard<std::mutex> lock(backfillTimerMutex_);
         backfillTimer_.stop();
+        forkGuardTimer_.stop();
         if (backwardSync_) {
             backwardSync_->stop();
         }
@@ -4788,7 +4816,9 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
         status_ = cs::NodeStatus::Trusted;
     }
     // the operator keeps this chain: a dismiss-fork file next to the database, picked up every round
+    // (and by the fork guard timer); a refusal the head did not move past becomes FORK HELD
     blockChain_.checkDismissTrigger();
+    blockChain_.promotePendingHold(true);
     // the node refused to unwind for a competing chain and holds its own: on every round line, so it
     // cannot be missed (the detail, with the two remedies, once a minute below)
     const auto forkHeld = blockChain_.forkHeldRecord();
@@ -4809,16 +4839,7 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     csdebug() << " Node key " << KeyToBase58(nodeIdKey_);
     cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount()
             << (backwardSync_ && backwardSync_->stats().started ? ", oldest stored = " + std::to_string(blockChain_.getFirstStoredSequence()) : std::string{});
-    if (forkHeld.has_value()) {
-        const auto now = std::chrono::steady_clock::now();
-        if (lastForkHeldDetail_ == std::chrono::steady_clock::time_point{} || now - lastForkHeldDetail_ >= std::chrono::minutes(1)) {
-            lastForkHeldDetail_ = now;
-            cswarning() << " " << cs::forkguard::summary(*forkHeld);
-        }
-    }
-    else {
-        lastForkHeldDetail_ = {};
-    }
+    logForkHeldDetail(forkHeld);
 
     std::ostringstream line2;
 
