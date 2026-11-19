@@ -91,7 +91,6 @@ std::string stateDirFor(const std::string& dbPath) {
 bool saveEpisode(const std::string& dir, const Episode& episode) {
     ptree tree;
     tree.put("high_water", episode.highWater);
-    tree.put("approved_switch", episode.approvedSwitch);
     return writeTree(dir, kEpisodeFile, tree);
 }
 
@@ -103,7 +102,6 @@ std::optional<Episode> loadEpisode(const std::string& dir) {
     try {
         Episode e;
         e.highWater = tree->get<cs::Sequence>("high_water");
-        e.approvedSwitch = tree->get<bool>("approved_switch", false);
         return e;
     }
     catch (const std::exception&) {
@@ -113,6 +111,38 @@ std::optional<Episode> loadEpisode(const std::string& dir) {
 
 void clearEpisode(const std::string& dir) {
     removeFile(dir, kEpisodeFile);
+}
+
+bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& b) {
+    ptree tree;
+    tree.put("fork_point", b.forkPoint);
+    tree.put("block", b.seq);
+    tree.put("hash", b.hash);
+    return writeTree(dir, kApprovedFile, tree);
+}
+
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir) {
+    const auto tree = readTree(dir, kApprovedFile);
+    if (!tree) {
+        return std::nullopt;
+    }
+    try {
+        ApprovedBranch b;
+        b.forkPoint = tree->get<cs::Sequence>("fork_point");
+        b.seq = tree->get<cs::Sequence>("block");
+        b.hash = tree->get<std::string>("hash");
+        if (b.hash.empty() || b.seq != b.forkPoint + 1) {
+            return std::nullopt;
+        }
+        return b;
+    }
+    catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+void clearApprovedBranch(const std::string& dir) {
+    removeFile(dir, kApprovedFile);
 }
 
 bool ForkRecord::inDismissedBranch(const std::string& hash, const std::string& previous) const {

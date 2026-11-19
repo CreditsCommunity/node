@@ -277,11 +277,13 @@ bool BlockChain::init(
         const std::string dir = cs::forkguard::stateDirFor(path);
         cs::forkguard::clearForkRecord(dir);
         cs::forkguard::clearEpisode(dir);
-        if (resolveForkSeq_ == newBlockchainTop) {
-            // --resolve-fork: the operator approved following the competing chain. If it diverges
-            // below the recorded fork point (not known exactly), the node unwinds further on its own,
-            // for this one episode only: it ends once the head is above the fork point again.
-            cs::forkguard::saveEpisode(dir, {newBlockchainTop, true});
+        cs::forkguard::clearApprovedBranch(dir);
+        if (resolveForkSeq_ == newBlockchainTop && !resolveCompetingHash_.empty()) {
+            // --resolve-fork with an exact fork point: the recorded competing block right after it is
+            // the one approved branch. Normally the node simply syncs it forward from the fork point;
+            // the approval only lets that very branch replace a block stored above the fork point
+            // again before it arrives. Nothing else is relaxed.
+            cs::forkguard::saveApprovedBranch(dir, {newBlockchainTop, newBlockchainTop + 1, resolveCompetingHash_});
         }
         return true;
     }
@@ -866,12 +868,16 @@ csdb::Transaction BlockChain::loadTransaction(const csdb::TransactionID& transId
 bool BlockChain::guardAutoRollback() {
     beginRollbackEpisode();
 
-    // operator override: accept a deliberate deep switch ([params] allow_deep_rollback, the
-    // CS_ALLOW_DEEP_ROLLBACK environment variable, or --resolve-fork for this episode)
+    // after --resolve-fork, never unwind to or below the fork point the operator cut the chain at
+    if (approvedBranch_.has_value() && lastSequence_.load() <= approvedBranch_->forkPoint) {
+        recordForkHeld("depth");
+        return false;
+    }
+
+    // operator override: accept a deliberate deep switch ([params] allow_deep_rollback or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable), for one completed episode
     if (deepRollbackApproved()) {
-        if (!episodeApprovedSwitch_) {
-            deepOverrideUsed_ = true;  // spent when this episode completes
-        }
+        deepOverrideUsed_ = true;  // spent when this episode completes
         return true;
     }
     const auto* config = cs::ConfigHolder::instance().config();
@@ -899,7 +905,7 @@ void BlockChain::beginRollbackEpisode() {
     rollbackHighWater_ = tip; // the head we had before this rollback episode began
     rollbackLowWater_ = tip;
     deepOverrideUsed_ = false;
-    cs::forkguard::saveEpisode(guardStateDir_, {rollbackHighWater_, episodeApprovedSwitch_});
+    cs::forkguard::saveEpisode(guardStateDir_, {rollbackHighWater_});
 }
 
 void BlockChain::onHeadAdvanced() {
@@ -913,11 +919,6 @@ void BlockChain::onHeadAdvanced() {
     // one line per finished episode: how deep the node actually unwound (measured in CI)
     cslog() << kLogPrefix << "rollback episode ended: unwound " << (rollbackHighWater_ - rollbackLowWater_)
             << " block(s) below #" << WithDelimiters(rollbackHighWater_);
-    if (episodeApprovedSwitch_) {
-        episodeApprovedSwitch_ = false;
-        cswarning() << kLogPrefix << "the switch approved with --resolve-fork is complete: the automatic rollback "
-                    << "bound applies again";
-    }
     if (deepOverrideUsed_ && !deepOverrideSpent_) {
         deepOverrideSpent_ = true;
         cserror() << kLogPrefix << "LONGEST-CHAIN GUARD: allow_deep_rollback (or CS_ALLOW_DEEP_ROLLBACK) has served "
@@ -1139,9 +1140,10 @@ void BlockChain::setPeerAddressResolver(std::function<std::string(const cs::Publ
     peerAddressResolver_ = std::move(resolver);
 }
 
-void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash) {
+void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash) {
     resolveForkSeq_ = seq;
     resolveForkHash_ = hash;
+    resolveCompetingHash_ = competingHash;
 }
 
 void BlockChain::setGuardStateDir(const std::string& dir) {
@@ -1152,10 +1154,8 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
             rollbackEpisode_ = true;
             rollbackHighWater_ = e->highWater;
             rollbackLowWater_ = tip;
-            episodeApprovedSwitch_ = e->approvedSwitch;
             cswarning() << kLogPrefix << "rollback episode resumed: reference head #" << WithDelimiters(e->highWater)
-                        << ", head #" << WithDelimiters(tip)
-                        << (e->approvedSwitch ? ", following the competing chain as approved with --resolve-fork" : "");
+                        << ", head #" << WithDelimiters(tip);
         }
         else {
             cs::forkguard::clearEpisode(dir);
@@ -1181,8 +1181,40 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
             cs::forkguard::clearForkRecord(dir);
         }
     }
+    approvedBranch_ = cs::forkguard::loadApprovedBranch(dir);
+    if (approvedBranch_.has_value()) {
+        cslog() << kLogPrefix << "branch approved with --resolve-fork: block #" << WithDelimiters(approvedBranch_->seq)
+                << " (" << approvedBranch_->hash << ") after the fork point #" << WithDelimiters(approvedBranch_->forkPoint);
+        checkApprovedBranch();
+    }
     // a dismiss-fork file left while the node was stopped
     checkDismissTrigger();
+}
+
+void BlockChain::dropApprovedBranch(const char* why) {
+    if (!approvedBranch_.has_value()) {
+        return;
+    }
+    cslog() << kLogPrefix << "branch approved with --resolve-fork (block #" << WithDelimiters(approvedBranch_->seq)
+            << "): " << why << "; the approval ends";
+    approvedBranch_.reset();
+    cs::forkguard::clearApprovedBranch(guardStateDir_);
+}
+
+void BlockChain::checkApprovedBranch() {
+    if (!approvedBranch_.has_value()) {
+        return;
+    }
+    const cs::Sequence tip = lastSequence_.load();
+    if (tip < approvedBranch_->seq) {
+        return;
+    }
+    if (getHashBySequence(approvedBranch_->seq).to_string() == approvedBranch_->hash) {
+        dropApprovedBranch("the node follows it");
+    }
+    else if (tip > approvedBranch_->seq) {
+        dropApprovedBranch("the node went on with another block at that height");
+    }
 }
 
 bool BlockChain::deepRollbackEnvSet() {
@@ -1191,9 +1223,6 @@ bool BlockChain::deepRollbackEnvSet() {
 }
 
 bool BlockChain::deepRollbackApproved() const {
-    if (episodeApprovedSwitch_) {
-        return true;
-    }
     if (deepOverrideSpent_) {
         return false;
     }
@@ -2400,8 +2429,10 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         lastSequence_ = deferredBlock_.sequence();
     }
 
-    // forward progress: ends the rollback episode (and FORK HELD) once the head is above its reference
+    // forward progress: ends the rollback episode (and FORK HELD) once the head is above its reference,
+    // and settles the branch approved with --resolve-fork
     onHeadAdvanced();
+    checkApprovedBranch();
 
     //csdetails() << kLogPrefix << "Pool #" << deferredBlock_.sequence() << ": " << cs::Utils::byteStreamToHex(deferredBlock_.to_binary().data(), deferredBlock_.to_binary().size());
     emit storeBlockEvent(pool);
@@ -2795,7 +2826,19 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 std::optional<CompetingBlock>& c;
                 ~ClearCompeting() { c.reset(); }
             } clearCompeting{competing_};
-            if (!competingBlockMayTriggerUnwind(pool)) {
+            // after --resolve-fork: a block of exactly the approved branch (its block right after the
+            // fork point, or the next one built on it) may replace a block stored above the fork point
+            // again; any other block offered at those heights ends the approval
+            bool approvedBranchBlock = false;
+            if (approvedBranch_.has_value()) {
+                const auto& ab = *approvedBranch_;
+                approvedBranchBlock = (poolSequence == ab.seq && pool.hash().to_string() == ab.hash) ||
+                                      (poolSequence == ab.seq + 1 && pool.previous_hash().to_string() == ab.hash);
+                if (!approvedBranchBlock && (poolSequence == ab.seq || poolSequence == ab.seq + 1)) {
+                    dropApprovedBranch("another competing block was offered at that height");
+                }
+            }
+            if (!approvedBranchBlock && !competingBlockMayTriggerUnwind(pool)) {
                 // a competing block not vouched for by authority this node recognises (no strict
                 // confirmations by our last block's confidants, or a bootstrap flag that is not
                 // authenticated locally): never unwind our own chain for it, not even by marking our

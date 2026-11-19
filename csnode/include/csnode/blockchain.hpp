@@ -282,9 +282,9 @@ public:
     bool competingBlockMayTriggerUnwind(const csdb::Pool& competing) const;
 
     // The operator has approved a deliberate deep switch: [params] allow_deep_rollback=true or the
-    // CS_ALLOW_DEEP_ROLLBACK environment variable (until one episode has completed with it: then it is
-    // off for the rest of the run), or --resolve-fork for the episode it started. It lifts both the
-    // authority gate and the depth bound.
+    // CS_ALLOW_DEEP_ROLLBACK environment variable, until one episode has completed with it (then it is
+    // off for the rest of the run). It lifts both the authority gate and the depth bound. (--resolve-fork
+    // approves nothing as wide: see approvedBranch_.)
     bool deepRollbackApproved() const;
     // CS_ALLOW_DEEP_ROLLBACK is set to a non-empty value
     static bool deepRollbackEnvSet();
@@ -317,8 +317,13 @@ public:
     void setPeerAddressResolver(std::function<std::string(const cs::PublicKey&)> resolver);
 
     // --resolve-fork: init() truncates to `seq` only if the stored block there has `hash`, then clears
-    // the fork record and approves following the competing chain for the one episode that follows
-    void setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash);
+    // the fork record. When the record's fork point was exact, it also records the competing block
+    // right after it (`competingHash` at seq + 1) as the one approved branch (resolve-approved.json).
+    void setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash = std::string{});
+    // the branch approved with --resolve-fork, while it is pending
+    std::optional<cs::forkguard::ApprovedBranch> approvedBranch() const {
+        return approvedBranch_;
+    }
     // init() refused to truncate: the stored block at the requested sequence has another hash
     bool truncationRefused() const {
         return truncationRefused_;
@@ -330,13 +335,13 @@ public:
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
     void test_resetRollbackEpisode() {
-        rollbackEpisode_ = false; rollbackHighWater_ = 0; episodeApprovedSwitch_ = false; deepOverrideSpent_ = false;
+        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); deepOverrideSpent_ = false;
         std::lock_guard l(guardMutex_); forkRecord_.reset();
     }
     // make `block` the node's last block (the deferred one), as getLastBlock() returns it
     void test_setLastBlock(const csdb::Pool& block) { deferredBlock_ = block; lastSequence_ = block.sequence(); }
     // let the episode end as if a block above the reference had been recorded
-    void test_onHeadAdvanced() { onHeadAdvanced(); }
+    void test_onHeadAdvanced() { onHeadAdvanced(); checkApprovedBranch(); }
     void test_setSelectionUnfinished(const csdb::PoolHash& lastPrev) { selectionFinished_ = false; lastPrevHash_ = lastPrev; antiForkMode_ = true; emittingRequest_ = 1; }
     bool test_selectionFinished() const { return selectionFinished_; }
     bool test_antiForkMode() const { return antiForkMode_; }
@@ -712,7 +717,12 @@ private:
     mutable std::mutex guardMutex_;
     std::optional<cs::forkguard::ForkRecord> forkRecord_;
     std::chrono::steady_clock::time_point lastDismissedLog_{};  // dismissed branch offered again (hourly)
-    bool episodeApprovedSwitch_ = false;  // --resolve-fork approved this episode
+    // --resolve-fork's approved branch (exact fork point only), pending until the node is past it
+    std::optional<cs::forkguard::ApprovedBranch> approvedBranch_;
+    std::string resolveCompetingHash_;
+    // the approved branch is settled: the node is past its block, or another block took that height
+    void checkApprovedBranch();
+    void dropApprovedBranch(const char* why);
     bool deepOverrideSpent_ = false;      // allow_deep_rollback served one episode: off until restart
     bool deepOverrideUsed_ = false;       // the current episode ran with allow_deep_rollback
     bool integrityRepair_ = false;        // cacheLastBlocks() is removing blocks of incorrectBlocks_

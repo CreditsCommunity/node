@@ -266,7 +266,16 @@ std::optional<cs::Sequence> Node::resolveForkTop() {
     cslog() << "--resolve-fork: removing every block above #" << WithDelimiters(plan->top) << " (" << plan->hash
             << "), our head was #" << WithDelimiters(plan->record.ourHead) << ", if the block at #"
             << WithDelimiters(plan->top) << " is still the recorded one";
-    blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+    if (plan->record.forkPointExact && plan->record.competingSeq == plan->top + 1) {
+        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash), plan->record.competingHash);
+    }
+    else {
+        cswarning() << "--resolve-fork: the fork point is an upper bound (the other chain diverges at #"
+                    << WithDelimiters(plan->top) << " or lower). If it diverges lower, the node reports FORK HELD "
+                    << "again with a lower fork point: then find the last common block with the monitor or other "
+                    << "nodes and cut there with --set-bc-top <sequence>.";
+        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+    }
     return plan->top;
 }
 
@@ -338,8 +347,7 @@ Node::ChainInit Node::initChain() {
         }
         if (initConfig->resolveFork()) {
             cslog() << "--resolve-fork: the chain now ends at block #" << WithDelimiters(newTop)
-                    << " and the fork record is cleared. Start the node as usual: it syncs from there and "
-                    << "follows the other chain (for this one switch, without the automatic rollback bound).";
+                    << " and the fork record is cleared. Start the node as usual: it syncs from there.";
         }
         return ChainInit::StopAfterInit;
     }

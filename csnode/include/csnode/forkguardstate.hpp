@@ -36,10 +36,22 @@ std::string stateDirFor(const std::string& dbPath);
 
 struct Episode {
     cs::Sequence highWater = 0;
-    // set by --resolve-fork: the operator approved following the competing chain for this one
-    // episode (no depth bound, no authority check); cleared when the episode ends
-    bool approvedSwitch = false;
 };
+
+// resolve-approved.json, written by --resolve-fork when the fork point was exact: the one branch the
+// operator chose, the competing block right after the fork point. Until the node is past it (or at
+// the first other block offered at that height), a block of exactly that branch may replace a block
+// this node stored above the fork point again; nothing is unwound to or below the fork point, and
+// any other competing block meets the usual checks.
+inline constexpr const char* kApprovedFile = "resolve-approved.json";
+struct ApprovedBranch {
+    cs::Sequence forkPoint = 0;
+    cs::Sequence seq = 0;   // forkPoint + 1
+    std::string hash;       // the recorded competing block
+};
+bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& branch);
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir);
+void clearApprovedBranch(const std::string& dir);
 
 struct ForkRecord {
     // FORK HELD: the node refuses a competing chain and the operator has not decided yet. False once

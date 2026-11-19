@@ -448,15 +448,17 @@ fork point with other nodes: the [monitor](https://monitor.credits.com), the
 
 | | Your chain is the right one | The other chain is the right one |
 |---|---|---|
-| What it does | The node keeps its chain. That branch stays refused but is no longer reported; a different branch would be reported again. The node keeps running. | The node removes its blocks above the recorded fork point (only if the block there is still the one it recorded), exits, and at the next start follows the other chain. |
+| What it does | The node keeps its chain. That branch stays refused but is no longer reported; a different branch would be reported again. The node keeps running. | The node removes its blocks above the recorded fork point (only if the block there is still the one it recorded) and exits; at the next start it syncs the other chain from there. |
 | Native (node running) | in the `csnode` folder: `touch dismiss-fork` (Windows: `type nul > dismiss-fork`); the node picks it up within a round and deletes it | stop the node (`Ctrl+C` once, or `sudo systemctl stop credits-node`), then `./node --config-file config.ini --resolve-fork` (Windows: `node.exe ...`), then start it as usual |
 | Docker | `docker compose exec node touch /data/dismiss-fork` | `docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d` |
 
 `--resolve-fork` refuses, and removes nothing, when there is no fork record or when the block at
 the recorded fork point is no longer the recorded one. To cut the chain at a block of your choice
 instead, use `--set-bc-top <sequence>` (the last block to keep) with the node stopped; Docker:
-`docker compose run --rm node set-bc-top <sequence>`. If the other chain forked deeper than the
-block you chose, the node reports FORK HELD again with a lower fork point.
+`docker compose run --rm node set-bc-top <sequence>`. If the detail line says
+`Fork point: block #N or lower`, the node knows only an upper bound: should the other chain fork
+lower, the node reports FORK HELD again with a lower fork point. Then find the last common block
+with the monitor or other nodes and cut there with `--set-bc-top`.
 
 **Last resort.** `allow_deep_rollback=true` in `[params]` of `config.ini` (or the
 `CS_ALLOW_DEEP_ROLLBACK` environment variable) lets the node follow any competing chain without the

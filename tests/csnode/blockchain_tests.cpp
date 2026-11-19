@@ -536,7 +536,7 @@ TEST(BlockChain, RollbackReferenceSurvivesRestart) {
     EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kForkFile));
 
     // a restart above an old reference drops it
-    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {4000, false}));
+    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {4000}));
     chain.test_resetRollbackEpisode();
     chain.setGuardStateDir(dir.str());
     EXPECT_FALSE(chain.test_rollbackEpisode());
@@ -929,20 +929,83 @@ TEST(BlockChain, IntegrityRepairIsNotBoundedByTheGuard) {
     chain.test_resetRollbackEpisode();
 }
 
-// --resolve-fork's approval: the episode it starts lifts the gate and the bound, and ends with it
-TEST(BlockChain, ResolveForkApprovalServesOneEpisode) {
+// --resolve-fork approves only the recorded branch, and only until it is settled: another competing
+// branch is still refused, the recorded one may replace a block stored above the fork point again,
+// nothing is ever unwound to or below the fork point, and the approval clears
+TEST(BlockChain, ResolveForkApprovesOnlyTheRecordedBranch) {
     TempDir dir("approve");
-    auto& chain = freshGuardChain();
-    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {4899, true}));
-    chain.test_setLastSequence(4899);
-    chain.setGuardStateDir(dir.str());
-    EXPECT_TRUE(chain.deepRollbackApproved());
-    chain.test_setLastSequence(4000);
-    EXPECT_TRUE(chain.guardAutoRollback());
-    chain.test_setLastSequence(4900);
-    chain.test_onHeadAdvanced();
-    EXPECT_FALSE(chain.deepRollbackApproved());
-    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
-    chain.setGuardStateDir("");
-    chain.test_resetRollbackEpisode();
+    const auto ours = guardKeys(3);
+    const auto theirs = guardKeys(3);
+    const auto strangers = guardKeys(3);
+    const auto forkBlock = guardBlock(60, ours);                                                     // #60, the fork point
+    const auto recorded = guardBlock(61, theirs, &strangers, 0b111, false, false, forkBlock.hash());  // their #61
+    const cs::forkguard::ApprovedBranch approval{60, 61, recorded.hash().to_string()};
+
+    // a different branch after the resolve: refused as usual (and the approval ends)
+    {
+        auto& chain = freshGuardChain();
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        ASSERT_TRUE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(chain.deepRollbackApproved());  // nothing as wide as allow_deep_rollback
+        auto other = guardBlock(61, strangers, &theirs, 0b111, false, false, someHash('o'));
+        EXPECT_FALSE(chain.storeBlock(other, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        EXPECT_EQ(chain.getLastHash(), forkBlock.hash());
+        EXPECT_TRUE(chain.forkHeld());
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
+    }
+    // nothing is unwound to or below the fork point while the approval is pending, even for the branch
+    {
+        auto& chain = freshGuardChain();
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        chain.setBlocksToBeRemoved(1);
+        EXPECT_FALSE(chain.guardAutoRollback());
+        chain.removeLastBlock();
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        EXPECT_EQ(chain.getLastHash(), forkBlock.hash());
+        EXPECT_TRUE(chain.approvedBranch().has_value());
+    }
+    // the recorded branch: the node stored its own #61 again; the block built on the recorded #61
+    // makes it give that block up (uncertain, then replaced), down to the fork point and no further
+    {
+        auto& chain = freshGuardChain();
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        const auto ownAgain = guardBlock(61, ours, &ours, 0b111, false, false, forkBlock.hash());
+        chain.test_setLastBlock(ownAgain);
+        chain.setGuardStateDir(dir.str());
+        ASSERT_TRUE(chain.approvedBranch().has_value());
+        auto next = guardBlock(62, strangers, &theirs, 0b111, false, false, recorded.hash());
+        ASSERT_FALSE(chain.competingBlockMayTriggerUnwind(next));  // the usual gate alone would refuse it
+        EXPECT_FALSE(chain.storeBlock(next, cs::PoolStoreType::Synced));
+        EXPECT_FALSE(chain.forkHeld());
+        EXPECT_TRUE(chain.isLastBlockUncertain());  // waits for the recorded #61
+        auto replacement = recorded;
+        EXPECT_FALSE(chain.storeBlock(replacement, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getLastSeq(), 60u);  // own #61 removed, the fork point kept
+        EXPECT_FALSE(chain.forkHeld());
+        EXPECT_TRUE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(chain.guardAutoRollback());  // and never below it
+
+        // the recorded #61 becomes the head: the approval clears
+        chain.test_setLastBlock(recorded);
+        chain.test_onHeadAdvanced();
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
+    }
+    // the node goes past that height with another block: the approval clears too
+    {
+        auto& chain = freshGuardChain();
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        chain.test_setLastBlock(guardBlock(62, ours));
+        chain.test_onHeadAdvanced();
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+    }
+    freshGuardChain();
 }

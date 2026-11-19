@@ -306,9 +306,14 @@ consensus rules.
   the running node picks up within a round: the record keeps that branch (its first known block and
   the hashes seen since) as dismissed, the node still refuses it but no longer reports it, and a
   different branch is reported again — or follows the other one: `--resolve-fork` (no argument)
-  cuts the chain at the recorded fork point, only if the block there is still the recorded one, and
-  lets the next start follow the other chain for that one episode, also below the recorded point
-  when the fork turns out deeper; `--set-bc-top <sequence>` does the cut by hand. Both are one-shot
+  cuts the chain at the recorded fork point, only if the block there is still the recorded one; the
+  node then syncs forward from there. It relaxes nothing else: when the fork point is exact, only
+  the recorded competing block right after it (and the block built on it) may replace a block the
+  node stored above the fork point again, until the node is past that height or another block is
+  offered there, and nothing is ever unwound to or below the fork point. When the fork point is
+  only an upper bound and the other chain diverges lower, the node reports FORK HELD again with a
+  lower fork point; `--set-bc-top <sequence>` then cuts by hand at the last common block found with
+  the monitor or other nodes. Both are one-shot
   and exit; neither advice is ever "restart", since a restart alone changes nothing. See "If your
   node reports FORK HELD" in `docs/quick-start.md`.
 
