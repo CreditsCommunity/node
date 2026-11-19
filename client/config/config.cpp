@@ -135,6 +135,7 @@ const std::string ARG_NAME_PRIVATE_KEY_FILE = "private-key-file";
 const std::string ARG_NAME_ENCRYPT_KEY_FILE = "encryptkey";
 const std::string ARG_NAME_RECREATE_INDEX = "recreate-index";
 const std::string ARG_NAME_NEW_BC_TOP = "set-bc-top";
+const std::string ARG_NAME_RESOLVE_FORK = "resolve-fork";
 const std::string ARG_NAME_BAL_CHANGE = "bal-change";
 const std::string ARG_NAME_DISABLE_AUTO_SHUTDOWN = "disable-auto-shutdown";
 
@@ -279,6 +280,7 @@ Config Config::read(po::variables_map& vm, bool atStart) {
     result.pathToDb_ = getArgFromCmdLine(vm, ARG_NAME_DB_PATH, DEFAULT_PATH_TO_DB);
 
     if (atStart) {
+        result.resolveFork_ = vm.count(ARG_NAME_RESOLVE_FORK) > 0;
         if (vm.count(ARG_NAME_NEW_BC_TOP)) {
             result.newBlockchainTop_ = true;
             result.newBlockchainTopSeq_ =
@@ -999,10 +1001,7 @@ Config Config::readFromFile(const std::string& fileName) {
         }
 
         result.maxUncorrectedBlock_ = params.count(PARAM_NAME_MAX_UNCORRECTED_BLOCK) ? params.get<uint64_t>(PARAM_NAME_MAX_UNCORRECTED_BLOCK) : DEFAULT_MAX_UNCORRECTED_BLOCK;
-        result.maxAutoRollbackDepth_ = params.count(PARAM_NAME_MAX_AUTO_ROLLBACK) ? params.get<uint64_t>(PARAM_NAME_MAX_AUTO_ROLLBACK) : DEFAULT_MAX_AUTO_ROLLBACK;
-        if (params.count(PARAM_NAME_ALLOW_DEEP_ROLLBACK) > 0) {
-            result.allowDeepRollback_ = params.get<bool>(PARAM_NAME_ALLOW_DEEP_ROLLBACK);
-        }
+        readRollbackGuardSettings(params, result.maxAutoRollbackDepth_, result.allowDeepRollback_);
         result.generateFork_ = params.count(PARAM_NAME_GENERATE_FORK) ? params.get<bool>(PARAM_NAME_GENERATE_FORK) : false;
 
         if (params.count(PARAM_NAME_SYNC_ON)) {
@@ -1205,6 +1204,11 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
             storageData_.checkpointKeep = 2;
         }
     }
+}
+
+void Config::readRollbackGuardSettings(const boost::property_tree::ptree& params, uint64_t& maxDepth, bool& allowDeep) {
+    maxDepth = params.count(PARAM_NAME_MAX_AUTO_ROLLBACK) ? params.get<uint64_t>(PARAM_NAME_MAX_AUTO_ROLLBACK) : DEFAULT_MAX_AUTO_ROLLBACK;
+    allowDeep = params.count(PARAM_NAME_ALLOW_DEEP_ROLLBACK) ? params.get<bool>(PARAM_NAME_ALLOW_DEEP_ROLLBACK) : false;
 }
 
 void Config::readBackfillSettings(const boost::property_tree::ptree& data, StorageData& storage) {

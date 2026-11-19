@@ -17,6 +17,16 @@
 #include <cscrypto/cscrypto.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/odatastream.hpp>
+#include <csnode/forkguardstate.hpp>
+#include <config.hpp>
+
+#include <boost/property_tree/ini_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <cstdlib>
 
 #include <csdb/amount_commission.hpp>
 #include <csdb/currency.hpp>
@@ -324,12 +334,47 @@ TEST(BlockChain, ConsensusSettingsDigestCoversEverySetting) {
 }
 
 namespace {
-// a clean default config so the guard reads the default bound (1000) and no deep-rollback override,
+// a clean default config so the guard reads the default bound and no deep-rollback override,
 // independent of any config a prior test in the binary may have set.
 void installDefaultConfig() {
     cs::ConfigHolder::instance().setConfig(Config{});
 }
+
+void setEnv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);  // an empty value removes the variable on Windows
+#else
+    ::setenv(name, value, 1);
+#endif
+}
+
+void unsetEnv(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    ::unsetenv(name);
+#endif
+}
+
+// an empty folder of its own under the system temporary folder, removed with the object
+struct TempDir {
+    std::filesystem::path path;
+    explicit TempDir(const std::string& name) {
+        path = std::filesystem::temp_directory_path() / ("csnode-guard-" + name + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+    std::string str() const { return path.string(); }
+};
 }  // namespace
+
+static_assert(DEFAULT_MAX_AUTO_ROLLBACK == Consensus::MaxAutoRollbackDepth,
+              "the config default and the consensus constant of the rollback bound must stay in step");
+static_assert(Consensus::MaxAutoRollbackDepth == 100, "owner decision: default max_auto_rollback is 100");
 
 // The longest-chain guard bounds an automatic rollback at Consensus::MaxAutoRollbackDepth below the
 // head captured when the rollback episode began, and that reference is fixed for the episode.
@@ -341,7 +386,7 @@ TEST(BlockChain, LongestChainGuardBoundsRollbackDepth) {
     chain.test_resetRollbackEpisode();
 
     const cs::Sequence head = 5000;
-    const uint64_t depth = Consensus::MaxAutoRollbackDepth;  // default 1000
+    const uint64_t depth = Consensus::MaxAutoRollbackDepth;
     chain.test_setLastSequence(head);
 
     // the first call captures the high-water reference at the current head
@@ -354,16 +399,19 @@ TEST(BlockChain, LongestChainGuardBoundsRollbackDepth) {
     chain.test_setLastSequence(head - depth + 1);
     EXPECT_TRUE(chain.guardAutoRollback());
     EXPECT_EQ(chain.test_rollbackHighWater(), head);
+    EXPECT_FALSE(chain.forkHeld());
 
-    // the removal that would take the head to or below the floor is refused
+    // the removal that would take the head to or below the floor is refused: FORK HELD
     chain.test_setLastSequence(head - depth);
     EXPECT_FALSE(chain.guardAutoRollback());
+    EXPECT_TRUE(chain.forkHeld());
 
     // refusing sets no permanent state: a fresh episode from a new head works again
     chain.test_resetRollbackEpisode();
     chain.test_setLastSequence(head - depth);
     EXPECT_TRUE(chain.guardAutoRollback());
     EXPECT_EQ(chain.test_rollbackHighWater(), head - depth);
+    EXPECT_FALSE(chain.forkHeld());
 }
 
 // Near genesis the bound never underflows: a head below the depth can always be unwound to genesis.
@@ -381,30 +429,194 @@ TEST(BlockChain, LongestChainGuardNoUnderflowNearGenesis) {
     }
 }
 
-// A node that adopted a community bootstrap table may unwind back to the sequence where it took the
-// table, even past the ordinary depth bound; below that point the bound applies again.
-TEST(BlockChain, LongestChainGuardCommunityBootstrapFloor) {
+// [params] max_auto_rollback and allow_deep_rollback, and the CS_ALLOW_DEEP_ROLLBACK variable
+TEST(BlockChain, RollbackGuardConfigParsing) {
+    const auto parse = [](const std::string& params, uint64_t& depth, bool& allow) {
+        std::istringstream in("[params]\n" + params);
+        boost::property_tree::ptree tree;
+        boost::property_tree::read_ini(in, tree);
+        Config::readRollbackGuardSettings(tree.get_child("params"), depth, allow);
+    };
+    uint64_t depth = 7;
+    bool allow = true;
+    parse("node_type=client\n", depth, allow);
+    EXPECT_EQ(depth, 100u);
+    EXPECT_FALSE(allow);
+    parse("max_auto_rollback=250\nallow_deep_rollback=true\n", depth, allow);
+    EXPECT_EQ(depth, 250u);
+    EXPECT_TRUE(allow);
+    parse("max_auto_rollback=0\nallow_deep_rollback=false\n", depth, allow);
+    EXPECT_EQ(depth, 0u);
+    EXPECT_FALSE(allow);
+    EXPECT_EQ(Config{}.maxAutoRollbackDepth(), 100u);
+    EXPECT_FALSE(Config{}.allowDeepRollback());
+
+    unsetEnv("CS_ALLOW_DEEP_ROLLBACK");
+    EXPECT_FALSE(BlockChain::deepRollbackEnvSet());
+    setEnv("CS_ALLOW_DEEP_ROLLBACK", "");
+    EXPECT_FALSE(BlockChain::deepRollbackEnvSet());  // empty: not set
+    setEnv("CS_ALLOW_DEEP_ROLLBACK", "1");
+    EXPECT_TRUE(BlockChain::deepRollbackEnvSet());
+    unsetEnv("CS_ALLOW_DEEP_ROLLBACK");
+}
+
+// allow_deep_rollback (here the environment variable) lifts the bound for one completed episode,
+// then it is off for the rest of the run
+TEST(BlockChain, DeepRollbackOverrideServesOneEpisode) {
     installDefaultConfig();
     const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
     const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
     BlockChain chain(genesis, start);
     chain.test_resetRollbackEpisode();
+    setEnv("CS_ALLOW_DEEP_ROLLBACK", "1");
 
-    const cs::Sequence head = 5000;
-    const cs::Sequence tableSeq = 3500;  // deeper than head - 1000 = 4000
-    chain.test_setLastSequence(head);
-    chain.setCommunityBootstrapFloor(tableSeq);
-    ASSERT_TRUE(chain.guardAutoRollback());  // captures high-water 5000
-
-    // past the ordinary floor (4000) but still above the table sequence: allowed
-    chain.test_setLastSequence(4000);
+    chain.test_setLastSequence(5000);
+    EXPECT_TRUE(chain.deepRollbackApproved());
+    ASSERT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(4000);  // far below the bound: allowed by the override
     EXPECT_TRUE(chain.guardAutoRollback());
-    chain.test_setLastSequence(tableSeq + 1);
-    EXPECT_TRUE(chain.guardAutoRollback());
+    EXPECT_FALSE(chain.forkHeld());
 
-    // at or below the table sequence the ordinary bound takes over again and refuses
-    chain.test_setLastSequence(tableSeq);
+    // the episode completes: the override is spent
+    chain.test_setLastSequence(5001);
+    chain.test_onHeadAdvanced();
+    EXPECT_FALSE(chain.test_rollbackEpisode());
+    EXPECT_FALSE(chain.deepRollbackApproved());
+    chain.test_setLastSequence(5001);
+    ASSERT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(5001 - Consensus::MaxAutoRollbackDepth);
     EXPECT_FALSE(chain.guardAutoRollback());
+    unsetEnv("CS_ALLOW_DEEP_ROLLBACK");
+    chain.test_resetRollbackEpisode();
+}
+
+// The episode reference is kept next to the database: a restart neither gives a fresh full depth nor
+// forgets FORK HELD
+TEST(BlockChain, RollbackReferenceSurvivesRestart) {
+    installDefaultConfig();
+    TempDir dir("restart");
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(5000);
+    chain.setGuardStateDir(dir.str());
+    ASSERT_TRUE(chain.guardAutoRollback());
+    ASSERT_TRUE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
+    chain.test_setLastSequence(4950);
+    ASSERT_TRUE(chain.guardAutoRollback());
+
+    // "restart" at head 4950: the reference is still 5000, not 4950
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(4950);
+    chain.setGuardStateDir(dir.str());
+    EXPECT_TRUE(chain.test_rollbackEpisode());
+    EXPECT_EQ(chain.test_rollbackHighWater(), 5000u);
+    chain.test_setLastSequence(4901);
+    EXPECT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(4900);
+    EXPECT_FALSE(chain.guardAutoRollback());
+    ASSERT_TRUE(chain.forkHeld());
+    ASSERT_TRUE(std::filesystem::exists(dir.path / cs::forkguard::kForkFile));
+
+    // restart again: still FORK HELD, same record
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(4900);
+    chain.setGuardStateDir(dir.str());
+    EXPECT_TRUE(chain.forkHeld());
+    ASSERT_TRUE(chain.forkHeldRecord().has_value());
+    EXPECT_EQ(chain.forkHeldRecord()->highWater, 5000u);
+    EXPECT_EQ(chain.forkHeldRecord()->ourHead, 4900u);
+
+    // the chain climbs above the reference: the episode and FORK HELD end, both files go
+    chain.test_setLastSequence(5001);
+    chain.test_onHeadAdvanced();
+    EXPECT_FALSE(chain.forkHeld());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kForkFile));
+
+    // a restart above an old reference drops it
+    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {4000, false}));
+    chain.test_resetRollbackEpisode();
+    chain.setGuardStateDir(dir.str());
+    EXPECT_FALSE(chain.test_rollbackEpisode());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
+    chain.setGuardStateDir("");
+}
+
+// the fork record and the episode in their files, and the --resolve-fork plan
+TEST(BlockChain, ForkGuardFilesRoundTrip) {
+    TempDir dir("files");
+    EXPECT_EQ(cs::forkguard::stateDirFor("db"), ".");
+    EXPECT_EQ(cs::forkguard::stateDirFor("db/"), ".");
+    EXPECT_EQ(cs::forkguard::stateDirFor("/data/db"), "/data");
+
+    std::string error;
+    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());
+    EXPECT_NE(error.find("no fork record"), std::string::npos);
+
+    cs::forkguard::ForkRecord r;
+    r.reason = "depth";
+    r.sinceUnix = 1795000000;
+    r.highWater = 5000;
+    r.ourHead = 4900;
+    r.forkPoint = 4899;
+    r.forkPointExact = false;
+    r.competingSeq = 4901;
+    r.competingHash = "AB";
+    r.peerKey = "key";
+    r.peerAddress = "1.2.3.4:9510";
+    r.peerHeight = 6000;
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.str(), r));
+    // no hash for the fork point: cannot be checked, refused
+    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());
+    EXPECT_NE(error.find("cannot be checked"), std::string::npos);
+
+    r.forkPointHash = "CD";
+    r.dismissedUnix = 1795000100;
+    r.dismissedSeq = 4901;
+    r.dismissedHash = "AB";
+    r.addBranchHash("AB");
+    r.addBranchHash("EF");
+    r.addBranchHash("AB");  // once only
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.str(), r));
+    {
+        // the Docker healthcheck reads these lines with grep and sed
+        std::ifstream in(dir.path / cs::forkguard::kForkFile);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_NE(text.find("\"held\": \"true\""), std::string::npos) << text;
+        EXPECT_NE(text.find("\"fork_point\": \"4899\""), std::string::npos) << text;
+        EXPECT_NE(text.find("\"since\": \"2026-"), std::string::npos) << text;
+    }
+    const auto back = cs::forkguard::loadForkRecord(dir.str());
+    ASSERT_TRUE(back.has_value());
+    EXPECT_TRUE(back->held);
+    EXPECT_EQ(back->reason, "depth");
+    EXPECT_EQ(back->highWater, 5000u);
+    EXPECT_EQ(back->forkPoint, 4899u);
+    EXPECT_EQ(back->forkPointHash, "CD");
+    EXPECT_EQ(back->competingSeq, 4901u);
+    EXPECT_EQ(back->peerAddress, "1.2.3.4:9510");
+    EXPECT_EQ(back->peerHeight, 6000u);
+    EXPECT_EQ(back->dismissedSeq, 4901u);
+    EXPECT_EQ(back->branchHashes, (std::vector<std::string>{"AB", "EF"}));
+    EXPECT_TRUE(back->inDismissedBranch("XX", "EF"));
+    EXPECT_FALSE(back->inDismissedBranch("XX", "YY"));
+    const auto plan = cs::forkguard::planResolve(dir.str(), &error);
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->top, 4899u);
+    EXPECT_EQ(plan->hash, "CD");
+
+    // the detail line names both choices
+    const auto line = cs::forkguard::summary(r);
+    EXPECT_NE(line.find("FORK HELD since 2026-"), std::string::npos);
+    EXPECT_NE(line.find("--resolve-fork"), std::string::npos);
+    EXPECT_NE(line.find("--set-bc-top 4899"), std::string::npos);
+    EXPECT_NE(line.find(cs::forkguard::kDismissTrigger), std::string::npos);
+    EXPECT_NE(line.find("peer height #6000"), std::string::npos);
+
+    cs::forkguard::clearForkRecord(dir.str());
+    EXPECT_FALSE(cs::forkguard::loadForkRecord(dir.str()).has_value());
 }
 
 namespace {
@@ -427,12 +639,13 @@ GuardKeys guardKeys(size_t n) {
 // a block of `seq` whose confidants are `keys`, all of them signing; when `prev` is given it carries
 // round confirmations by the confidants of `prev` selected in `confirmMask` (bit i = confidant i)
 csdb::Pool guardBlock(cs::Sequence seq, const GuardKeys& keys, const GuardKeys* prev = nullptr,
-                      uint64_t confirmMask = 0, bool bootstrap = false, bool corruptSignature = false) {
-    csdb::Pool p(csdb::PoolHash{}, seq);
+                      uint64_t confirmMask = 0, bool bootstrap = false, bool corruptSignature = false,
+                      const csdb::PoolHash& previousHash = csdb::PoolHash{}, const std::string& payload = "payload") {
+    csdb::Pool p(previousHash, seq);
     p.set_confidants(keys.pub);
     p.add_number_trusted(static_cast<uint8_t>(keys.pub.size()));
     p.add_real_trusted((1ull << keys.pub.size()) - 1);
-    p.add_user_field(200, std::string("payload"));  // an id no block field uses
+    p.add_user_field(200, payload);  // an id no block field uses
     BlockChain::setBootstrap(p, bootstrap);
     if (prev) {
         cs::Bytes trustedToHash;
@@ -473,13 +686,29 @@ BlockChain& guardChain() {
     static BlockChain chain(genesis, start);
     return chain;
 }
+
+// the guard chain in a clean state: no episode, no record, no files
+BlockChain& freshGuardChain(const std::string& dir = std::string{}) {
+    installDefaultConfig();
+    auto& chain = guardChain();
+    chain.setGuardStateDir("");
+    chain.test_resetRollbackEpisode();
+    chain.setGuardStateDir(dir);
+    return chain;
+}
+
+csdb::PoolHash someHash(char c) {
+    csdb::Pool p(csdb::PoolHash{}, 1);
+    p.add_user_field(1, std::string(10, c));
+    EXPECT_TRUE(p.compose());
+    return p.hash();
+}
 }  // namespace
 
 // A non-bootstrap competing block may make the node unwind only with confirmations by a majority of
 // the confidants of the node's own last block; stricter than block validation (no one-entry masks).
 TEST(BlockChain, CompetingBlockNeedsStrictTrustedConfirmations) {
-    installDefaultConfig();
-    auto& chain = guardChain();
+    auto& chain = freshGuardChain();
     const auto ours = guardKeys(3);
     const auto next = guardKeys(3);
     chain.test_setLastBlock(guardBlock(20, ours));
@@ -496,12 +725,24 @@ TEST(BlockChain, CompetingBlockNeedsStrictTrustedConfirmations) {
     EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(guardBlock(21, next, &strangers, 0b111)));
 }
 
+// BlockVerifier accepts a bootstrap block without looking at confirmations: hasTrustedConfirmations
+// must not, even when the block carries valid confirmations by our confidants
+TEST(BlockChain, BootstrapBlockHasNoTrustedConfirmations) {
+    auto& chain = freshGuardChain();
+    const auto ours = guardKeys(3);
+    const auto next = guardKeys(3);
+    chain.test_setLastBlock(guardBlock(40, ours));
+    ASSERT_TRUE(chain.hasTrustedConfirmations(guardBlock(41, next, &ours, 0b111)));
+    const auto flagged = guardBlock(41, next, &ours, 0b111, true);
+    ASSERT_TRUE(BlockChain::isBootstrap(flagged));
+    EXPECT_FALSE(chain.hasTrustedConfirmations(flagged));
+}
+
 // The bootstrap flag is a bit anyone can set: a bootstrap-flagged competing block passes the gate
 // only when it is authenticated locally (valid own signatures AND the confidants of a round table this
 // node accepted), never on the flag alone, and never more easily than a normal block.
 TEST(BlockChain, BootstrapFlagAloneNeverTriggersUnwind) {
-    installDefaultConfig();
-    auto& chain = guardChain();
+    auto& chain = freshGuardChain();
     const auto ours = guardKeys(3);
     const auto others = guardKeys(3);
     chain.test_setLastBlock(guardBlock(30, ours));
@@ -535,4 +776,173 @@ TEST(BlockChain, BootstrapFlagAloneNeverTriggersUnwind) {
     unrelated.round = 1002;
     conveyer.setRound(unrelated.round);
     conveyer.setTable(unrelated);
+}
+
+// storeBlock: a competing block the node refuses (not vouched for, or beyond the depth bound) leaves
+// the head and the uncertain flag untouched, and raises FORK HELD with a fork record
+TEST(BlockChain, RefusedCompetingBlockLeavesTheChainUntouched) {
+    TempDir dir("store");
+    auto& chain = freshGuardChain(dir.str());
+    const auto ours = guardKeys(3);
+    const auto next = guardKeys(3);
+    const auto strangers = guardKeys(3);
+
+    // not vouched for by our confidants
+    const auto own = guardBlock(20, ours);
+    chain.test_setLastBlock(own);
+    auto foreign = guardBlock(21, next, &strangers, 0b111, false, false, someHash('x'));
+    EXPECT_FALSE(chain.storeBlock(foreign, cs::PoolStoreType::Synced));
+    EXPECT_EQ(chain.getLastSeq(), 20u);
+    EXPECT_EQ(chain.getLastHash(), own.hash());
+    EXPECT_FALSE(chain.isLastBlockUncertain());
+    ASSERT_TRUE(chain.forkHeld());
+    auto rec = chain.forkHeldRecord();
+    EXPECT_EQ(rec->reason, "authority");
+    EXPECT_EQ(rec->competingSeq, 21u);
+    EXPECT_EQ(rec->competingHash, foreign.hash().to_string());
+    EXPECT_EQ(rec->ourHead, 20u);
+    EXPECT_EQ(rec->forkPoint, 19u);  // our #20 is not the competing block's previous one
+    EXPECT_FALSE(rec->forkPointExact);
+    EXPECT_TRUE(std::filesystem::exists(dir.path / cs::forkguard::kForkFile));
+
+    // vouched for, but beyond the depth bound
+    chain.setGuardStateDir("");
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(200);
+    ASSERT_TRUE(chain.guardAutoRollback());  // reference head #200
+    const auto deep = guardBlock(100, ours);
+    chain.test_setLastBlock(deep);
+    chain.setBlocksToBeRemoved(1);
+    auto vouched = guardBlock(101, next, &ours, 0b111, false, false, someHash('y'));
+    ASSERT_TRUE(chain.competingBlockMayTriggerUnwind(vouched));
+    EXPECT_FALSE(chain.storeBlock(vouched, cs::PoolStoreType::Synced));
+    EXPECT_EQ(chain.getLastSeq(), 100u);
+    EXPECT_EQ(chain.getLastHash(), deep.hash());
+    EXPECT_FALSE(chain.isLastBlockUncertain());
+    ASSERT_TRUE(chain.forkHeld());
+    EXPECT_EQ(chain.forkHeldRecord()->reason, "depth");
+    EXPECT_EQ(chain.forkHeldRecord()->highWater, 200u);
+    chain.test_resetRollbackEpisode();
+}
+
+// The operator keeps this chain (the dismiss-fork file): FORK HELD ends, the branch stays refused and
+// is not reported again, even after a restart; another branch is reported again
+TEST(BlockChain, DismissedForkStaysRefusedAndQuiet) {
+    TempDir dir("dismiss");
+    auto& chain = freshGuardChain(dir.str());
+    const auto ours = guardKeys(3);
+    const auto next = guardKeys(3);
+    const auto strangers = guardKeys(3);
+    const auto own = guardBlock(50, ours);
+    chain.test_setLastBlock(own);
+
+    auto branch = guardBlock(51, next, &strangers, 0b111, false, false, someHash('a'));
+    EXPECT_FALSE(chain.storeBlock(branch, cs::PoolStoreType::Synced));
+    ASSERT_TRUE(chain.forkHeld());
+
+    // no trigger: nothing happens
+    EXPECT_FALSE(chain.checkDismissTrigger());
+    EXPECT_TRUE(chain.forkHeld());
+    // the trigger file: dismissed and consumed
+    { std::ofstream(dir.path / cs::forkguard::kDismissTrigger) << "\n"; }
+    EXPECT_TRUE(chain.checkDismissTrigger());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kDismissTrigger));
+    EXPECT_FALSE(chain.forkHeld());
+    const auto rec = cs::forkguard::loadForkRecord(dir.str());
+    ASSERT_TRUE(rec.has_value());
+    EXPECT_FALSE(rec->held);
+    EXPECT_EQ(rec->dismissedSeq, 51u);
+    EXPECT_EQ(rec->dismissedHash, branch.hash().to_string());
+
+    // the same branch again: still refused, the chain untouched, no FORK HELD
+    EXPECT_FALSE(chain.storeBlock(branch, cs::PoolStoreType::Synced));
+    EXPECT_EQ(chain.getLastSeq(), 50u);
+    EXPECT_EQ(chain.getLastHash(), own.hash());
+    EXPECT_FALSE(chain.forkHeld());
+    // a trigger with nothing held is consumed and does nothing
+    { std::ofstream(dir.path / cs::forkguard::kDismissTrigger) << "\n"; }
+    EXPECT_FALSE(chain.checkDismissTrigger());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kDismissTrigger));
+
+    // restart: the dismissal is in the record; the branch, continued by its next block, stays quiet
+    chain.setGuardStateDir("");
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastBlock(guardBlock(51, ours, nullptr, 0, false, false, own.hash()));
+    chain.setGuardStateDir(dir.str());
+    EXPECT_FALSE(chain.forkHeld());
+    ASSERT_TRUE(chain.forkRecord().has_value());
+    EXPECT_TRUE(chain.forkRecord()->hasDismissal());
+    auto continued = guardBlock(52, next, &strangers, 0b111, false, false, branch.hash());
+    EXPECT_FALSE(chain.storeBlock(continued, cs::PoolStoreType::Synced));
+    EXPECT_EQ(chain.getLastSeq(), 51u);
+    EXPECT_FALSE(chain.forkHeld());
+
+    // a different branch is reported again, and the earlier dismissal is kept
+    auto other = guardBlock(52, next, &strangers, 0b111, false, false, someHash('b'), "other");
+    EXPECT_FALSE(chain.storeBlock(other, cs::PoolStoreType::Synced));
+    ASSERT_TRUE(chain.forkHeld());
+    EXPECT_EQ(chain.forkHeldRecord()->competingHash, other.hash().to_string());
+    EXPECT_TRUE(chain.forkHeldRecord()->inDismissedBranch(continued.hash().to_string(), ""));
+    chain.setGuardStateDir("");
+    chain.test_resetRollbackEpisode();
+}
+
+// The antifork selection stopped by the guard leaves a clean state: no pending request, selection
+// finished, antifork mode off, the chain as it was, FORK HELD
+TEST(BlockChain, AntiforkSelectionAbandonedByTheGuard) {
+    auto& chain = freshGuardChain();
+    const auto ours = guardKeys(3);
+    chain.test_setLastSequence(300);
+    ASSERT_TRUE(chain.guardAutoRollback());  // reference head #300
+    const auto low = guardBlock(200, ours);
+    chain.test_setLastBlock(low);
+    chain.test_setSelectionUnfinished(someHash('s'));
+    ASSERT_TRUE(chain.getIncorrectBlockNumbers()->empty());
+
+    chain.cacheLastBlocks();
+    EXPECT_TRUE(chain.test_selectionFinished());
+    EXPECT_FALSE(chain.test_antiForkMode());
+    EXPECT_EQ(chain.test_emittingRequest(), 0);
+    EXPECT_TRUE(chain.test_lastPrevHash().is_empty());
+    EXPECT_TRUE(chain.getIncorrectBlockNumbers()->empty());
+    EXPECT_EQ(chain.getLastSeq(), 200u);
+    EXPECT_EQ(chain.getLastHash(), low.hash());
+    EXPECT_TRUE(chain.forkHeld());
+    chain.test_resetRollbackEpisode();
+}
+
+// The start-up integrity repair (blocks of incorrectBlocks_) is a local repair, not a network reorg:
+// the guard does not bound it and raises nothing, even deep below an episode's reference
+TEST(BlockChain, IntegrityRepairIsNotBoundedByTheGuard) {
+    auto& chain = freshGuardChain();
+    const auto ours = guardKeys(3);
+    chain.test_setLastSequence(300);
+    ASSERT_TRUE(chain.guardAutoRollback());  // reference head #300: #200 would be refused
+    chain.test_setLastBlock(guardBlock(200, ours));
+    chain.addIncorrectBlockNumber(200);
+    chain.setBlocksToBeRemoved(1);
+
+    chain.cacheLastBlocks();
+    EXPECT_EQ(chain.getLastSeq(), 199u);  // the incorrect block was removed
+    EXPECT_TRUE(chain.getIncorrectBlockNumbers()->empty());
+    EXPECT_FALSE(chain.forkHeld());
+    chain.test_resetRollbackEpisode();
+}
+
+// --resolve-fork's approval: the episode it starts lifts the gate and the bound, and ends with it
+TEST(BlockChain, ResolveForkApprovalServesOneEpisode) {
+    TempDir dir("approve");
+    auto& chain = freshGuardChain();
+    ASSERT_TRUE(cs::forkguard::saveEpisode(dir.str(), {4899, true}));
+    chain.test_setLastSequence(4899);
+    chain.setGuardStateDir(dir.str());
+    EXPECT_TRUE(chain.deepRollbackApproved());
+    chain.test_setLastSequence(4000);
+    EXPECT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(4900);
+    chain.test_onHeadAdvanced();
+    EXPECT_FALSE(chain.deepRollbackApproved());
+    EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kEpisodeFile));
+    chain.setGuardStateDir("");
+    chain.test_resetRollbackEpisode();
 }

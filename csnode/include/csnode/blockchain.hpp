@@ -3,7 +3,9 @@
 
 #include <chrono>
 #include <limits>
+#include <functional>
 #include <list>
+#include <optional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -25,6 +27,7 @@
 #include <csnode/walletsids.hpp>
 #include <csnode/poolcache.hpp>
 #include <csnode/caches_serialization_manager.hpp>
+#include <csnode/forkguardstate.hpp>
 
 #include <roundpackage.hpp>
 
@@ -246,22 +249,23 @@ public:
     // every automatic rollback of the node's own last block passes through it, whatever the caller
     // (the sync fork path, the uncertain-replacement path, the antifork cache and the bad-hash reply).
     // It returns true while the resulting head would stay at or above rollbackHighWater_ -
-    // maxAutoRollbackDepth_, where rollbackHighWater_ is the head captured at the start of the current
-    // rollback episode (the first automatic removal from any path). Once the limit would be crossed it
-    // logs a prominent alert and returns false (keeping the chain intact and leaving the decision to
-    // the operator); it does NOT set any permanent state, so a later legitimate reorg still works.
-    // An operator accepts a deliberate deep switch with the [params] allow_deep_rollback option or the
-    // CS_ALLOW_DEEP_ROLLBACK environment variable. A node that has adopted a community bootstrap table
-    // (see setCommunityBootstrapFloor) may unwind freely back to the sequence where it took that table.
-    // Local only: it changes how far this node unwinds, never block content.
+    // max_auto_rollback, where rollbackHighWater_ is the head captured at the start of the current
+    // rollback episode (the first automatic removal from any path) and kept in reorg-episode.json next
+    // to the database, so a restart does not give a fresh full depth. Once the limit would be crossed
+    // it records the fork (fork-held.json), logs a prominent alert and returns false: the chain stays
+    // intact, the node reports FORK HELD and the operator decides (--resolve-fork, --set-bc-top). The
+    // state clears when the episode ends (the head climbs above the reference) or the operator
+    // truncates. An operator accepts a deliberate deep switch with [params] allow_deep_rollback or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable, for one episode. Local only: it changes how far
+    // this node unwinds, never block content.
     bool guardAutoRollback();
 
     // True if the competing block carries round confirmations signed by the confidants the node
     // already trusts - the confidants of its own current last block - exactly as BlockVerifier checks
     // them. A non-bootstrap competing block that fails this check never triggers a rollback: it is not
     // vouched for by any authority this node recognises (a self-signed block vouches only for itself).
-    // A bootstrap block carries no such confirmations; competingBlockMayTriggerUnwind() sends it to
-    // isBootstrapAuthenticatedLocally() instead, so a bootstrap flag never opens a weaker gate.
+    // A bootstrap block carries no such confirmations and always fails here (BlockVerifier accepts it
+    // without them); competingBlockMayTriggerUnwind() sends it to isBootstrapAuthenticatedLocally().
     // Strict for the unwind decision: a confirmation mask of more than one entry, of the same size as our
     // last block's confidants, with as many signatures as it marks, and a majority of them confirming.
     bool hasTrustedConfirmations(const csdb::Pool& competing) const;
@@ -278,23 +282,66 @@ public:
     bool competingBlockMayTriggerUnwind(const csdb::Pool& competing) const;
 
     // The operator has approved a deliberate deep switch: [params] allow_deep_rollback=true or the
-    // CS_ALLOW_DEEP_ROLLBACK environment variable. It lifts both the authority gate and the depth bound.
-    static bool deepRollbackApproved();
+    // CS_ALLOW_DEEP_ROLLBACK environment variable (until one episode has completed with it: then it is
+    // off for the rest of the run), or --resolve-fork for the episode it started. It lifts both the
+    // authority gate and the depth bound.
+    bool deepRollbackApproved() const;
+    // CS_ALLOW_DEEP_ROLLBACK is set to a non-empty value
+    static bool deepRollbackEnvSet();
 
-    // A node that has just adopted a community bootstrap table (the opt-in liveness fallback) records
-    // here the sequence it held when it took the table; the guard then lets it unwind back to that
-    // point without operator action, since taking the table already was the operator's decision. 0
-    // (the default) means no such table was taken and the ordinary depth bound applies throughout.
-    void setCommunityBootstrapFloor(cs::Sequence seq);
+    // The local files of the guard live in `dir` (the folder next to the database). Loads the
+    // persisted episode reference and the fork record; an episode the chain has already passed is
+    // dropped. An empty dir keeps everything in memory only. Called by init().
+    void setGuardStateDir(const std::string& dir);
+
+    // FORK HELD: the node refused to unwind for a competing chain, the episode has not ended and the
+    // operator has not dismissed it.
+    bool forkHeld() const;
+    // the record while FORK HELD, else nothing
+    std::optional<cs::forkguard::ForkRecord> forkHeldRecord() const;
+    // the record, held or keeping a dismissal
+    std::optional<cs::forkguard::ForkRecord> forkRecord() const;
+
+    // The operator keeps this node's chain: FORK HELD ends, the record keeps the competing branch as
+    // dismissed (still refused, never reported again; another branch is). False if no fork is held.
+    bool dismissFork();
+    // the dismiss-fork file next to the database: dismissFork() and remove the file. Called every
+    // round and at start-up; true if a fork was dismissed.
+    bool checkDismissTrigger();
+
+    // the sync reply being stored comes from this peer, which announced this height (for the fork
+    // record); cleared with clearSyncSource()
+    void setSyncSource(const cs::PublicKey& key, cs::Sequence announcedHeight);
+    void clearSyncSource();
+    // resolves a peer key to "ip:port" for the fork record (set by the node; may return "")
+    void setPeerAddressResolver(std::function<std::string(const cs::PublicKey&)> resolver);
+
+    // --resolve-fork: init() truncates to `seq` only if the stored block there has `hash`, then clears
+    // the fork record and approves following the competing chain for the one episode that follows
+    void setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash);
+    // init() refused to truncate: the stored block at the requested sequence has another hash
+    bool truncationRefused() const {
+        return truncationRefused_;
+    }
 
 #ifdef TESTING
-    // test-only accessors for the longest-chain guard (inline, no data members: no layout change)
+    // test-only accessors for the longest-chain guard
     void test_setLastSequence(cs::Sequence s) { lastSequence_ = s; }
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
-    void test_resetRollbackEpisode() { rollbackEpisode_ = false; rollbackHighWater_ = 0; }
+    void test_resetRollbackEpisode() {
+        rollbackEpisode_ = false; rollbackHighWater_ = 0; episodeApprovedSwitch_ = false; deepOverrideSpent_ = false;
+        std::lock_guard l(guardMutex_); forkRecord_.reset();
+    }
     // make `block` the node's last block (the deferred one), as getLastBlock() returns it
     void test_setLastBlock(const csdb::Pool& block) { deferredBlock_ = block; lastSequence_ = block.sequence(); }
+    // let the episode end as if a block above the reference had been recorded
+    void test_onHeadAdvanced() { onHeadAdvanced(); }
+    void test_setSelectionUnfinished(const csdb::PoolHash& lastPrev) { selectionFinished_ = false; lastPrevHash_ = lastPrev; antiForkMode_ = true; emittingRequest_ = 1; }
+    bool test_selectionFinished() const { return selectionFinished_; }
+    bool test_antiForkMode() const { return antiForkMode_; }
+    uint8_t test_emittingRequest() const { return emittingRequest_; }
+    csdb::PoolHash test_lastPrevHash() const { return lastPrevHash_; }
 #endif
 
     const cs::MultiWallets& multiWallets() const;
@@ -659,9 +706,36 @@ private:
     bool rollbackEpisode_ = false;
     cs::Sequence rollbackHighWater_ = 0;
     cs::Sequence rollbackLowWater_ = 0;  // lowest head reached in the current episode (for the log)
-    // longest-chain guard runtime state (see setCommunityBootstrapFloor). The depth bound and the
-    // deep-rollback override are read from config ([params] max_auto_rollback / allow_deep_rollback).
-    cs::Sequence communityBootstrapFloor_ = 0;
+    // longest-chain guard: where its files live (empty: memory only), the fork it refused (FORK
+    // HELD), the --resolve-fork / allow_deep_rollback approvals, the integrity repair in progress
+    std::string guardStateDir_;
+    mutable std::mutex guardMutex_;
+    std::optional<cs::forkguard::ForkRecord> forkRecord_;
+    std::chrono::steady_clock::time_point lastDismissedLog_{};  // dismissed branch offered again (hourly)
+    bool episodeApprovedSwitch_ = false;  // --resolve-fork approved this episode
+    bool deepOverrideSpent_ = false;      // allow_deep_rollback served one episode: off until restart
+    bool deepOverrideUsed_ = false;       // the current episode ran with allow_deep_rollback
+    bool integrityRepair_ = false;        // cacheLastBlocks() is removing blocks of incorrectBlocks_
+    struct CompetingBlock {
+        cs::Sequence seq = 0;
+        csdb::PoolHash hash;
+        csdb::PoolHash previous;
+    };
+    std::optional<CompetingBlock> competing_;  // the competing block being handled (for the record)
+    std::optional<std::pair<cs::PublicKey, cs::Sequence>> syncSource_;
+    std::function<std::string(const cs::PublicKey&)> peerAddressResolver_;
+    cs::Sequence resolveForkSeq_ = cs::kWrongSequence;
+    csdb::PoolHash resolveForkHash_;
+    bool truncationRefused_ = false;
+    // starts the episode at the current head if none is running (persisting its reference)
+    void beginRollbackEpisode();
+    // the chain grew: ends the episode once the head is above its reference
+    void onHeadAdvanced();
+    // records the refused fork (once per episode) and logs the alert; reason "depth" or "authority".
+    // False (and nothing raised) when the competing block belongs to a branch the operator dismissed.
+    bool recordForkHeld(const char* reason);
+    // removeLastBlock()/compromiseLastBlock() may go on: an integrity repair, or the guard allows it
+    bool mayUnwindLastBlock();
     std::atomic_bool stop_ = false;
     // the quick-start checkpoint of the last init() is ahead of the blocks on disk
     bool checkpointAheadOfBlocks_ = false;

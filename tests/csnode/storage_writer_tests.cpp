@@ -334,3 +334,66 @@ TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacement) {
 TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacementAsync) {
     checkRepairedBlockIsForgotten(true);
 }
+
+// --resolve-fork cuts the chain through the --set-bc-top path, but only when the stored block at the
+// fork point is the recorded one: then every block above it goes and the fork point stays the last
+// block; otherwise nothing is removed and the open fails with TruncateMismatch.
+TEST(StorageWriter, ResolveForkTruncatesExactlyAtTheRecordedForkPoint) {
+    auto db = std::make_shared<MemoryDb>();
+    const auto own = chain(10);
+    {
+        csdb::Storage storage;
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        ASSERT_TRUE(storage.open(opt));
+        for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+        ASSERT_TRUE(storage.flush());
+        storage.close();
+    }
+    ASSERT_EQ(db->stored(), 10u);
+
+    // a record that no longer matches (another hash at #6): refused, nothing removed
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[5].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 6;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(db->stored(), 10u);
+    }
+    // a fork point that is not stored at all: refused too
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[6].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 12;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(db->stored(), 10u);
+    }
+    // the recorded block: everything above #6 goes, #6 stays
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[6].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 6;
+        ASSERT_TRUE(storage.open(opt));
+        storage.close();
+    }
+    EXPECT_EQ(db->stored(), 7u);
+    for (cs::Sequence s = 0; s <= 6; ++s) EXPECT_TRUE(db->has(own[s].hash())) << s;
+    for (cs::Sequence s = 7; s < 10; ++s) EXPECT_FALSE(db->has(own[s].hash())) << s;
+
+    // and the storage opens normally afterwards, ending at the fork point
+    csdb::Storage storage;
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    ASSERT_TRUE(storage.open(opt));
+    EXPECT_EQ(storage.size(), 7u);
+    EXPECT_EQ(storage.last_hash(), own[6].hash());
+    storage.close();
+}

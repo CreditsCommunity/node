@@ -123,6 +123,20 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.lastBlockReplacedEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
+    // the fork record names the address of the refused peer when the routing table knows it
+    blockChain_.setPeerAddressResolver([this](const cs::PublicKey& key) -> std::string {
+        if (!transport_) {
+            return {};
+        }
+        std::vector<cs::PeerData> peers;
+        transport_->getKnownPeers(peers);
+        for (const auto& p : peers) {
+            if (p.key == key && !p.ip.empty()) {
+                return p.ip + ":" + std::to_string(p.port);
+            }
+        }
+        return {};
+    });
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
     cs::Connector::connect(&blockChain_.successfullQuickStartEvent, this, &Node::onSuccessQS);
     initPoolSynchronizer();
@@ -236,14 +250,52 @@ bool Node::initCommon() {
     return true;
 }
 
+std::optional<cs::Sequence> Node::resolveForkTop() {
+    const auto* config = cs::ConfigHolder::instance().config();
+    if (config->newBlockchainTop()) {
+        cserror() << "--resolve-fork and --set-bc-top together: use one of them";
+        return std::nullopt;
+    }
+    std::string error;
+    const auto plan = cs::forkguard::planResolve(cs::forkguard::stateDirFor(config->getPathToDB()), &error);
+    if (!plan.has_value()) {
+        cserror() << "--resolve-fork: " << error;
+        return std::nullopt;
+    }
+    cslog() << cs::forkguard::summary(plan->record);
+    cslog() << "--resolve-fork: removing every block above #" << WithDelimiters(plan->top) << " (" << plan->hash
+            << "), our head was #" << WithDelimiters(plan->record.ourHead) << ", if the block at #"
+            << WithDelimiters(plan->top) << " is still the recorded one";
+    blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+    return plan->top;
+}
+
 Node::ChainInit Node::initChain() {
-    if (cs::ConfigHolder::instance().config()->newBlockchainTop()) {
+    const auto* initConfig = cs::ConfigHolder::instance().config();
+    if (initConfig->newBlockchainTop() || initConfig->resolveFork()) {
+        cs::Sequence newTop = initConfig->newBlockchainTopSeq();
+        if (initConfig->resolveFork()) {
+            const auto resolved = resolveForkTop();
+            if (!resolved.has_value()) {
+                exitCode_ = 3;
+                return ChainInit::Failed;
+            }
+            newTop = *resolved;
+        }
         if (!blockChain_.init(
-                cs::ConfigHolder::instance().config()->getPathToDB(),
+                initConfig->getPathToDB(),
                 &cachesSerializationManager_,
                 initialConfidants_,
-                cs::ConfigHolder::instance().config()->newBlockchainTopSeq())
+                newTop)
         ) {
+            if (blockChain_.truncationRefused()) {
+                // nothing was removed: the database is as it was, the quick-start data stays
+                cserror() << "--resolve-fork: the block at the recorded fork point is not the recorded one (the "
+                          << "chain changed since the fork was recorded): nothing removed. Check the node's head "
+                          << "with other nodes or the monitor; if it must still be cut, use --set-bc-top <sequence>.";
+                exitCode_ = 3;
+                return ChainInit::Failed;
+            }
             if (isStopRequested()) {
                 cslog() << "Init aborted by user; preserving QUICK START state.";
                 cs::CheckpointHead headInfo;
@@ -283,6 +335,11 @@ Node::ChainInit Node::initChain() {
         if (solver_) {
             solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
             solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
+        }
+        if (initConfig->resolveFork()) {
+            cslog() << "--resolve-fork: the chain now ends at block #" << WithDelimiters(newTop)
+                    << " and the fork record is cleared. Start the node as usual: it syncs from there and "
+                    << "follows the other chain (for this one switch, without the automatic rollback bound).";
         }
         return ChainInit::StopAfterInit;
     }
@@ -530,7 +587,7 @@ bool Node::startBootstrap() {
     const std::string dbPath = config.getPathToDB();
     const std::string backend = config.getStorageSettings().dbBackend;
     bool removedTmp = false;
-    if (const auto skip = sb::notNeeded(cfg, ".", dbPath, backend, config.newBlockchainTop(), &removedTmp)) {
+    if (const auto skip = sb::notNeeded(cfg, ".", dbPath, backend, config.newBlockchainTop() || config.resolveFork(), &removedTmp)) {
         if (skip->why == sb::Skip::Backend) {
             cswarning() << "SNAPSHOT: " << skip->text << ": syncing from block 0";
         }
@@ -2440,6 +2497,12 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
 
 void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
     csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    // the blocks of this reply come from `sender`: named in the fork record should the node refuse one
+    blockChain_.setSyncSource(sender, poolSynchronizer_->announcedSequence(sender));
+    struct ClearSource {
+        BlockChain& chain;
+        ~ClearSource() { chain.clearSyncSource(); }
+    } clearSource{blockChain_};
 
     bool isSyncOn = poolSynchronizer_->isSyncroStarted();
     bool isBlockchainUncertain = blockChain_.isLastBlockUncertain();
@@ -4716,6 +4779,14 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
         line1 << "TRUSTED [" << cs::numeric_cast<int>(myConfidantIndex_) << "]";
         status_ = cs::NodeStatus::Trusted;
     }
+    // the operator keeps this chain: a dismiss-fork file next to the database, picked up every round
+    blockChain_.checkDismissTrigger();
+    // the node refused to unwind for a competing chain and holds its own: on every round line, so it
+    // cannot be missed (the detail, with the two remedies, once a minute below)
+    const auto forkHeld = blockChain_.forkHeldRecord();
+    if (forkHeld.has_value()) {
+        line1 << " | FORK HELD";
+    }
 
     line1 << ' ';
 
@@ -4730,6 +4801,16 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     csdebug() << " Node key " << KeyToBase58(nodeIdKey_);
     cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount()
             << (backwardSync_ && backwardSync_->stats().started ? ", oldest stored = " + std::to_string(blockChain_.getFirstStoredSequence()) : std::string{});
+    if (forkHeld.has_value()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (lastForkHeldDetail_ == std::chrono::steady_clock::time_point{} || now - lastForkHeldDetail_ >= std::chrono::minutes(1)) {
+            lastForkHeldDetail_ = now;
+            cswarning() << " " << cs::forkguard::summary(*forkHeld);
+        }
+    }
+    else {
+        lastForkHeldDetail_ = {};
+    }
 
     std::ostringstream line2;
 

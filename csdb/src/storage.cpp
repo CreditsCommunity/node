@@ -218,6 +218,8 @@ private:
     > PoolCache;
     PoolCache pools_cache;
     static const size_t cacheSize = 50;
+    // set_truncate_check(): the hash the block at the new blockchain top must have
+    PoolHash truncate_expected_hash;
 
     // the cache keeps one pool per sequence and per hash: a pool saved at a sequence whose previous
     // pool was removed (a chain reorganisation) replaces the cached one, instead of being refused by
@@ -477,6 +479,10 @@ Storage::WeakPtr Storage::weak_ptr() const noexcept {
     return d;
 }
 
+void Storage::set_truncate_check(const PoolHash& expectedTopHash) {
+    d->truncate_expected_hash = expectedTopHash;
+}
+
 Storage::Error Storage::last_error() const {
     return last_error_map(d.get()).last_error_;
 }
@@ -549,6 +555,22 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     }
 
     if (opt.newBlockchainTop != cs::kWrongSequence) {
+        if (!d->truncate_expected_hash.is_empty()) {
+            const PoolHash expected = d->truncate_expected_hash;
+            d->truncate_expected_hash = PoolHash{};
+            cs::Bytes topBinary;
+            PoolHash stored;
+            if (d->db->get(static_cast<uint32_t>(opt.newBlockchainTop), &topBinary)) {
+                stored = csdb::Pool::hash_from_binary(std::move(topBinary));
+            }
+            if (stored != expected) {
+                d->set_last_error(TruncateMismatch, "block %llu is %s, not the recorded %s: nothing removed",
+                                  static_cast<unsigned long long>(opt.newBlockchainTop),
+                                  stored.is_empty() ? "not stored" : stored.to_string().c_str(),
+                                  expected.to_string().c_str());
+                return false;
+            }
+        }
         auto seqToRemove = static_cast<uint32_t>(opt.newBlockchainTop + 1);
         auto seqLast = seqToRemove;
         {

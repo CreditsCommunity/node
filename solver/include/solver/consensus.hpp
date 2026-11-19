@@ -59,7 +59,7 @@ public:
      * longer chain (to be rejected). Purely local: it changes only how far this node unwinds on its
      * own, never the block contents other nodes see. Set high enough not to interfere with ordinary
      * micro-forks; raise it (or set allow_deep_rollback) to accept a deeper deliberate switch. */
-    constexpr static uint64_t MaxAutoRollbackDepth = 1000;
+    constexpr static uint64_t MaxAutoRollbackDepth = 100;
 
     /** @brief   The maximum trusted nodes to take part in consensus */
     const static unsigned int MaxTrustedNodes = 25;
