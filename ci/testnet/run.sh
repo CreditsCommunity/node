@@ -2276,7 +2276,7 @@ fi
 # DEEP_ROLLBACK_EXPECTED=1 is for a scenario that provokes either on purpose.
 reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
 echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-refused=$(grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null | wc -l)
+refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
 echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
 held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
 [ -z "$held" ] || echo "FORK HELD on: $held"
