@@ -2271,16 +2271,27 @@ if [ -n "$forks" ]; then
 fi
 
 # chain reorganisations: how deep each node unwound on its own (community nodes log one line per
-# finished rollback episode), and the bound must never stop a normal run. DEEP_ROLLBACK_EXPECTED=1
-# is for a scenario that provokes a reorg deeper than [params] max_auto_rollback on purpose.
+# finished rollback episode). In a normal run the guard must never stop a reorg and no competing block
+# may be refused (a refusal leaves a lagging node waiting for the operator, FORK HELD).
+# DEEP_ROLLBACK_EXPECTED=1 is for a scenario that provokes either on purpose.
 reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
 echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-echo "UNWINDS REFUSED: $(grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null | wc -l) competing block(s) not vouched for by the node's confidants"
-guarded=$(grep -al 'LONGEST-CHAIN GUARD' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
-if [ -n "$guarded" ] && [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
-    grep -ah 'LONGEST-CHAIN GUARD' "$WORK"/n*/node.log | head -3
-    echo "FAIL: the automatic rollback bound stopped a reorg in a normal run on: $guarded"
-    exit 1
+refused=$(grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null | wc -l)
+echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
+held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+[ -z "$held" ] || echo "FORK HELD on: $held"
+guarded=$(grep -al 'LONGEST-CHAIN GUARD: a competing chain' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+if [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
+    if [ -n "$guarded" ]; then
+        grep -ah 'LONGEST-CHAIN GUARD' "$WORK"/n*/node.log | head -3
+        echo "FAIL: the automatic rollback bound stopped a reorg in a normal run on: $guarded"
+        exit 1
+    fi
+    if [ "$refused" -gt 0 ]; then
+        grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log | head -3
+        echo "FAIL: $refused competing block(s) refused in a normal run (set DEEP_ROLLBACK_EXPECTED=1 for a scenario that provokes it)"
+        exit 1
+    fi
 fi
 
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap

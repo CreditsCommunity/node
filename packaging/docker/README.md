@@ -84,6 +84,26 @@ password asks again. The password can also be piped:
 1 GB of free memory for a few seconds: `CREDITS_MEMORY` must be at least about `1.2g` (default `4g`).
 A plain key is as exposed as the machine it is on.
 
+## FORK HELD
+
+When the node refuses a competing chain (a rollback deeper than `max_auto_rollback`, 100 blocks by
+default, or blocks not confirmed by the confidants it trusts), it keeps its chain, writes
+`fork-held.json` to the data directory, shows `| FORK HELD` on every round line with a detail line
+once a minute, and the healthcheck reports the container unhealthy with the two choices. Check with
+other nodes or the monitor first, then:
+
+```sh
+# this node's chain is the right one: it keeps refusing that branch and stops reporting it
+docker compose exec node touch /data/dismiss-fork     # stopped container: docker compose run --rm node dismiss-fork
+# the other chain is the right one: cut at the recorded fork point, then follow the other chain
+docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d
+# or cut by hand at a block of your choice (the last one to keep)
+docker compose stop && docker compose run --rm node set-bc-top <sequence> && docker compose up -d
+```
+
+`resolve-fork` removes nothing when there is no record or the block at the recorded fork point is no
+longer the recorded one. See "If your node reports FORK HELD" in `docs/quick-start.md`.
+
 ## Changing the storage
 
 | Change | Result |
