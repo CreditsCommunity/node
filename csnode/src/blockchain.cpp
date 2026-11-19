@@ -2775,6 +2775,20 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
 
     if (poolSequence == lastSequence) {
         csdebug() << kLogPrefix << "poolSequence == lastSequence";
+        // after --resolve-fork: the node stored its own block right after the fork point again, and the
+        // recorded competing block itself (the very hash the operator approved, built on the same
+        // fork point block as the own one) is offered: give up the own block, down to the fork point and never below, so the
+        // recorded block is appended next. No other block bypasses the usual checks.
+        if (approvedBranch_.has_value() && poolSequence == approvedBranch_->seq &&
+            pool.hash().to_string() == approvedBranch_->hash && getLastHash().to_string() != approvedBranch_->hash &&
+            !pool.previous_hash().is_empty() && pool.previous_hash() == getLastBlock().previous_hash()) {
+            cslog() << kLogPrefix << "the block #" << WithDelimiters(poolSequence) << " approved with --resolve-fork is offered: "
+                    << "giving up the own block at that height";
+            competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash()};
+            removeLastBlock();
+            competing_.reset();
+            return false;
+        }
         if (isLastBlockUncertain() && pool.sequence() == uncertainSequence_) {
             cslog() << kLogPrefix << "review replacement for uncertain block " << WithDelimiters(poolSequence);
             if (pool.hash() == desiredHash_) {
@@ -2826,19 +2840,13 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 std::optional<CompetingBlock>& c;
                 ~ClearCompeting() { c.reset(); }
             } clearCompeting{competing_};
-            // after --resolve-fork: a block of exactly the approved branch (its block right after the
-            // fork point, or the next one built on it) may replace a block stored above the fork point
-            // again; any other block offered at those heights ends the approval
-            bool approvedBranchBlock = false;
-            if (approvedBranch_.has_value()) {
-                const auto& ab = *approvedBranch_;
-                approvedBranchBlock = (poolSequence == ab.seq && pool.hash().to_string() == ab.hash) ||
-                                      (poolSequence == ab.seq + 1 && pool.previous_hash().to_string() == ab.hash);
-                if (!approvedBranchBlock && (poolSequence == ab.seq || poolSequence == ab.seq + 1)) {
-                    dropApprovedBranch("another competing block was offered at that height");
-                }
+            // after --resolve-fork, only a competing block that passes the usual checks ends the approval
+            // of the recorded branch; an unauthenticated offer changes nothing
+            if (approvedBranch_.has_value() && (poolSequence == approvedBranch_->seq || poolSequence == approvedBranch_->seq + 1) &&
+                pool.hash().to_string() != approvedBranch_->hash && competingBlockMayTriggerUnwind(pool)) {
+                dropApprovedBranch("another block vouched for by this node's confidants was offered at that height");
             }
-            if (!approvedBranchBlock && !competingBlockMayTriggerUnwind(pool)) {
+            if (!competingBlockMayTriggerUnwind(pool)) {
                 // a competing block not vouched for by authority this node recognises (no strict
                 // confirmations by our last block's confidants, or a bootstrap flag that is not
                 // authenticated locally): never unwind our own chain for it, not even by marking our

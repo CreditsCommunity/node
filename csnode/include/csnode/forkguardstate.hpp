@@ -38,11 +38,12 @@ struct Episode {
     cs::Sequence highWater = 0;
 };
 
-// resolve-approved.json, written by --resolve-fork when the fork point was exact: the one branch the
-// operator chose, the competing block right after the fork point. Until the node is past it (or at
-// the first other block offered at that height), a block of exactly that branch may replace a block
-// this node stored above the fork point again; nothing is unwound to or below the fork point, and
-// any other competing block meets the usual checks.
+// resolve-approved.json, written by --resolve-fork when the fork point was exact: the one block the
+// operator chose, the competing block right after the fork point. If the node stores its own block at
+// that height again before the recorded one arrives, the recorded block itself (that very hash, built
+// on the fork point) makes the node give its own block up, never going to or below the fork point.
+// Nothing else bypasses the usual checks. The approval ends once the node stores a block at that
+// height and goes on, or a competing block that passes the usual checks is offered there.
 inline constexpr const char* kApprovedFile = "resolve-approved.json";
 struct ApprovedBranch {
     cs::Sequence forkPoint = 0;

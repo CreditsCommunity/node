@@ -308,9 +308,11 @@ consensus rules.
   different branch is reported again — or follows the other one: `--resolve-fork` (no argument)
   cuts the chain at the recorded fork point, only if the block there is still the recorded one; the
   node then syncs forward from there. It relaxes nothing else: when the fork point is exact, only
-  the recorded competing block right after it (and the block built on it) may replace a block the
-  node stored above the fork point again, until the node is past that height or another block is
-  offered there, and nothing is ever unwound to or below the fork point. When the fork point is
+  the recorded competing block right after it — that very hash — may replace a block the node
+  stored again right after the fork point; nothing is ever unwound to or below the fork point, every
+  other block meets the usual checks, and an unauthenticated offer changes nothing. The approval
+  ends once the node goes on past that height, or a competing block that passes the usual checks
+  is offered there. When the fork point is
   only an upper bound and the other chain diverges lower, the node reports FORK HELD again with a
   lower fork point; `--set-bc-top <sequence>` then cuts by hand at the last common block found with
   the monitor or other nodes. Both are one-shot
