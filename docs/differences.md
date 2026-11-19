@@ -301,9 +301,14 @@ consensus rules.
   the time and the episode's reference — and reports **FORK HELD** until the episode ends or the
   operator decides: `| FORK HELD` on every round line (`R-<n> NORMAL | FORK HELD`), a detail line
   with the two remedies once a minute, and an unhealthy Docker healthcheck. The state clears by
-  itself when the head climbs back above the reference. The operator, after checking with other
+  itself when the head climbs back above the reference. A competing block not vouched for is
+  refused at once, but reported as FORK HELD only when the head stays at the same block after it
+  (two round starts, or a minute), so a peer on a minority branch cannot make it flap. An unreadable
+  guard file is reported and fails safe (a new rollback episode at the head; FORK HELD kept), the
+  files are written with a flush to the disk, and they are removed when the database is replaced (a
+  new empty database, a snapshot restore). The operator, after checking with other
   nodes or the monitor, either keeps this chain — a `dismiss-fork` file next to the database, which
-  the running node picks up within a round: the record keeps that branch (its first known block and
+  the running node picks up within a few seconds: the record keeps that branch (its first known block and
   the hashes seen since) as dismissed, the node still refuses it but no longer reports it, and a
   different branch is reported again — or follows the other one: `--resolve-fork` (no argument)
   cuts the chain at the recorded fork point, only if the block there is still the recorded one; the

@@ -437,7 +437,13 @@ line (`| FORK HELD`), as a detail line once a minute, in `fork-held.json` next t
 (the `csnode` folder; `~/.credits` in Docker), and as an unhealthy container in `docker ps`. It
 clears by itself if the node's chain grows past the point where the rollback started.
 
-A restart changes nothing: the node remembers the fork and the rollback limit across restarts.
+A restart changes nothing: the node remembers the fork and the rollback limit across restarts, in
+`reorg-episode.json`, `fork-held.json` and `resolve-approved.json` next to the `db` folder. They
+describe that database: if you delete `db/` by hand to start again, delete these three files too
+(a snapshot restore and Docker's `CREDITS_RESET=1` remove them for you).
+
+A block of another chain that the node refuses while its own chain goes on is not reported: FORK
+HELD appears only when the node stays at the same block after the refusal (two rounds, or a minute).
 
 **1. Check before acting.** Compare the node's head (`Last written sequence`) and the block at the
 fork point with other nodes: the [monitor](https://monitor.credits.com), the
@@ -449,7 +455,7 @@ fork point with other nodes: the [monitor](https://monitor.credits.com), the
 | | Your chain is the right one | The other chain is the right one |
 |---|---|---|
 | What it does | The node keeps its chain. That branch stays refused but is no longer reported; a different branch would be reported again. The node keeps running. | The node removes its blocks above the recorded fork point (only if the block there is still the one it recorded) and exits; at the next start it syncs the other chain from there. |
-| Native (node running) | in the `csnode` folder: `touch dismiss-fork` (Windows: `type nul > dismiss-fork`); the node picks it up within a round and deletes it | stop the node (`Ctrl+C` once, or `sudo systemctl stop credits-node`), then `./node --config-file config.ini --resolve-fork` (Windows: `node.exe ...`), then start it as usual |
+| Native (node running) | in the `csnode` folder: `touch dismiss-fork` (Windows: `type nul > dismiss-fork`); the node picks it up within a few seconds and deletes it | stop the node (`Ctrl+C` once, or `sudo systemctl stop credits-node`), then `./node --config-file config.ini --resolve-fork` (Windows: `node.exe ...`), then start it as usual |
 | Docker | `docker compose exec node touch /data/dismiss-fork` | `docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d` |
 
 `--resolve-fork` refuses, and removes nothing, when there is no fork record or when the block at

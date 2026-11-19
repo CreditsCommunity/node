@@ -79,10 +79,10 @@ case "${1:-}" in
         exit "$rc" ;;
     dismiss-fork)
         # a node that reports FORK HELD, this node's chain being the right one: the node keeps refusing
-        # that branch and stops reporting it. A running node picks the file up within a round
+        # that branch and stops reporting it. A running node picks the file up within a few seconds
         # (docker compose exec node touch /data/dismiss-fork does the same); a stopped one at its start
         touch dismiss-fork
-        log "dismiss-fork left in $DATA: the node dismisses the held fork within a round, or at its next start"
+        log "dismiss-fork left in $DATA: the node dismisses the held fork within a few seconds, or at its next start"
         exit 0 ;;
     *) log "unknown command '$1': the commands are decrypt-key, resolve-fork, set-bc-top <sequence> and dismiss-fork (docker compose run --rm node <command>)"; exit 2 ;;
 esac
@@ -100,7 +100,8 @@ fi
 rm -rf .restore-tmp .digest-before
 if [ -e .restore-incomplete ]; then
     log "an interrupted snapshot restore of an earlier release left part of a snapshot: removing it"
-    rm -rf db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified
+    rm -rf db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified \
+        reorg-episode.json fork-held.json resolve-approved.json
     rm -f .restore-incomplete
 fi
 
@@ -175,7 +176,7 @@ if [ "$RESET" = 1 ] && { has_data || [ -e caches ] || [ -e qs ]; }; then
     old=old-$(date -u +%Y%m%d-%H%M%S)
     mkdir "$old"
     for p in db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified snapshot.mismatch snapshot.sources.json \
-             snapshot-tmp snapshot-download snapshot .storage; do
+             snapshot-tmp snapshot-download snapshot .storage reorg-episode.json fork-held.json resolve-approved.json; do
         [ ! -e "$p" ] || mv "$p" "$old/"
     done
     log "CREDITS_RESET=1: the previous state is in $DATA/$old; remove CREDITS_RESET from .env"

@@ -101,8 +101,19 @@ docker compose stop && docker compose run --rm node resolve-fork && docker compo
 docker compose stop && docker compose run --rm node set-bc-top <sequence> && docker compose up -d
 ```
 
-`resolve-fork` removes nothing when there is no record or the block at the recorded fork point is no
-longer the recorded one. See "If your node reports FORK HELD" in `docs/quick-start.md`.
+`resolve-fork` removes nothing when there is no record, the fork was dismissed, or the block at the
+recorded fork point is no longer the recorded one. With a key encrypted by the node, `resolve-fork`
+and `set-bc-top` start the node, which asks the key's password in the terminal (`docker compose run`
+is interactive). See "If your node reports FORK HELD" in `docs/quick-start.md`.
+
+The files `reorg-episode.json`, `fork-held.json` and `resolve-approved.json` in `~/.credits` describe
+the database in `db/`: `CREDITS_RESET=1` and a snapshot restore remove them; if you delete `db/` by
+hand, delete them too.
+
+While a fork is held the container is reported unhealthy. Plain Docker Compose with `restart:
+unless-stopped` (this file) does not restart it for that, which is what you want: a restart changes
+nothing. Docker Swarm, Kubernetes liveness probes or an autoheal container would restart it in a
+loop: there, do not act on this healthcheck, or watch `fork-held.json` instead.
 
 ## Changing the storage
 
