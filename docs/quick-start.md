@@ -421,7 +421,49 @@ On Windows, type the password in a console window (`node.exe` reads it from the 
 a pipe). The plain key and the `.encrypted-...` copy keep the folder's permissions (Windows has no
 mode 600): keep the `csnode` folder readable by your user only.
 
-## 11. Troubleshooting
+## 11. If your node reports FORK HELD
+
+```
+=========== R-12'345'678.0 NORMAL | FORK HELD ===========
+ Last written sequence = 12'345'577, neighbour nodes = 14
+ FORK HELD since 2026-11-19 10:04:05 UTC: a competing block is not vouched for by this node's confidants. Fork point: block #12345576 or lower; our head #12345577, refused block #12345578 from 7Q4e... (203.0.113.7:9510), peer height #12349000. The node keeps its chain. What to do: ...
+```
+
+**What it means.** Another chain asked this node to roll back its own confirmed blocks, and the node
+refused: either the rollback would go deeper than `max_auto_rollback` blocks (100 by default), or
+the other chain's blocks are not confirmed by the confidants this node trusts. The node keeps its
+chain and waits for you. Nothing is lost and nothing was changed. The state shows on every round
+line (`| FORK HELD`), as a detail line once a minute, in `fork-held.json` next to the `db` folder
+(the `csnode` folder; `~/.credits` in Docker), and as an unhealthy container in `docker ps`. It
+clears by itself if the node's chain grows past the point where the rollback started.
+
+A restart changes nothing: the node remembers the fork and the rollback limit across restarts.
+
+**1. Check before acting.** Compare the node's head (`Last written sequence`) and the block at the
+fork point with other nodes: the [monitor](https://monitor.credits.com), the
+[technical Telegram](https://t.me/creditstechnical), or a node you trust
+(`credits-wallet status` on it). The question is which chain the network is on.
+
+**2. Then choose one.**
+
+| | Your chain is the right one | The other chain is the right one |
+|---|---|---|
+| What it does | The node keeps its chain. That branch stays refused but is no longer reported; a different branch would be reported again. The node keeps running. | The node removes its blocks above the recorded fork point (only if the block there is still the one it recorded), exits, and at the next start follows the other chain. |
+| Native (node running) | in the `csnode` folder: `touch dismiss-fork` (Windows: `type nul > dismiss-fork`); the node picks it up within a round and deletes it | stop the node (`Ctrl+C` once, or `sudo systemctl stop credits-node`), then `./node --config-file config.ini --resolve-fork` (Windows: `node.exe ...`), then start it as usual |
+| Docker | `docker compose exec node touch /data/dismiss-fork` | `docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d` |
+
+`--resolve-fork` refuses, and removes nothing, when there is no fork record or when the block at
+the recorded fork point is no longer the recorded one. To cut the chain at a block of your choice
+instead, use `--set-bc-top <sequence>` (the last block to keep) with the node stopped; Docker:
+`docker compose run --rm node set-bc-top <sequence>`. If the other chain forked deeper than the
+block you chose, the node reports FORK HELD again with a lower fork point.
+
+**Last resort.** `allow_deep_rollback=true` in `[params]` of `config.ini` (or the
+`CS_ALLOW_DEEP_ROLLBACK` environment variable) lets the node follow any competing chain without the
+limit or the confidants check. It turns itself off after one completed rollback and logs that you
+must remove it; remove it then.
+
+## 12. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -431,6 +473,7 @@ mode 600): keep the `csnode` folder readable by your user only.
 | `the block database is X, config.ini asks for Y` (exit code 3) | `config.ini` names another database than the one in `db/`. Set `db_backend` back to X, or convert on purpose with `./node --convert-db` (Docker: `CREDITS_CONVERT_DB=yes`). See [storage.md](storage.md#conversion). |
 | Snapshot download stopped | Run it again: `./node --download-snapshot` (node stopped) resumes, or run the set-up again. |
 | The node stops with exit code 4, `snapshot.mismatch` exists | The restored state did not match the snapshot. Start over with an empty `db/`, `caches/` and `qs/` (Docker: `CREDITS_RESET=1` once). |
+| `FORK HELD` on the round lines; the container is unhealthy | See [If your node reports FORK HELD](#11-if-your-node-reports-fork-held). |
 | Disk full | A full node needs 250 to 300 GB with RocksDB. Free space or move to a bigger disk, or turn the backfill off (`backfill=off` in `[storage]`, `CREDITS_BACKFILL=off` in Docker before the first start). |
 | Linux: `GLIBC_2.38 not found` | Use the `linux-x64-glibc2.31` package. |
 | macOS: "cannot be opened" | `xattr -dr com.apple.quarantine csnode` |
