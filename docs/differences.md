@@ -423,9 +423,16 @@ consensus rules.
   other block meets the usual checks, and an unauthenticated offer changes nothing. The approval
   ends once the node goes on past that height, or a competing block that passes the usual checks
   is offered there. When the fork point is
-  only an upper bound and the other chain diverges lower, the node reports FORK HELD again with a
-  lower fork point; `--set-bc-top <sequence>` then cuts by hand at the last common block found with
-  the monitor or other nodes. Both are one-shot
+  only an upper bound, the node looks for the last common block itself while FORK HELD: it asks the
+  peer of the refused block for some of its blocks at or below the bound (the usual block request,
+  a few heights per request, one request every few seconds at most), compares their hashes with its
+  own, and records the exact fork point in `fork-held.json` (`"fork_point_status": "exact"`), so
+  that `--resolve-fork` cuts there in one run. The search is read-only (nothing stored, unwound or
+  approved; the peer's blocks serve only to locate the point and must hold together), bounded to 20
+  times `max_auto_rollback` blocks (1,000 to 10,000; 2,000 when it is 0), beyond which the record says
+  the fork is deeper and `--resolve-fork` removes nothing. `--set-bc-top <sequence>` still cuts by
+  hand at a block of the operator's choice. After either cut the quick-start checkpoints above the
+  new top are removed, so the first start after it does not stop on one. Both are one-shot
   and exit; neither advice is ever "restart", since a restart alone changes nothing. See "If your
   node reports FORK HELD" in `docs/quick-start.md`.
 
