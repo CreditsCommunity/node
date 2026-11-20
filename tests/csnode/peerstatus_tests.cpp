@@ -300,16 +300,21 @@ TEST(PeerStatus, StatusFileIsWrittenAtomically) {
     std::filesystem::create_directories(dir);
     ASSERT_TRUE(cs::forkguard::writeFileAtomic(dir.string(), kStatusFile, t.statusJson(1795000000)));
     EXPECT_FALSE(std::filesystem::exists(dir / (std::string(kStatusFile) + ".tmp")));
-    std::ifstream in(dir / kStatusFile);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    const auto text = ss.str();
+    std::string text;
+    {
+        // closed before the folder is removed (Windows keeps an open file)
+        std::ifstream in(dir / kStatusFile);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        text = ss.str();
+    }
     EXPECT_NE(text.find("\"official_gone\": \"true\""), std::string::npos);
     EXPECT_NE(text.find("\"summary\": \"PEERS: 2 neighbours (0 official, 2 community)"), std::string::npos);
     EXPECT_NE(text.find("\"seats_official_pct\": \"50\""), std::string::npos);
     EXPECT_NE(text.find("\"last_alert\": \"OFFICIAL NODES GONE"), std::string::npos);
     EXPECT_FALSE(cs::forkguard::writeFileAtomic("", kStatusFile, "x"));
-    std::filesystem::remove_all(dir);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 TEST(PeerStatus, ForkHeldSummaryNamesTheOtherSide) {
