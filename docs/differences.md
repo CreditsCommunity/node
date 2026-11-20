@@ -424,13 +424,17 @@ consensus rules.
   ends once the node goes on past that height, or a competing block that passes the usual checks
   is offered there. When the fork point is
   only an upper bound, the node looks for the last common block itself while FORK HELD: it asks the
-  peer of the refused block for some of its blocks at or below the bound (the usual block request,
-  a few heights per request, one request every few seconds at most), compares their hashes with its
-  own, and records the exact fork point in `fork-held.json` (`"fork_point_status": "exact"`), so
-  that `--resolve-fork` cuts there in one run. The search is read-only (nothing stored, unwound or
-  approved; the peer's blocks serve only to locate the point and must hold together), bounded to 20
-  times `max_auto_rollback` blocks (1,000 to 10,000; 2,000 when it is 0), beyond which the record says
-  the fork is deeper and `--resolve-fork` removes nothing. `--set-bc-top <sequence>` still cuts by
+  peer of the refused block for some of its blocks at or below the bound (the usual block request, a
+  few heights per request, one request every few seconds at most) and compares their hashes with its
+  own. The search is read-only (nothing stored, unwound or approved) and bounded to 20 times
+  `max_auto_rollback` blocks (1,000 to 10,000; 2,000 when it is 0). The point it finds becomes the
+  fork point (`"fork_point_status": "exact"` in `fork-held.json`, and `--resolve-fork` cuts there
+  in one run) only if the peer's next block verifies as a synced block would after the node's own
+  block there: signatures, and round confirmations by a majority of that block's confidants.
+  Otherwise (a bootstrap block, or a peer that answers wrongly) the point is only a hint
+  (`"located (unverified)"`, or `"deeper"` beyond the bound). `--resolve-fork` then still cuts at the
+  upper bound, and cuts at the hint only with `--to-located`; it prints the bound, the located point,
+  its status and the number of blocks it removes before cutting. `--set-bc-top <sequence>` still cuts by
   hand at a block of the operator's choice. After either cut the quick-start checkpoints above the
   new top are removed, so the first start after it does not stop on one. Both are one-shot
   and exit; neither advice is ever "restart", since a restart alone changes nothing. See "If your

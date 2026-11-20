@@ -269,6 +269,13 @@ public:
     // Strict for the unwind decision: a confirmation mask of more than one entry, of the same size as our
     // last block's confidants, with as many signatures as it marks, and a majority of them confirming.
     bool hasTrustedConfirmations(const csdb::Pool& competing) const;
+    // the same checks against the given confidants
+    bool confirmedByConfidants(const csdb::Pool& competing, const std::vector<cs::PublicKey>& trustedConfidants) const;
+    // The fork point search (ForkLocator): `block` (a peer's, not stored) is built on our stored block
+    // at its sequence - 1, its signatures verify against its own confidants, and its round
+    // confirmations, by a majority, against the confidants of that block of ours, as hasTrustedConfirmations
+    // checks them. A bootstrap block never passes (it carries no confirmations). Read-only.
+    bool verifiesAfterOurBlock(const csdb::Pool& block) const;
 
     // True if a bootstrap-flagged competing block is authenticated locally: its own signatures verify
     // against its confidants AND those confidants are exactly the confidants of a round table this node
@@ -335,12 +342,14 @@ public:
     }
     // The search for the last common block (cs::forkguard::ForkLocator, driven by the node while FORK
     // HELD) has an answer for the held record `expected` (the record it searched for; nothing is
-    // changed if the record changed since). `located` is the exact fork point (`hash` is our stored
-    // hash there, checked again here), or, with `deeper`, the lowest block searched, where the chains
-    // already differ. Only the record (fork-held.json) changes: nothing is unwound, nothing approved.
+    // changed if the record changed since). `located` is the last common block the peer's answers
+    // give (`hash` is our stored hash there, checked again here): the fork point only when `verified`
+    // (the peer's next block verified against our confidants there), otherwise a hint; or, with
+    // `deeper`, the lowest block searched, where the peer's block already differs (a hint). Only the
+    // record (fork-held.json) changes: nothing is unwound, nothing approved.
     // True if the record was updated.
     bool applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located, const std::string& hash,
-                               bool deeper, const std::string& peerKey);
+                               bool deeper, const std::string& peerKey, bool verified = false);
     // init() refused to truncate: the stored block at the requested sequence has another hash
     bool truncationRefused() const {
         return truncationRefused_;

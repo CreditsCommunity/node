@@ -471,15 +471,28 @@ instead, use `--set-bc-top <sequence>` (the last block to keep) with the node st
 point (`Fork point: block #N or lower`), for example after a long partition. While FORK HELD it
 then asks the peer of the refused block for a few of its blocks below that bound, compares their
 hashes with its own and narrows down to the last block both chains share. This only reads: nothing
-is stored, removed or approved, and a peer that answers wrongly can only make the search fail. After
-a minute or two the detail line says `Fork point: block #M (...), the last common block, located
-from #N`, and `fork-held.json` has `"fork_point_status": "exact"`: `--resolve-fork` then cuts there in
-one run. The search covers 20 times `max_auto_rollback` blocks (2,000 by default, between 1,000 and
-10,000). If the chains differ already at its lowest block, the line says `Fork point: below block
-#L` (`"fork_point_status": "deeper"`) and `--resolve-fork` removes nothing: find the last common
-block with the monitor or other nodes and cut there with `--set-bc-top`. Run `--resolve-fork` after
-the line shows the exact point; run before, it cuts at the upper bound, and if the other chain forks
-lower the node reports FORK HELD again with a lower fork point.
+is stored, removed or approved. The search covers 20 times `max_auto_rollback` blocks (2,000 by
+default, between 1,000 and 10,000). A peer could answer wrongly, so the node takes the point it
+finds as the fork point only when it can verify the peer's next block as it would verify a synced
+block: built on this node's block at that point, signed by its confidants and confirmed by a
+majority of the confidants of this node's block there. After a minute or two, one of these:
+
+- **Verified.** The detail line says `Fork point: block #M (...), the last common block, verified`
+  and `fork-held.json` has `"fork_point_status": "exact"`. `--resolve-fork` cuts there in one run.
+- **Not verified** (for example, the peer's next block is a bootstrap block, which carries no
+  confirmations to check). The line says `a peer's blocks place the last common block at #M, NOT
+  verified` (`"fork_point_status": "located (unverified)"`). `--resolve-fork` still cuts at the
+  upper bound N. Once you have checked block M with other nodes or the monitor, cut there with
+  `--resolve-fork --to-located` (Docker: `docker compose run --rm node resolve-fork to-located`), or
+  with `--set-bc-top M`.
+- **Deeper.** The peer's block already differs at the lowest block searched (`"fork_point_status":
+  "deeper"`). `--resolve-fork` cuts at the upper bound. Find the last common block with the monitor or
+  other nodes and cut there with `--set-bc-top`.
+
+Before it removes anything, `--resolve-fork` prints the node's head, the upper bound, the located
+block and whether it is verified, where it cuts and how many blocks that removes. Run it after the
+detail line shows the search result. Run before, it cuts at the upper bound; if the other chain
+forks lower, the node reports FORK HELD again with a lower fork point.
 
 After a cut (`--resolve-fork` or `--set-bc-top`) the node also removes the quick-start checkpoints
 above the new last block, so the next start uses an older checkpoint or reads the chain from the

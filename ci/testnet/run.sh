@@ -1391,12 +1391,12 @@ partition_resolve_fork() {
     fi
     # 0. while FORK HELD the node looks for the last common block itself: wait until every node holding
     #    the fork knows it ("fork_point_status": "exact" in fork-held.json; "deeper" is an answer too)
-    local pending status
+    local pending status to_located="" extra
     t0=$(date +%s)
     while :; do
         pending=""
         for i in $held; do
-            grep -aqE '"fork_point_status": "(exact|deeper)"' "$WORK/n$i/fork-held.json" 2>/dev/null || pending="$pending $i"
+            grep -aqE '"fork_point_status": "(exact|deeper|located \(unverified\))"' "$WORK/n$i/fork-held.json" 2>/dev/null || pending="$pending $i"
         done
         [ -n "$pending" ] || break
         [ $(( $(date +%s) - t0 )) -lt $(( RESOLVE_LOCATE_WAIT * 60 )) ] || break
@@ -1404,18 +1404,23 @@ partition_resolve_fork() {
     done
     echo "RESOLVE FORK: fork point located on$(printf ' n%s' $held) but$([ -n "$pending" ] && printf ' n%s' $pending || echo ' none') after $(( $(date +%s) - t0 )) s"
     for i in $held; do
-        status=$(sed -nE 's/.*"fork_point_status": "([a-z ]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null)
+        status=$(sed -nE 's/.*"fork_point_status": "([a-z ()]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null)
         echo "RESOLVE FORK: n$i fork point #$(sed -nE 's/.*"fork_point": "([0-9]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null) ($status), upper bound #$(sed -nE 's/.*"fork_point_upper_bound": "([0-9]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null)"
         { grep -aE 'fork point search|last common block' "$WORK/n$i/node.log" || true; } | tail -3 | sed "s/^/partition: n$i: /" | cut -c1-260
-        [ "$status" = exact ] || part_fail="${part_fail:+$part_fail; }n$i: the fork point is not exact ($status) before --resolve-fork"
+        case "$status" in
+            exact) ;;
+            "located (unverified)") to_located="$to_located $i"; echo "RESOLVE FORK: n$i: located but not verified: the operator confirms it with --to-located" ;;
+            *) part_fail="${part_fail:+$part_fail; }n$i: the fork point was not located ($status) before --resolve-fork" ;;
+        esac
     done
     # 1. --resolve-fork on every node holding the fork
     partition_stop_nodes $held
     for i in $held; do
         lines=$(wc -l < "$WORK/n$i/node.log")
         rc=0
-        (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --resolve-fork </dev/null >> resolve-fork.log 2>&1) || rc=$?
-        echo "RESOLVE FORK: n$i --resolve-fork exit $rc"
+        extra=""; case " $to_located " in *" $i "*) extra=--to-located ;; esac
+        (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --resolve-fork $extra </dev/null >> resolve-fork.log 2>&1) || rc=$?
+        echo "RESOLVE FORK: n$i --resolve-fork $extra exit $rc"
         tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | { grep -a -- '--resolve-fork' || true; } | sed -E "s/^.*(--resolve-fork)/partition: n$i: \\1/" | cut -c1-260
         if [ "$rc" -ne 0 ]; then part_fail="${part_fail:+$part_fail; }--resolve-fork failed on n$i (exit $rc)"; continue; fi
         tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | grep -aq 'the fork point is an upper bound' && upper="$upper $i"
