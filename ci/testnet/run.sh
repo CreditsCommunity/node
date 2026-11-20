@@ -225,7 +225,12 @@
 #        transactions the other side lost; every node must then end on one chain. The nodes only
 #        reconnect if they look each other up again: 120 s after the cut is lifted the run reports
 #        how many neighbours each node has. OFFICIAL_PARTITION_RESTART=1: then the community nodes are
-#        restarted (they dial every node of hosts.txt again), as an operator would
+#        restarted (they dial every node of hosts.txt again), as an operator would.
+#        RESOLVE_FORK_AFTER=1: then, as an operator choosing the official chain, wait up to
+#        RESOLVE_FORK_WAIT minutes (default 5) for FORK HELD on the community nodes (the bounded-rollback
+#        guard refuses the longer chain their confidants do not vouch for), stop every community node
+#        holding a fork, run it once with --resolve-fork (cut at the recorded fork point) and start it
+#        again: every node must then end on the official chain
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -343,6 +348,8 @@ COMMUNITY_STARTER=0       # the node given COMMUNITY_STALL_STARTER, set with the
 OFFICIAL_PARTITION_AT=${OFFICIAL_PARTITION_AT:-0}
 OFFICIAL_PARTITION_MINUTES=${OFFICIAL_PARTITION_MINUTES:-6}
 OFFICIAL_PARTITION_RESTART=${OFFICIAL_PARTITION_RESTART:-0}
+RESOLVE_FORK_AFTER=${RESOLVE_FORK_AFTER:-0}
+RESOLVE_FORK_WAIT=${RESOLVE_FORK_WAIT:-5}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -594,6 +601,7 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
         || { echo "FAIL: OFFICIAL_PARTITION_AT runs without OFFICIAL_STOP_AT, CRASH_ALL_AT, DPOS_AT, NET_FAULT and a joining node"; exit 1; }
     [ $(( (NODES + 1) / 2 )) -ge 5 ] || { echo "FAIL: OFFICIAL_PARTITION_AT needs at least 5 community (odd) nodes, NODES >= 9"; exit 1; }
 fi
+[ "$RESOLVE_FORK_AFTER" = 0 ] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || { echo "FAIL: RESOLVE_FORK_AFTER needs OFFICIAL_PARTITION_AT"; exit 1; }
 [ "$COMMUNITY_STALL_STARTER" -eq 0 ] || [ "$COMMUNITY_BOOTSTRAP" = config ] \
     || { echo "FAIL: COMMUNITY_STALL_STARTER needs COMMUNITY_BOOTSTRAP=config"; exit 1; }
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
@@ -1283,23 +1291,63 @@ official_partition() {
     done
     if [ "$OFFICIAL_PARTITION_RESTART" = 1 ]; then
         echo "partition: restarting $(printf 'n%s ' $COMMUNITY_NODES)(community head $(community_max), official head $(official_max))"
-        for i in $COMMUNITY_NODES; do kill -TERM "${PIDS[$i]}"; REPORTED_DOWN[$i]=1; done
-        # a trusted node waits for its round before it exits, and with most of the round's
-        # confidants stopping that round never ends: SIGKILL after 60 s
-        local t_stop
-        t_stop=$(date +%s)
-        for i in $COMMUNITY_NODES; do
-            while kill -0 "${PIDS[$i]}" 2>/dev/null && [ $(( $(date +%s) - t_stop )) -lt 60 ]; do sleep 1; done
-            if kill -0 "${PIDS[$i]}" 2>/dev/null; then
-                echo "partition: n$i still running 60 s after SIGTERM, SIGKILL"
-                kill -KILL "${PIDS[$i]}" 2>/dev/null || true
-            fi
-            wait "${PIDS[$i]}" 2>/dev/null || true
-            pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
-        done
+        partition_stop_nodes $COMMUNITY_NODES
         for i in $COMMUNITY_NODES; do start_node "$i"; REPORTED_DOWN[$i]=""; done
         echo "partition: community nodes started again"
     fi
+    [ "$RESOLVE_FORK_AFTER" != 1 ] || partition_resolve_fork
+}
+
+# stop nodes as an operator would: SIGTERM, then SIGKILL after 60 s (a trusted node waits for its
+# round before it exits, and with most of the round's confidants stopping that round never ends)
+partition_stop_nodes() {
+    local i t_stop
+    for i in "$@"; do kill -TERM "${PIDS[$i]}" 2>/dev/null || true; REPORTED_DOWN[$i]=1; done
+    t_stop=$(date +%s)
+    for i in "$@"; do
+        while kill -0 "${PIDS[$i]}" 2>/dev/null && [ $(( $(date +%s) - t_stop )) -lt 60 ]; do sleep 1; done
+        if kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            echo "partition: n$i still running 60 s after SIGTERM, SIGKILL"
+            kill -KILL "${PIDS[$i]}" 2>/dev/null || true
+        fi
+        wait "${PIDS[$i]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
+    done
+}
+
+# RESOLVE_FORK_AFTER: the operator of each community node holding a fork follows the official chain
+part_resolved=""          # community nodes cut back by --resolve-fork
+partition_resolve_fork() {
+    local t0 held i n_comm rc
+    n_comm=$(echo $COMMUNITY_NODES | wc -w)
+    t0=$(date +%s)
+    while :; do
+        held=""
+        for i in $COMMUNITY_NODES; do
+            [ -f "$WORK/n$i/fork-held.json" ] && grep -aq 'FORK HELD since' "$WORK/n$i/node.log" && held="$held $i"
+        done
+        [ "$(echo $held | wc -w)" -lt "$n_comm" ] || break
+        [ $(( $(date +%s) - t0 )) -lt $(( RESOLVE_FORK_WAIT * 60 )) ] || break
+        sleep 10
+    done
+    echo "RESOLVE FORK: FORK HELD on $(echo $held | wc -w) of $n_comm community nodes$(printf ' n%s' $held) after $(( $(date +%s) - t0 )) s (community head $(community_max), official head $(official_max))"
+    for i in $COMMUNITY_NODES; do
+        { grep -a 'FORK HELD since' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \1/"
+    done
+    if [ -z "$held" ]; then
+        part_fail="${part_fail:+$part_fail; }no community node reported FORK HELD within $RESOLVE_FORK_WAIT min, nothing to resolve"
+        return 0
+    fi
+    partition_stop_nodes $held
+    for i in $held; do
+        rc=0
+        (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --resolve-fork </dev/null >> resolve-fork.log 2>&1) || rc=$?
+        echo "RESOLVE FORK: n$i --resolve-fork exit $rc, head now $(seq_of "$i")"
+        { grep -a -- '--resolve-fork' "$WORK/n$i/node.log" "$WORK/n$i/resolve-fork.log" 2>/dev/null || true; } | tail -3 | sed "s/^/partition: n$i: /"
+        if [ "$rc" -eq 0 ]; then part_resolved="$part_resolved $i"; else part_fail="${part_fail:+$part_fail; }--resolve-fork failed on n$i (exit $rc)"; fi
+    done
+    for i in $held; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+    echo "RESOLVE FORK: $(printf 'n%s ' $held)started again after --resolve-fork"
 }
 
 while :; do
@@ -2596,7 +2644,20 @@ if [ "$OFFICIAL_STOP_AT" -gt 0 ]; then
     if [ -n "$off_fail" ]; then echo "FAIL: official stop: $off_fail"; exit 1; fi
 fi
 
+# chain reorganisations, see below; a partition scenario reports them before its own verdict
+reorg_reported=0
+reorg_report() {
+    reorg_reported=1
+    reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
+    echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
+    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
+    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
+    held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+    [ -z "$held" ] || echo "FORK HELD on: $held"
+}
+
 if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    reorg_report
     [ "$part_done" -eq 2 ] || part_fail="${part_fail:+$part_fail; }the partition never ended"
     if [ "$part_done" -eq 2 ]; then
         ports=""
@@ -2639,12 +2700,7 @@ fi
 # finished rollback episode). In a normal run the guard must never stop a reorg and no competing block
 # may be refused (a refusal leaves a lagging node waiting for the operator, FORK HELD).
 # DEEP_ROLLBACK_EXPECTED=1 is for a scenario that provokes either on purpose.
-reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
-echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
-echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
-held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
-[ -z "$held" ] || echo "FORK HELD on: $held"
+[ "$reorg_reported" = 1 ] || reorg_report
 guarded=$(grep -al 'LONGEST-CHAIN GUARD: a competing chain' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
 if [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
     if [ -n "$guarded" ]; then
