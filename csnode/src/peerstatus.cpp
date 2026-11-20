@@ -181,7 +181,7 @@ std::string Tracker::peersLineLocked(const NeighbourCounts& n) const {
     os << "); ";
     const auto c = seatsLocked(0);
     if (c.rounds == 0 || c.seats == 0) {
-        os << "no stored blocks yet";
+        os << "no block stored since the start yet";
         return os.str();
     }
     os << "last " << c.rounds << " rounds: trusted seats " << percent(c.official, c.seats) << "% official, "

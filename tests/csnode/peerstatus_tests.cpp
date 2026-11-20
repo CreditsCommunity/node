@@ -133,7 +133,7 @@ TEST(PeerStatus, NeighbourCounts) {
 TEST(PeerStatus, PeersLine) {
     Tracker t;
     setup(t);
-    EXPECT_EQ(t.peersLine(neighbours(11, 5)), "PEERS: 16 neighbours (11 official, 5 community); no stored blocks yet");
+    EXPECT_EQ(t.peersLine(neighbours(11, 5)), "PEERS: 16 neighbours (11 official, 5 community); no block stored since the start yet");
     // 4 rounds, 4 seats each: 3 official + 1 community, this node in 2 of them
     for (cs::Sequence q = 1; q <= 4; ++q) {
         if (q % 2 == 0) {
