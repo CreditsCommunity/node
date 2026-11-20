@@ -341,6 +341,87 @@ consensus rules.
 
 ## Consensus fixes
 
+- **Bounded automatic rollback.** When a node is behind and syncs a competing chain that forks below
+  its current head, it rolls back its own blocks down to the fork point before taking the other
+  chain. The official node puts no limit on that depth. The community node stops the automatic
+  rollback once it would unwind more than `max_auto_rollback` of its own confirmed blocks (default
+  100) below the head it had when the rollback started: it leaves its chain intact, logs a prominent
+  alert and waits for the operator. The bound covers every automatic removal path — the sync fork
+  path, the uncertain-block replacement, the antifork cache and the bad-hash reply — because the
+  depth check lives inside the two functions they all go through. The depth is measured against a
+  fixed reference, so forward progress cannot reset it and a node cannot be made to creep past the
+  limit by alternating removals and appends; the reference is kept in `reorg-episode.json` next to
+  the database, so a restart does not reset it either. A reorg this deep is a rare event — a
+  deliberate switch to another network, or a rejected one — and the choice is left to a human
+  instead of happening silently. The node keeps running and does not crash-loop. The start-up
+  integrity repair (blocks of the node's own database that fail the hash check, removed when the
+  operator chooses to resolve them) is a local repair, not a reorg, and is not bounded.
+
+  Before any of this, the competing block itself must be vouched for by authority the node already
+  recognises, or the node does not unwind at all, not even by one block. A competing block that is
+  **not a bootstrap block** needs round confirmations from a majority of the confidants of the node's
+  own last block, checked as the block verifier checks a block from the network, but more strictly
+  (no one-entry confirmation masks). An honest micro-fork passes, because the honest competing block
+  at the same height was produced by the same elected trusted group. A **bootstrap block** carries no
+  such confirmations (the verifier accepts it without them, so this check refuses it), and its
+  bootstrap flag alone proves nothing, so it passes only when it is authenticated locally: its own
+  signatures verify and its confidants are exactly those of a round table this node itself accepted
+  in the last few rounds. Otherwise the node keeps its chain and the operator decides. Everything
+  that passes is still subject to the depth bound.
+
+  **FORK HELD.** Whenever the node refuses to unwind (beyond the bound, or a competing block not
+  vouched for), it records the fork in `fork-held.json` next to the database — the fork point (the
+  highest of its blocks the other chain can share, with its hash, exact when the competing block
+  names it as its previous block), its head, the refused block, the peer and its announced height,
+  the time and the episode's reference — and reports **FORK HELD** until the episode ends or the
+  operator decides: `| FORK HELD` on every round line (`R-<n> NORMAL | FORK HELD`), a detail line
+  with the two remedies once a minute, and an unhealthy Docker healthcheck. The state clears by
+  itself when the head climbs back above the reference. A competing block not vouched for is
+  refused at once, but reported as FORK HELD only when the head stays at the same block after it
+  (two round starts, or a minute), so a peer on a minority branch cannot make it flap. An unreadable
+  guard file is reported and fails safe (a new rollback episode at the head; FORK HELD kept), the
+  files are written with a flush to the disk, and they are removed when the database is replaced (a
+  new empty database, a snapshot restore). The operator, after checking with other
+  nodes or the monitor, either keeps this chain — a `dismiss-fork` file next to the database, which
+  the running node picks up within a few seconds: the record keeps that branch (its first known block and
+  the hashes seen since) as dismissed, the node still refuses it but no longer reports it, and a
+  different branch is reported again — or follows the other one: `--resolve-fork` (no argument)
+  cuts the chain at the recorded fork point, only if the block there is still the recorded one; the
+  node then syncs forward from there. It relaxes nothing else: when the fork point is exact, only
+  the recorded competing block right after it — that very hash — may replace a block the node
+  stored again right after the fork point; nothing is ever unwound to or below the fork point, every
+  other block meets the usual checks, and an unauthenticated offer changes nothing. The approval
+  ends once the node goes on past that height, or a competing block that passes the usual checks
+  is offered there. When the fork point is
+  only an upper bound and the other chain diverges lower, the node reports FORK HELD again with a
+  lower fork point; `--set-bc-top <sequence>` then cuts by hand at the last common block found with
+  the monitor or other nodes. Both are one-shot
+  and exit; neither advice is ever "restart", since a restart alone changes nothing. See "If your
+  node reports FORK HELD" in `docs/quick-start.md`.
+
+  This is a local safety bound only: it changes how far this node unwinds on its own, never what a
+  block contains or what the node accepts in normal operation, so it is invisible to other nodes and a
+  mixed official/community network behaves exactly as before. Two settings tune it, both in `[params]`:
+  `max_auto_rollback=` sets the bound (default 100; 0 removes the depth bound, the authority check
+  stays), and `allow_deep_rollback=true` accepts a deliberate switch: it lifts both the depth bound
+  and the check above, since the other chain's blocks are confirmed by confidants this node does not
+  hold. The `CS_ALLOW_DEEP_ROLLBACK` environment variable does the same. It is the last resort, after
+  `--resolve-fork` and `--set-bc-top`: once one rollback episode has completed with it, the node
+  turns it off for the rest of the run and says so loudly; remove it from the configuration then.
+
+  **After a partition, and a lagging node.** When both sides of a split keep producing blocks, each
+  side's blocks are confirmed by its own confidants. On reconnection a node on the shorter side does
+  not follow the longer chain on its own, whatever the depth, because that chain's blocks are not
+  confirmed by any confidants it holds: it keeps its chain, reports FORK HELD and the operator
+  decides. The official node unwinds to the longer chain without asking. A single node or a minority
+  that cannot reach consensus while cut off builds no branch and simply syncs forward when it
+  reconnects. The same holds for a node that lags behind with a divergent last block it never
+  replaced (for example, it missed a bootstrap round): when the network's next block is not
+  confirmed by the confidants of that block, the node waits for the operator instead of unwinding
+  it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. The opt-in
+  community bootstrap fallback (PR #188, not merged yet) expects the longer chain to win after a
+  partition; with this change that switch is an operator decision too.
+
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
   with a request that takes exactly as long as the others wait for its stage-3. Depending on a few
   milliseconds, some trusted nodes finish the round with every signature while the others retry

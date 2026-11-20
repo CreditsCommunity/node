@@ -84,6 +84,37 @@ password asks again. The password can also be piped:
 1 GB of free memory for a few seconds: `CREDITS_MEMORY` must be at least about `1.2g` (default `4g`).
 A plain key is as exposed as the machine it is on.
 
+## FORK HELD
+
+When the node refuses a competing chain (a rollback deeper than `max_auto_rollback`, 100 blocks by
+default, or blocks not confirmed by the confidants it trusts), it keeps its chain, writes
+`fork-held.json` to the data directory, shows `| FORK HELD` on every round line with a detail line
+once a minute, and the healthcheck reports the container unhealthy with the two choices. Check with
+other nodes or the monitor first, then:
+
+```sh
+# this node's chain is the right one: it keeps refusing that branch and stops reporting it
+docker compose exec node touch /data/dismiss-fork     # stopped container: docker compose run --rm node dismiss-fork
+# the other chain is the right one: cut at the recorded fork point, then follow the other chain
+docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d
+# or cut by hand at a block of your choice (the last one to keep)
+docker compose stop && docker compose run --rm node set-bc-top <sequence> && docker compose up -d
+```
+
+`resolve-fork` removes nothing when there is no record, the fork was dismissed, or the block at the
+recorded fork point is no longer the recorded one. With a key encrypted by the node, `resolve-fork`
+and `set-bc-top` start the node, which asks the key's password in the terminal (`docker compose run`
+is interactive). See "If your node reports FORK HELD" in `docs/quick-start.md`.
+
+The files `reorg-episode.json`, `fork-held.json` and `resolve-approved.json` in `~/.credits` describe
+the database in `db/`: `CREDITS_RESET=1` and a snapshot restore remove them; if you delete `db/` by
+hand, delete them too.
+
+While a fork is held the container is reported unhealthy. Plain Docker Compose with `restart:
+unless-stopped` (this file) does not restart it for that, which is what you want: a restart changes
+nothing. Docker Swarm, Kubernetes liveness probes or an autoheal container would restart it in a
+loop: there, do not act on this healthcheck, or watch `fork-held.json` instead.
+
 ## Changing the storage
 
 | Change | Result |

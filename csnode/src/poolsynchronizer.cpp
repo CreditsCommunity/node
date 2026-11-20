@@ -276,6 +276,11 @@ void PoolSynchronizer::onStoreBlockTimeElapsed() {
 //
 //}
 
+cs::Sequence PoolSynchronizer::announcedSequence(const cs::PublicKey& key) const {
+    const auto it = neighbours_.find(key);
+    return it == neighbours_.end() ? 0 : it->second;
+}
+
 cs::Sequence PoolSynchronizer::getMaxNeighbourSequence() {
     cs::Sequence maxSequence = 0;
     for (auto& it : neighbours_) {

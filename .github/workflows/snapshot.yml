@@ -84,7 +84,8 @@ jobs:
           python3 ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min 90
 
       # the monitor is a third party: when it does not answer (exit 3) the snapshot is published
-      # without this check, and the release notes say so; a mismatch fails
+      # without this check, and the release notes say so; a mismatch fails. check_node.py names its
+      # client in the User-Agent: the monitor refuses urllib's default one
       - name: Check against the monitor
         id: monitor
         if: env.SKIP != '1'

@@ -52,6 +52,15 @@ public:
     /** @brief   The minimum trusted nodes to start consensus */
     const static unsigned int MinTrustedNodes = 4;
 
+    /** @brief   Default maximum number of own blocks the node will automatically roll back when it
+     * adopts a competing chain during sync; overridden by [params] max_auto_rollback in config.ini.
+     * Beyond this depth the automatic rollback is halted and the node waits for the operator: a reorg
+     * this deep is either a deliberate network switch (to be confirmed by a human) or a competing
+     * longer chain (to be rejected). Purely local: it changes only how far this node unwinds on its
+     * own, never the block contents other nodes see. Set high enough not to interfere with ordinary
+     * micro-forks; raise it (or set allow_deep_rollback) to accept a deeper deliberate switch. */
+    constexpr static uint64_t MaxAutoRollbackDepth = 100;
+
     /** @brief   The maximum trusted nodes to take part in consensus */
     const static unsigned int MaxTrustedNodes = 25;
 

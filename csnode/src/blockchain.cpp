@@ -1,6 +1,7 @@
 #include <base58.h>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 
 #include <csnode/blockchain.hpp>
 #include <csnode/blockhashes.hpp>
+#include <csnode/blockverifier.hpp>
 #include <csnode/blocktakeover.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
@@ -240,12 +242,21 @@ bool BlockChain::init(
     // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] db_backend)
     cslog() << kLogPrefix << "block database: " << storageCfg.dbBackend
             << (storageCfg.dbBackend == "lmdb" ? " in " + path + "/lmdb" : std::string{});
+    // --resolve-fork: the storage cuts the chain only if the block at the fork point is the recorded one
+    if (newBlockchainTop != cs::kWrongSequence && resolveForkSeq_ == newBlockchainTop) {
+        storage_.set_truncate_check(resolveForkHash_);
+    }
+    truncationRefused_ = false;
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
                        storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
                        static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
                        static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
                        storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
+        truncationRefused_ = storage_.last_error() == csdb::Storage::TruncateMismatch;
+        if (truncationRefused_) {
+            cserror() << kLogPrefix << storage_.last_error_message();
+        }
         checkpointAheadOfBlocks_ = successfulQuickStart && storage_.last_error() == csdb::Storage::StartAfterLastBlock;
         if (checkpointAheadOfBlocks_) {
             cserror() << kLogPrefix << "the QUICK START checkpoint continues after the last block on disk ("
@@ -262,6 +273,18 @@ bool BlockChain::init(
 
     if (newBlockchainTop != cs::kWrongSequence) {
         if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
+        // the operator truncated: the rollback episode and FORK HELD end here
+        const std::string dir = cs::forkguard::stateDirFor(path);
+        cs::forkguard::clearForkRecord(dir);
+        cs::forkguard::clearEpisode(dir);
+        cs::forkguard::clearApprovedBranch(dir);
+        if (resolveForkSeq_ == newBlockchainTop && !resolveCompetingHash_.empty()) {
+            // --resolve-fork with an exact fork point: the recorded competing block right after it is
+            // the one approved branch. Normally the node simply syncs it forward from the fork point;
+            // the approval only lets that very branch replace a block stored above the fork point
+            // again before it arrives. Nothing else is relaxed.
+            cs::forkguard::saveApprovedBranch(dir, {newBlockchainTop, newBlockchainTop + 1, resolveCompetingHash_});
+        }
         return true;
     }
 
@@ -276,6 +299,8 @@ bool BlockChain::init(
         if (successfulQuickStart) {
             serializationManPtr_->clear();
         }
+        // a new database: the rollback-bound files of a previous one (removed db/) do not apply
+        cs::forkguard::clearAll(cs::forkguard::stateDirFor(path));
         writeGenesisBlock();
     }
     else {
@@ -322,6 +347,10 @@ bool BlockChain::init(
     if (!successfulQuickStart && !stop_ && serializationManPtr_) {
         serializationManPtr_->setCompletedFromGenesis();
     }
+
+    // the longest-chain guard's files next to the database: a rollback episode (and FORK HELD) that
+    // was running when the node stopped goes on with the same reference
+    setGuardStateDir(cs::forkguard::stateDirFor(path));
 
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
@@ -829,6 +858,546 @@ csdb::Transaction BlockChain::loadTransaction(const csdb::TransactionID& transId
     return transaction;
 }
 
+// Longest-chain guard: bound the depth of an automatic rollback while adopting a competing chain.
+// A competing chain that asks us to unwind more than the configured bound of own blocks is either a
+// deliberate network switch (a human must confirm it) or a chain that should not be followed:
+// in both cases the safe local action is to stop unwinding and wait for the operator. The depth is
+// measured against a fixed reference (the head when the episode started), not a counter that forward
+// progress could reset, so alternating removals and appends cannot creep past it; the reference is
+// kept in reorg-episode.json, so a restart does not reset it either. It is called from inside
+// removeLastBlock() and compromiseLastBlock(), so every automatic removal is bounded whatever the
+// caller, and rollbackHighWater_ is captured at the first removal from any path.
+bool BlockChain::guardAutoRollback() {
+    beginRollbackEpisode();
+
+    // after --resolve-fork, never unwind to or below the fork point the operator cut the chain at
+    if (approvedBranch_.has_value() && lastSequence_.load() <= approvedBranch_->forkPoint) {
+        recordForkHeld("depth");
+        return false;
+    }
+
+    // operator override: accept a deliberate deep switch ([params] allow_deep_rollback or the
+    // CS_ALLOW_DEEP_ROLLBACK environment variable), for one completed episode
+    if (deepRollbackApproved()) {
+        deepOverrideUsed_ = true;  // spent when this episode completes
+        return true;
+    }
+    const auto* config = cs::ConfigHolder::instance().config();
+    const uint64_t maxDepth = (config != nullptr) ? config->maxAutoRollbackDepth()
+                                                  : Consensus::MaxAutoRollbackDepth;
+    if (maxDepth == 0) {
+        return true; // max_auto_rollback=0: no depth bound (the authority gate still applies)
+    }
+
+    // refuse the removal that would take the head below the floor (no wraparound when near genesis)
+    const cs::Sequence tip = lastSequence_.load();
+    if (rollbackHighWater_ > maxDepth && tip <= rollbackHighWater_ - maxDepth) {
+        recordForkHeld("depth");
+        return false;
+    }
+    return true;
+}
+
+void BlockChain::beginRollbackEpisode() {
+    if (rollbackEpisode_) {
+        return;
+    }
+    const cs::Sequence tip = lastSequence_.load();
+    rollbackEpisode_ = true;
+    rollbackHighWater_ = tip; // the head we had before this rollback episode began
+    rollbackLowWater_ = tip;
+    deepOverrideUsed_ = false;
+    cs::forkguard::saveEpisode(guardStateDir_, {rollbackHighWater_});
+}
+
+void BlockChain::onHeadAdvanced() {
+    if (pendingHold_.has_value() && lastSequence_.load() != pendingHold_->head) {
+        pendingHold_.reset();  // a refused block that did not stop the chain: no FORK HELD
+    }
+    // the rollback episode ends only once the chain climbs back strictly above the head it had when
+    // the episode began, so the depth cannot creep past the limit by alternating removals and appends
+    // below that head
+    if (!rollbackEpisode_ || lastSequence_.load() <= rollbackHighWater_) {
+        return;
+    }
+    rollbackEpisode_ = false;
+    // one line per finished episode: how deep the node actually unwound (measured in CI)
+    cslog() << kLogPrefix << "rollback episode ended: unwound " << (rollbackHighWater_ - rollbackLowWater_)
+            << " block(s) below #" << WithDelimiters(rollbackHighWater_);
+    if (deepOverrideUsed_ && !deepOverrideSpent_) {
+        deepOverrideSpent_ = true;
+        cserror() << kLogPrefix << "LONGEST-CHAIN GUARD: allow_deep_rollback (or CS_ALLOW_DEEP_ROLLBACK) has served "
+                  << "one completed rollback episode and is now OFF until the node restarts. Remove it from "
+                  << "config.ini (or the environment) now: left on, it would lift the bound again at the next start.";
+    }
+    deepOverrideUsed_ = false;
+    cs::forkguard::clearEpisode(guardStateDir_);
+    std::optional<cs::forkguard::ForkRecord> keep;
+    bool wasHeld = false;
+    {
+        std::lock_guard l(guardMutex_);
+        if (forkRecord_.has_value()) {
+            wasHeld = forkRecord_->held;
+            forkRecord_->held = false;
+            if (forkRecord_->hasDismissal()) {
+                keep = forkRecord_;  // the dismissed branch stays refused and quiet
+            }
+            else {
+                forkRecord_.reset();
+            }
+        }
+    }
+    if (keep.has_value()) {
+        cs::forkguard::saveForkRecord(guardStateDir_, *keep);
+    }
+    else {
+        cs::forkguard::clearForkRecord(guardStateDir_);
+    }
+    if (wasHeld) {
+        cswarning() << kLogPrefix << "FORK HELD cleared: the chain is back above #" << WithDelimiters(rollbackHighWater_);
+    }
+}
+
+cs::forkguard::ForkRecord BlockChain::buildForkRecord(const char* reason) {
+    cs::forkguard::ForkRecord r;
+    {
+        std::lock_guard l(guardMutex_);
+        if (forkRecord_.has_value()) {
+            r = *forkRecord_;  // keeps an earlier dismissal: that branch stays dismissed
+        }
+    }
+    r.held = true;
+    r.reason = reason;
+    r.sinceUnix = static_cast<int64_t>(std::time(nullptr));
+    r.highWater = rollbackEpisode_ ? rollbackHighWater_ : lastSequence_.load();
+    const cs::Sequence tip = lastSequence_.load();
+    r.ourHead = tip;
+    r.ourHeadHash = getHashBySequence(tip).to_string();
+    // the fork point: the highest of our blocks the competing chain can share
+    cs::Sequence candidate = tip;
+    bool candidateExcluded = true;  // without a competing block, our head is the one disputed
+    r.forkPointExact = false;
+    r.competingSeq = 0;
+    r.competingHash.clear();
+    if (competing_.has_value() && competing_->seq > 0) {
+        r.competingSeq = competing_->seq;
+        r.competingHash = competing_->hash.to_string();
+        candidate = std::min<cs::Sequence>(competing_->seq - 1, tip);
+        if (candidate + 1 == competing_->seq) {
+            // the competing block names its previous block: ours at that height is shared or not
+            r.forkPointExact = !competing_->previous.is_empty() && getHashBySequence(candidate) == competing_->previous;
+            candidateExcluded = !r.forkPointExact;
+        }
+        else {
+            candidateExcluded = false;  // nothing known about our block at that height
+        }
+    }
+    r.forkPoint = (candidateExcluded && candidate > 0) ? candidate - 1 : candidate;
+    r.forkPointHash = getHashBySequence(r.forkPoint).to_string();
+    r.peerKey.clear();
+    r.peerAddress.clear();
+    r.peerHeight = 0;
+    if (syncSource_.has_value()) {
+        const auto& key = syncSource_->first;
+        r.peerKey = EncodeBase58(key.data(), key.data() + key.size());
+        r.peerHeight = syncSource_->second;
+        if (peerAddressResolver_) {
+            r.peerAddress = peerAddressResolver_(key);
+        }
+    }
+    return r;
+}
+
+bool BlockChain::recordForkHeld(const char* reason) {
+    const std::string competingHash = competing_.has_value() ? competing_->hash.to_string() : std::string{};
+    const std::string competingPrev = competing_.has_value() ? competing_->previous.to_string() : std::string{};
+    {
+        std::lock_guard l(guardMutex_);
+        if (forkRecord_.has_value() && forkRecord_->hasDismissal() && competing_.has_value() &&
+            forkRecord_->inDismissedBranch(competingHash, competingPrev)) {
+            // a branch the operator dismissed: still refused, never FORK HELD again. The branch is
+            // followed by its hashes only through blocks vouched for by our confidants, so blocks
+            // anyone can forge never grow (or evict from) that list.
+            bool grew = false;
+            if (competing_->vouched) {
+                const size_t before = forkRecord_->branchHashes.size();
+                forkRecord_->addBranchHash(competingHash);
+                grew = forkRecord_->branchHashes.size() != before;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (lastDismissedLog_ == std::chrono::steady_clock::time_point{} || now - lastDismissedLog_ >= std::chrono::hours(1)) {
+                lastDismissedLog_ = now;
+                csinfo() << kLogPrefix << "competing branch at #" << WithDelimiters(forkRecord_->dismissedSeq) << " ("
+                         << forkRecord_->dismissedHash << ") dismissed by the operator on "
+                         << cs::forkguard::utcTime(forkRecord_->dismissedUnix) << "; still refused (block #"
+                         << WithDelimiters(competing_->seq) << ")";
+            }
+            if (grew) {
+                cs::forkguard::saveForkRecord(guardStateDir_, *forkRecord_);
+            }
+            return false;
+        }
+        if (forkRecord_.has_value() && forkRecord_->held) {
+            return true; // one record per episode: the first refusal
+        }
+    }
+    if (std::string(reason) == "authority") {
+        // any sync reply can carry a block not vouched for by our confidants (a peer on a minority
+        // branch): the block is refused at once, but FORK HELD (files, banner, healthcheck) is
+        // reported only if the head stays where it was (promotePendingHold), so that it does not flap
+        if (!pendingHold_.has_value()) {
+            pendingHold_ = PendingHold{buildForkRecord(reason), lastSequence_.load(), std::chrono::steady_clock::now(), 0};
+        }
+        return true;
+    }
+    holdFork(buildForkRecord(reason));
+    return true;
+}
+
+void BlockChain::holdFork(cs::forkguard::ForkRecord r) {
+    pendingHold_.reset();
+    beginRollbackEpisode();  // FORK HELD ends with the episode
+    r.highWater = rollbackHighWater_;
+    {
+        std::lock_guard l(guardMutex_);
+        forkRecord_ = r;
+    }
+    cs::forkguard::saveForkRecord(guardStateDir_, r);
+
+    const auto* config = cs::ConfigHolder::instance().config();
+    const uint64_t maxDepth = (config != nullptr) ? config->maxAutoRollbackDepth() : Consensus::MaxAutoRollbackDepth;
+    if (r.reason == "depth") {
+        cserror() << kLogPrefix << "LONGEST-CHAIN GUARD: a competing chain requires rolling back more than "
+                  << maxDepth << " of our own confirmed blocks (reference head #" << WithDelimiters(rollbackHighWater_)
+                  << ", now #" << WithDelimiters(r.ourHead) << "). Keeping our chain: FORK HELD, operator review required.";
+    }
+    else if (r.reason == "authority") {
+        cserror() << kLogPrefix << "a competing block #" << WithDelimiters(r.competingSeq)
+                  << " is not vouched for by this node's confidants and the head has not moved since. Keeping our chain: "
+                  << "FORK HELD, operator review required.";
+    }
+    else {
+        cserror() << kLogPrefix << "the fork record " << cs::forkguard::kForkFile << " could not be read: keeping our "
+                  << "chain, FORK HELD, operator review required.";
+    }
+    cserror() << kLogPrefix << cs::forkguard::summary(r);
+}
+
+bool BlockChain::promotePendingHold(bool roundStarted) {
+    if (!pendingHold_.has_value()) {
+        return false;
+    }
+    if (lastSequence_.load() != pendingHold_->head) {
+        pendingHold_.reset();  // the head moved: the refused block was no fork this node is stuck on
+        return false;
+    }
+    if (roundStarted) {
+        ++pendingHold_->rounds;
+    }
+    const bool stuck = pendingHold_->rounds >= 2 ||
+                       std::chrono::steady_clock::now() - pendingHold_->since >= std::chrono::minutes(1);
+    if (!stuck) {
+        return false;
+    }
+    holdFork(pendingHold_->record);
+    return true;
+}
+
+bool BlockChain::dismissFork() {
+    cs::forkguard::ForkRecord r;
+    {
+        std::lock_guard l(guardMutex_);
+        if (!forkRecord_.has_value() || !forkRecord_->held) {
+            return false;
+        }
+        forkRecord_->held = false;
+        forkRecord_->dismissedUnix = static_cast<int64_t>(std::time(nullptr));
+        // the first block of that branch after the fork point, as far as this node has seen it
+        forkRecord_->dismissedSeq = forkRecord_->competingSeq;
+        forkRecord_->dismissedHash = forkRecord_->competingHash;
+        forkRecord_->addBranchHash(forkRecord_->competingHash);
+        if (!forkRecord_->hasDismissal()) {
+            // no competing block known (a bad-hash reply): nothing to recognise it by, just clear it
+            forkRecord_.reset();
+            r.held = false;
+        }
+        else {
+            r = *forkRecord_;
+        }
+    }
+    if (r.hasDismissal()) {
+        cs::forkguard::saveForkRecord(guardStateDir_, r);
+        cswarning() << kLogPrefix << "FORK HELD dismissed by the operator: keeping this chain; the competing branch at #"
+                    << WithDelimiters(r.dismissedSeq) << " (" << r.dismissedHash << ") stays refused";
+    }
+    else {
+        cs::forkguard::clearForkRecord(guardStateDir_);
+        cswarning() << kLogPrefix << "FORK HELD dismissed by the operator: keeping this chain";
+    }
+    return true;
+}
+
+bool BlockChain::checkDismissTrigger() {
+    if (guardStateDir_.empty()) {
+        return false;
+    }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path trigger = fs::path(guardStateDir_) / cs::forkguard::kDismissTrigger;
+    if (!fs::exists(trigger, ec)) {
+        return false;
+    }
+    const bool dismissed = dismissFork();
+    if (!dismissed) {
+        cslog() << kLogPrefix << "the " << cs::forkguard::kDismissTrigger << " file is there but no fork is held: nothing to dismiss";
+    }
+    fs::remove(trigger, ec);
+    if (ec) {
+        cserror() << kLogPrefix << "cannot remove " << trigger.string() << ": " << ec.message();
+    }
+    return dismissed;
+}
+
+bool BlockChain::mayUnwindLastBlock() {
+    // the start-up integrity repair removes blocks of this node's own database that failed the hash
+    // check (cacheLastBlocks, incorrectBlocks_): a local repair, not a network reorg, so not bounded
+    return integrityRepair_ || guardAutoRollback();
+}
+
+bool BlockChain::forkHeld() const {
+    std::lock_guard l(guardMutex_);
+    return forkRecord_.has_value() && forkRecord_->held;
+}
+
+std::optional<cs::forkguard::ForkRecord> BlockChain::forkHeldRecord() const {
+    std::lock_guard l(guardMutex_);
+    if (forkRecord_.has_value() && forkRecord_->held) {
+        return forkRecord_;
+    }
+    return std::nullopt;
+}
+
+std::optional<cs::forkguard::ForkRecord> BlockChain::forkRecord() const {
+    std::lock_guard l(guardMutex_);
+    return forkRecord_;
+}
+
+void BlockChain::setSyncSource(const cs::PublicKey& key, cs::Sequence announcedHeight) {
+    syncSource_ = std::make_pair(key, announcedHeight);
+}
+
+void BlockChain::clearSyncSource() {
+    syncSource_.reset();
+}
+
+void BlockChain::setPeerAddressResolver(std::function<std::string(const cs::PublicKey&)> resolver) {
+    peerAddressResolver_ = std::move(resolver);
+}
+
+void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash) {
+    resolveForkSeq_ = seq;
+    resolveForkHash_ = hash;
+    resolveCompetingHash_ = competingHash;
+}
+
+void BlockChain::setGuardStateDir(const std::string& dir) {
+    guardStateDir_ = dir;
+    const cs::Sequence tip = lastSequence_.load();
+    bool corrupt = false;
+    if (const auto e = cs::forkguard::loadEpisode(dir, &corrupt)) {
+        if (tip <= e->highWater) {
+            rollbackEpisode_ = true;
+            rollbackHighWater_ = e->highWater;
+            rollbackLowWater_ = tip;
+            cswarning() << kLogPrefix << "rollback episode resumed: reference head #" << WithDelimiters(e->highWater)
+                        << ", head #" << WithDelimiters(tip);
+        }
+        else {
+            cs::forkguard::clearEpisode(dir);
+        }
+    }
+    else if (corrupt) {
+        // fail safe: an unreadable reference must not lift the bound, so a new episode starts here
+        cserror() << kLogPrefix << cs::forkguard::kEpisodeFile << " in " << dir << " cannot be read: a rollback "
+                  << "episode starts at the current head #" << WithDelimiters(tip) << " instead";
+        rollbackEpisode_ = false;
+        beginRollbackEpisode();
+    }
+    corrupt = false;
+    if (auto r = cs::forkguard::loadForkRecord(dir, &corrupt)) {
+        if (!rollbackEpisode_) {
+            r->held = false;  // the chain is past that episode
+        }
+        if (r->held || r->hasDismissal()) {
+            {
+                std::lock_guard l(guardMutex_);
+                forkRecord_ = *r;
+            }
+            if (r->held) {
+                cserror() << kLogPrefix << cs::forkguard::summary(*r);
+            }
+            else {
+                cs::forkguard::saveForkRecord(dir, *r);
+            }
+        }
+        else {
+            cs::forkguard::clearForkRecord(dir);
+        }
+    }
+    else if (corrupt) {
+        // the record is lost: report FORK HELD with what is known and keep refusing through the episode
+        cserror() << kLogPrefix << cs::forkguard::kForkFile << " in " << dir << " cannot be read";
+        {
+            std::lock_guard l(guardMutex_);
+            forkRecord_.reset();
+        }
+        cs::forkguard::ForkRecord r;
+        r.reason = "unreadable";
+        r.sinceUnix = static_cast<int64_t>(std::time(nullptr));
+        r.ourHead = tip;
+        r.ourHeadHash = getHashBySequence(tip).to_string();
+        r.forkPoint = tip;  // unknown; no hash, so --resolve-fork refuses and the operator cuts by hand
+        holdFork(r);
+    }
+    corrupt = false;
+    approvedBranch_ = cs::forkguard::loadApprovedBranch(dir, &corrupt);
+    if (corrupt) {
+        cserror() << kLogPrefix << cs::forkguard::kApprovedFile << " in " << dir << " cannot be read: no branch is "
+                  << "approved; removing it";
+        cs::forkguard::clearApprovedBranch(dir);
+    }
+    if (approvedBranch_.has_value()) {
+        cslog() << kLogPrefix << "branch approved with --resolve-fork: block #" << WithDelimiters(approvedBranch_->seq)
+                << " (" << approvedBranch_->hash << ") after the fork point #" << WithDelimiters(approvedBranch_->forkPoint);
+        checkApprovedBranch();
+    }
+    // a dismiss-fork file left while the node was stopped
+    checkDismissTrigger();
+}
+
+void BlockChain::dropApprovedBranch(const char* why) {
+    if (!approvedBranch_.has_value()) {
+        return;
+    }
+    cslog() << kLogPrefix << "branch approved with --resolve-fork (block #" << WithDelimiters(approvedBranch_->seq)
+            << "): " << why << "; the approval ends";
+    approvedBranch_.reset();
+    cs::forkguard::clearApprovedBranch(guardStateDir_);
+}
+
+void BlockChain::checkApprovedBranch() {
+    if (!approvedBranch_.has_value()) {
+        return;
+    }
+    const cs::Sequence tip = lastSequence_.load();
+    if (tip < approvedBranch_->seq) {
+        return;
+    }
+    if (getHashBySequence(approvedBranch_->seq).to_string() == approvedBranch_->hash) {
+        dropApprovedBranch("the node follows it");
+    }
+    else if (tip > approvedBranch_->seq) {
+        dropApprovedBranch("the node went on with another block at that height");
+    }
+}
+
+bool BlockChain::deepRollbackEnvSet() {
+    const char* v = std::getenv("CS_ALLOW_DEEP_ROLLBACK");
+    return v != nullptr && *v != '\0';
+}
+
+bool BlockChain::deepRollbackApproved() const {
+    if (deepOverrideSpent_) {
+        return false;
+    }
+    const auto* config = cs::ConfigHolder::instance().config();
+    return deepRollbackEnvSet() || (config != nullptr && config->allowDeepRollback());
+}
+
+// A competing block legitimately asks us to roll back only if it is vouched for by authority this node
+// already recognises. We verify its round confirmations against the confidants of our own current last
+// block, exactly as BlockVerifier does for a block arriving from the network. Checking the block against
+// the confidants it declares itself (as a self-signature check would) proves nothing: any block
+// names its own keys and signs for itself. A legitimate micro-fork passes, because the honest competing
+// block at the same height was produced by the same deterministically elected trusted group whose keys
+// confirm our last block; a block without confirmations from that group fails and never triggers an
+// unwind. Bootstrap blocks carry no such confirmations and fail here; they go through
+// isBootstrapAuthenticatedLocally() instead.
+bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
+    // Strict pre-checks for the unwind decision only; BlockVerifier::verifyConfirmations keeps the
+    // exceptions it has for normal block validation (sequence < 2, one-entry masks), which must not be
+    // enough to make this node unwind its own chain.
+    const auto fail = [&competing](const char* why) {
+        csdebug() << kLogPrefix << "competing block #" << competing.sequence()
+                  << " not confirmed by our last block's confidants: " << why;
+        return false;
+    };
+    if (!competing.is_valid() || competing.sequence() < 2) {
+        return fail("no confirmations to check");
+    }
+    // BlockVerifier::verifyConfirmations accepts a bootstrap block without checking any confirmation
+    if (BlockChain::isBootstrap(competing)) {
+        return fail("bootstrap block carries no confirmations");
+    }
+    const auto trustedConfidants = getLastBlock().confidants();
+    if (competing.numberConfirmations() == 0 || competing.roundConfirmations().empty()) {
+        return fail("no round confirmations");
+    }
+    const auto confMask = cs::Utils::bitsToMask(competing.numberConfirmations(), competing.roundConfirmationMask());
+    if (confMask.size() <= 1 || confMask.size() != trustedConfidants.size()) {
+        return fail("confirmation mask does not match our last block's confidants");
+    }
+    const size_t confirming = NodeUtils::realTrustedValue(confMask);
+    if (competing.roundConfirmations().size() != confirming) {
+        return fail("confirmation count does not match its mask");
+    }
+    if (confirming * 2 <= trustedConfidants.size()) {
+        return fail("fewer than a majority of our confidants confirm it");
+    }
+    std::string reason;
+    if (!cs::BlockVerifier::verifyConfirmations(competing, trustedConfidants, reason)) {
+        return fail(reason.c_str());
+    }
+    return true;
+}
+
+bool BlockChain::isBootstrapAuthenticatedLocally(const csdb::Pool& competing) const {
+    std::string reason;
+    if (!cs::BlockVerifier::verifySignatures(competing, reason)) {
+        csdebug() << kLogPrefix << "bootstrap block #" << competing.sequence() << " signatures: " << reason;
+        return false;
+    }
+    const auto& confidants = competing.confidants();
+    if (confidants.empty()) {
+        return false;
+    }
+    // a round table this node accepted itself (its bootstrap table was checked when it was taken)
+    const auto& conveyer = cs::Conveyer::instance();
+    if (conveyer.currentRoundTable().confidants == confidants) {
+        return true;
+    }
+    const cs::RoundNumber current = conveyer.currentRoundNumber();
+    for (cs::RoundNumber back = 0; back < 3 && back <= current; ++back) {
+        const cs::RoundTable* table = conveyer.roundTable(current - back);
+        if (table != nullptr && table->confidants == confidants) {
+            return true;
+        }
+    }
+    csdebug() << kLogPrefix << "bootstrap block #" << competing.sequence()
+              << " names confidants of no round table this node accepted";
+    return false;
+}
+
+bool BlockChain::competingBlockMayTriggerUnwind(const csdb::Pool& competing) const {
+    if (deepRollbackApproved()) {
+        return true; // operator path: a deliberate switch to a chain confirmed by other confidants
+    }
+    if (BlockChain::isBootstrap(competing)) {
+        return isBootstrapAuthenticatedLocally(competing);
+    }
+    return hasTrustedConfirmations(competing);
+}
+
 // - remove the last block from the top of blockchain
 // - remove pair (hash, sequence) from cache (blockHashes_)
 // - decrement the last sequence by 1
@@ -836,6 +1405,15 @@ csdb::Transaction BlockChain::loadTransaction(const csdb::TransactionID& transId
 void BlockChain::removeLastBlock() {
     if (blocksToBeRemoved_ == 0) {
         csmeta(csdebug) << kLogPrefix << "There are no blocks, allowed to be removed";
+        return;
+    }
+    // longest-chain guard: every caller of removeLastBlock is an automatic reorg/sync removal or the
+    // start-up integrity repair (the operator truncates with --set-bc-top / --resolve-fork, at start-up,
+    // in the storage, not here), so bound the depth here, once, for all of the automatic ones. When the
+    // limit is reached the block is kept and the caller sees its own last block unchanged; the node
+    // reports FORK HELD until the episode ends or the operator truncates.
+    if (!mayUnwindLastBlock()) {
+        cswarning() << kLogPrefix << "longest-chain guard kept the last block, automatic rollback stopped";
         return;
     }
     //--blocksToBeRemoved_;
@@ -909,6 +1487,9 @@ void BlockChain::removeLastBlock() {
         blockHashes_->remove(remove_hash);
     }
     --lastSequence_;
+    if (rollbackEpisode_ && lastSequence_.load() < rollbackLowWater_) {
+        rollbackLowWater_ = lastSequence_.load();
+    }
 
     csmeta(csdebug) << kLogPrefix << "done";
 }
@@ -925,6 +1506,14 @@ bool BlockChain::compromiseLastBlock(const csdb::PoolHash& desired_hash) {
     if (!last_block.is_valid()) {
         cserror() << kLogPrefix << "can only compromise the deferred block, not flushed yet";
         uncertainLastBlockFlag_ = false;
+        return false;
+    }
+
+    // longest-chain guard: marking the last block uncertain is the first step of an automatic unwind,
+    // so it is bounded here too. Beyond the depth limit the block is kept and the caller falls through
+    // to its keep-own-chain branch.
+    if (!mayUnwindLastBlock()) {
+        cswarning() << kLogPrefix << "longest-chain guard kept the last block, not compromising it";
         return false;
     }
 
@@ -1924,6 +2513,11 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         lastSequence_ = deferredBlock_.sequence();
     }
 
+    // forward progress: ends the rollback episode (and FORK HELD) once the head is above its reference,
+    // and settles the branch approved with --resolve-fork
+    onHeadAdvanced();
+    checkApprovedBranch();
+
     //csdetails() << kLogPrefix << "Pool #" << deferredBlock_.sequence() << ": " << cs::Utils::byteStreamToHex(deferredBlock_.to_binary().data(), deferredBlock_.to_binary().size());
     emit storeBlockEvent(pool);
     if constexpr (false && (pool.transactions_count() > 0 || pool.sequence() % 10 == 0)) {//log code
@@ -2265,6 +2859,20 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
 
     if (poolSequence == lastSequence) {
         csdebug() << kLogPrefix << "poolSequence == lastSequence";
+        // after --resolve-fork: the node stored its own block right after the fork point again, and the
+        // recorded competing block itself (the very hash the operator approved, built on the same
+        // fork point block as the own one) is offered: give up the own block, down to the fork point and never below, so the
+        // recorded block is appended next. No other block bypasses the usual checks.
+        if (approvedBranch_.has_value() && poolSequence == approvedBranch_->seq &&
+            pool.hash().to_string() == approvedBranch_->hash && getLastHash().to_string() != approvedBranch_->hash &&
+            !pool.previous_hash().is_empty() && pool.previous_hash() == getLastBlock().previous_hash()) {
+            cslog() << kLogPrefix << "the block #" << WithDelimiters(poolSequence) << " approved with --resolve-fork is offered: "
+                    << "giving up the own block at that height";
+            competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash()};
+            removeLastBlock();
+            competing_.reset();
+            return false;
+        }
         if (isLastBlockUncertain() && pool.sequence() == uncertainSequence_) {
             cslog() << kLogPrefix << "review replacement for uncertain block " << WithDelimiters(poolSequence);
             if (pool.hash() == desiredHash_) {
@@ -2281,7 +2889,9 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 }
                 else {
                     csdebug() << kLogPrefix << "the desired last block has the different content, drop it and remove own last block";
+                    competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash()};
                     removeLastBlock();
+                    competing_.reset();
                     return false;
                 }
             }
@@ -2308,13 +2918,42 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 cserror() << "BLOCKCHAIN> new pool\'s prev. hash is empty, don\'t write it, do not any harm to our blockchain";
                 return false;
             }
-            if (compromiseLastBlock(pool.previous_hash())) {
+            // the competing block being handled, for the fork record if the node refuses to unwind
+            competing_ = CompetingBlock{poolSequence, pool.hash(), pool.previous_hash(), competingBlockMayTriggerUnwind(pool)};
+            struct ClearCompeting {
+                std::optional<CompetingBlock>& c;
+                ~ClearCompeting() { c.reset(); }
+            } clearCompeting{competing_};
+            // after --resolve-fork, only a competing block that passes the usual checks ends the approval
+            // of the recorded branch; an unauthenticated offer changes nothing
+            if (approvedBranch_.has_value() && (poolSequence == approvedBranch_->seq || poolSequence == approvedBranch_->seq + 1) &&
+                pool.hash().to_string() != approvedBranch_->hash && competingBlockMayTriggerUnwind(pool)) {
+                dropApprovedBranch("another block vouched for by this node's confidants was offered at that height");
+            }
+            if (!competingBlockMayTriggerUnwind(pool)) {
+                // a competing block not vouched for by authority this node recognises (no strict
+                // confirmations by our last block's confidants, or a bootstrap flag that is not
+                // authenticated locally): never unwind our own chain for it, not even by marking our
+                // last block uncertain (which would let a later replacement remove it). The node
+                // reports FORK HELD until its head moves on or the operator decides.
+                if (recordForkHeld("authority")) {
+                    cslog() << kLogPrefix << "competing block #" << poolSequence
+                            << " is not authenticated by this node's confidants, keep own last block";
+                }
+                else {
+                    csdebug() << kLogPrefix << "competing block #" << poolSequence
+                              << " of a branch dismissed by the operator, keep own last block";
+                }
+            }
+            else if (compromiseLastBlock(pool.previous_hash())) {
                 csdebug() << kLogPrefix << "compromise own last block and cancel store operation";
             }
             else {
                 //if (lastSequence + 5ULL < cs::Conveyer::instance().currentRoundNumber()) {
                 //    arrangeBlocksInCache();
                 //}
+                // authenticated competing block: unwind, but only within the depth bound that
+                // removeLastBlock enforces; beyond it the block is kept and the operator decides.
                 csdebug() << kLogPrefix << "remove own last block and cancel store operation";
                 removeLastBlock();
             }
@@ -2797,6 +3436,27 @@ void BlockChain::cacheLastBlocks() {
     cs::Sequence lastSeq;
     while (!incorrectBlocks_.empty() || !selectionFinished_) {
         csinfo() << kLogPrefix << "Starting blocks transferring cycle";
+        // removals while incorrectBlocks_ is not empty repair this node's own database (blocks that
+        // failed the hash check at start-up): a local repair, not a network reorg, so the guard does
+        // not bound them. The flag lives for this iteration only.
+        integrityRepair_ = !incorrectBlocks_.empty();
+        struct EndRepair {
+            bool& f;
+            ~EndRepair() { f = false; }
+        } endRepair{integrityRepair_};
+        // longest-chain guard, for the rest of the selection: stop unwinding own blocks once a deeper
+        // automatic rollback than allowed would be needed; leave the chain intact, abandon this
+        // antifork episode cleanly and wait for the operator. (guardAutoRollback measures depth
+        // against the fixed reference head via lastSequence_, so this counts real own-block removals.)
+        if (!integrityRepair_ && !guardAutoRollback()) {
+            cswarning() << kLogPrefix << "longest-chain guard stopped the antifork rollback; keeping own chain";
+            incorrectBlocks_.clear();
+            selectionFinished_ = true;
+            lastPrevHash_ = csdb::PoolHash();
+            emittingRequest_ = 0;
+            antiForkMode_ = false;
+            return;
+        }
         auto lastBlock = getLastBlock();
         lastSeq = lastBlock.sequence();
         csinfo() << kLogPrefix << "now dealing with " << lastSeq;

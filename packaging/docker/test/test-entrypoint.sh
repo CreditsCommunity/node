@@ -3,7 +3,8 @@
 # wallet on the PATH with its data on the volume, the token cache on request (CREDITS_TOKENS_CACHE),
 # the snapshot download on request (--download-snapshot) and the [snapshot] settings, for pruned and
 # full nodes, the refusal after a snapshot mismatch, storage changes, and a key encrypted by the node
-# (the start stops, the decrypt-key command).
+# (the start stops, the decrypt-key command), the fork commands (resolve-fork, set-bc-top,
+# dismiss-fork) and the FORK HELD healthcheck.
 # Usage: test-entrypoint.sh <dir with mdb_copy and mdb_load>
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -296,5 +297,30 @@ set +e; out=$(command_run "$(newdata 17b)" decrypt-key); rc=$?; set -e
 set +e; out=$(command_run "$d" frobnicate); rc=$?; set -e
 [ "$rc" = 2 ] && grep -q "unknown command 'frobnicate'" <<<"$out" || { echo "$out"; fail "unknown command: exit $rc"; }
 pass "an encrypted key stops the start; decrypt-key makes it plain"
+
+# 18. FORK HELD: resolve-fork and set-bc-top run the node once with the cut and exit, dismiss-fork
+# leaves the trigger file for the node; the healthcheck is unhealthy while fork-held.json holds a fork
+d=$(newdata 18)
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+mkdir -p "$d/db"
+fork_run() { local data=$1; shift; docker run --rm --label credits-entrypoint-test --user "$(id -u)" -e STUB_SECONDS=0 -v "$data:/data" "$image" "$@" 2>&1; }
+rm -f "$d/stub-args"
+out=$(fork_run "$d" resolve-fork) || { echo "$out"; fail "resolve-fork"; }
+grep -q -- '--resolve-fork' "$d/stub-args" && grep -q -- '--config-file config.ini' "$d/stub-args" || fail "resolve-fork arguments: $(cat "$d/stub-args")"
+rm -f "$d/stub-args"
+out=$(fork_run "$d" set-bc-top 1234) || { echo "$out"; fail "set-bc-top"; }
+grep -q -- '--set-bc-top 1234' "$d/stub-args" || fail "set-bc-top arguments: $(cat "$d/stub-args")"
+set +e; out=$(fork_run "$d" set-bc-top); rc=$?; set -e
+[ "$rc" = 2 ] && grep -q 'set-bc-top needs the sequence' <<<"$out" || { echo "$out"; fail "set-bc-top without a sequence: exit $rc"; }
+out=$(fork_run "$d" dismiss-fork) || { echo "$out"; fail "dismiss-fork"; }
+[ -e "$d/dismiss-fork" ] || fail "dismiss-fork left no trigger file"
+health() { docker run --rm --label credits-entrypoint-test --user "$(id -u)" --entrypoint /opt/credits/healthcheck.sh -v "$1:/data" "$image" 2>&1; }
+printf '{\n    "held": "true",\n    "since": "2026-11-19 10:00:00 UTC",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
+set +e; out=$(health "$d"); rc=$?; set -e
+[ "$rc" = 1 ] && grep -q 'FORK HELD since 2026-11-19 10:00:00 UTC' <<<"$out" && grep -q 'fork point #4899' <<<"$out" \
+    && grep -q 'resolve-fork' <<<"$out" && grep -q 'dismiss-fork' <<<"$out" || { echo "$out"; fail "healthcheck with a fork held: exit $rc"; }
+printf '{\n    "held": "false",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
+out=$(health "$d") || { echo "$out"; fail "healthcheck with a dismissed fork"; }
+pass "resolve-fork, set-bc-top and dismiss-fork; the healthcheck reports FORK HELD"
 
 echo "PASS: entrypoint"
