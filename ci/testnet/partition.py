@@ -3,6 +3,7 @@
 
     partition.py dump --from 395 --port 9090 > community.txt   # "seq hash transactions" per block
     partition.py report --community community.txt --official official.txt --port 9090 --port 9102
+    partition.py fork --community community.txt --official official.txt   # the first block that differs
 
 dump: the blocks of one node from a sequence to its head, taken just before the reconnection.
 report: where the two sides forked, and which side's blocks the nodes hold after the reconnection
@@ -58,16 +59,22 @@ def dump(args):
         print(seq, h, txs)
 
 
+def fork_of(community, official):
+    """the first sequence at which the two sides hold different blocks"""
+    common = sorted(set(community) & set(official))
+    fork = next((s for s in common if community[s][0] != official[s][0]), None)
+    if fork is None:
+        # one side may only be shorter: the fork is right above the shorter head
+        fork = min(max(community, default=0), max(official, default=0)) + 1
+    return fork
+
+
 def report(args):
     community = read(args.community)
     official = read(args.official)
-    common = sorted(set(community) & set(official))
-    fork = next((s for s in common if community[s][0] != official[s][0]), None)
     c_head = max(community) if community else 0
     o_head = max(official) if official else 0
-    if fork is None:
-        # one side may only be shorter: the fork is right above the shorter head
-        fork = min(c_head, o_head) + 1
+    fork = fork_of(community, official)
     c_side = {s: v for s, v in community.items() if s >= fork}
     o_side = {s: v for s, v in official.items() if s >= fork}
     print(f"PARTITION RESULT: fork at #{fork}; before the reconnection the community side held #{fork}..#{c_head} "
@@ -83,7 +90,12 @@ def report(args):
         kept_o = sum(1 for s, v in o_side.items() if now.get(s, (None,))[0] == v[0])
         lost_c_txs = sum(v[1] for s, v in c_side.items() if now.get(s, (None,))[0] != v[0])
         lost_o_txs = sum(v[1] for s, v in o_side.items() if now.get(s, (None,))[0] != v[0])
-        if c_side and kept_c == 0 and kept_o == len(o_side):
+        if not o_side and c_side and kept_c == len(c_side):
+            # the official side wrote nothing while cut off (it stalled): no fork, one chain
+            verdict = f"no fork: the official side wrote no block, the community blocks were kept ({len(c_side)} blocks)"
+        elif not c_side and o_side and kept_o == len(o_side):
+            verdict = f"no fork: the community side wrote no block, the official blocks were kept ({len(o_side)} blocks)"
+        elif c_side and kept_c == 0 and kept_o == len(o_side):
             verdict = f"the community side was unwound ({len(c_side)} blocks, {lost_c_txs} transactions reverted)"
         elif o_side and kept_o == 0 and kept_c == len(c_side):
             verdict = f"the official side was unwound ({len(o_side)} blocks, {lost_o_txs} transactions reverted)"
@@ -108,9 +120,14 @@ def main():
     r.add_argument("--community", required=True)
     r.add_argument("--official", required=True)
     r.add_argument("--port", action="append", required=True)
+    f = sub.add_parser("fork")
+    f.add_argument("--community", required=True)
+    f.add_argument("--official", required=True)
     args = parser.parse_args()
     if args.command == "dump":
         dump(args)
+    elif args.command == "fork":
+        print(fork_of(read(args.community), read(args.official)))
     else:
         report(args)
 

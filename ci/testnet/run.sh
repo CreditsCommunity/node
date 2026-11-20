@@ -229,8 +229,10 @@
 #        RESOLVE_FORK_AFTER=1: then, as an operator choosing the official chain, wait up to
 #        RESOLVE_FORK_WAIT minutes (default 5) for FORK HELD on the community nodes (the bounded-rollback
 #        guard refuses the longer chain their confidants do not vouch for), stop every community node
-#        holding a fork, run it once with --resolve-fork (cut at the recorded fork point) and start it
-#        again: every node must then end on the official chain
+#        holding a fork, run it once with --resolve-fork and start it again; a node whose fork point
+#        was only an upper bound and that holds the fork again lower is cut with --set-bc-top at the
+#        last common block (docs/quick-start.md, "If your node reports FORK HELD"). A start right after
+#        a cut that stops at once is reported and repeated. Every node must then end on one chain
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -1238,6 +1240,18 @@ official_stop() {
     echo "official stop: $(printf 'n%s ' $OFFICIAL_NODES)started again, community head $c"
 }
 
+# chain reorganisations (see "REORG DEPTHS" near the end); a partition scenario reports them before its own verdict
+reorg_reported=0
+reorg_report() {
+    reorg_reported=1
+    reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
+    echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
+    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
+    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
+    held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+    [ -z "$held" ] || echo "FORK HELD on: $held"
+}
+
 # OFFICIAL_PARTITION_AT: the community nodes cut off from the running official nodes
 part_done=0               # 1 while partitioned, 2 once reconnected
 part_fail=""
@@ -1315,39 +1329,107 @@ partition_stop_nodes() {
     done
 }
 
-# RESOLVE_FORK_AFTER: the operator of each community node holding a fork follows the official chain
-part_resolved=""          # community nodes cut back by --resolve-fork
+# RESOLVE_FORK_AFTER: the operator of each community node holding a fork follows the official chain,
+# as docs/quick-start.md ("If your node reports FORK HELD") says: --resolve-fork; if the node knows
+# only an upper bound of the fork point and reports FORK HELD again lower, --set-bc-top at the last
+# common block (here from the chains dumped before the reconnection, as an operator would take it
+# from the monitor)
+part_resolved=""          # community nodes cut back to the official chain
+part_restart_fail=0       # starts right after a cut that stopped with an error (started again)
+
+# nodes holding a fork: fork-held.json and a FORK HELD line after line $2 of node.log
+partition_held() {
+    local i from=$1 held=""
+    for i in $COMMUNITY_NODES; do
+        [ -f "$WORK/n$i/fork-held.json" ] && tail -n +"$((from + 1))" "$WORK/n$i/node.log" | grep -aq 'FORK HELD since' && held="$held $i"
+    done
+    echo $held
+}
+
+# start a node after its chain was cut; if it stops at once (the first start after a cut can fail
+# on a quick-start checkpoint above the new head), report it and start it once more
+partition_start_after_cut() {
+    local i t0 status
+    for i in "$@"; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+    t0=$(date +%s)
+    while [ $(( $(date +%s) - t0 )) -lt 60 ]; do sleep 2; done
+    for i in "$@"; do
+        kill -0 "${PIDS[$i]}" 2>/dev/null && continue
+        status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+        part_restart_fail=$((part_restart_fail + 1))
+        echo "RESOLVE FORK: n$i stopped at its first start after the cut (exit $status):"
+        { grep -a ' error ' "$WORK/n$i/node.log" || true; } | tail -4 | sed "s/^/partition: n$i: /" | cut -c1-260
+        start_node "$i"; REPORTED_DOWN[$i]=""
+        echo "RESOLVE FORK: n$i started again"
+    done
+}
+
 partition_resolve_fork() {
-    local t0 held i n_comm rc
+    local t0 held i n_comm rc fork lines upper="" again
+    local -a lines_i=()
     n_comm=$(echo $COMMUNITY_NODES | wc -w)
     t0=$(date +%s)
     while :; do
-        held=""
-        for i in $COMMUNITY_NODES; do
-            [ -f "$WORK/n$i/fork-held.json" ] && grep -aq 'FORK HELD since' "$WORK/n$i/node.log" && held="$held $i"
-        done
+        held=$(partition_held 0)
         [ "$(echo $held | wc -w)" -lt "$n_comm" ] || break
         [ $(( $(date +%s) - t0 )) -lt $(( RESOLVE_FORK_WAIT * 60 )) ] || break
         sleep 10
     done
-    echo "RESOLVE FORK: FORK HELD on $(echo $held | wc -w) of $n_comm community nodes$(printf ' n%s' $held) after $(( $(date +%s) - t0 )) s (community head $(community_max), official head $(official_max))"
+    echo "RESOLVE FORK: FORK HELD on $(echo $held | wc -w) of $n_comm community nodes${held:+$(printf ' n%s' $held)} after $(( $(date +%s) - t0 )) s (community head $(community_max), official head $(official_max))"
     for i in $COMMUNITY_NODES; do
-        { grep -a 'FORK HELD since' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \1/"
+        { grep -a 'FORK HELD since' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \\1/; s/ What to do:.*//"
     done
     if [ -z "$held" ]; then
         part_fail="${part_fail:+$part_fail; }no community node reported FORK HELD within $RESOLVE_FORK_WAIT min, nothing to resolve"
         return 0
     fi
+    # 1. --resolve-fork on every node holding the fork
     partition_stop_nodes $held
     for i in $held; do
+        lines=$(wc -l < "$WORK/n$i/node.log")
         rc=0
         (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --resolve-fork </dev/null >> resolve-fork.log 2>&1) || rc=$?
-        echo "RESOLVE FORK: n$i --resolve-fork exit $rc, head now $(seq_of "$i")"
-        { grep -a -- '--resolve-fork' "$WORK/n$i/node.log" "$WORK/n$i/resolve-fork.log" 2>/dev/null || true; } | tail -3 | sed "s/^/partition: n$i: /"
-        if [ "$rc" -eq 0 ]; then part_resolved="$part_resolved $i"; else part_fail="${part_fail:+$part_fail; }--resolve-fork failed on n$i (exit $rc)"; fi
+        echo "RESOLVE FORK: n$i --resolve-fork exit $rc"
+        tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | { grep -a -- '--resolve-fork' || true; } | sed -E "s/^.*(--resolve-fork)/partition: n$i: \\1/" | cut -c1-260
+        if [ "$rc" -ne 0 ]; then part_fail="${part_fail:+$part_fail; }--resolve-fork failed on n$i (exit $rc)"; continue; fi
+        tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | grep -aq 'the fork point is an upper bound' && upper="$upper $i"
     done
-    for i in $held; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+    for i in $held; do lines_i[$i]=$(wc -l < "$WORK/n$i/node.log"); done
+    partition_start_after_cut $held
     echo "RESOLVE FORK: $(printf 'n%s ' $held)started again after --resolve-fork"
+    # 2. the fork point was an upper bound: the node holds the fork again, lower; cut at the last
+    #    common block by hand
+    if [ -n "$upper" ]; then
+        fork=$(cd "$HERE" && python3 partition.py fork --community "$WORK/partition-community.txt" --official "$WORK/partition-official.txt")
+        t0=$(date +%s)
+        while :; do
+            again=""
+            for i in $upper; do
+                tail -n +"$((${lines_i[$i]} + 1))" "$WORK/n$i/node.log" | grep -aq 'FORK HELD since' && again="$again $i"
+            done
+            [ "$(echo $again | wc -w)" -lt "$(echo $upper | wc -w)" ] || break
+            [ $(( $(date +%s) - t0 )) -lt 180 ] || break
+            sleep 10
+        done
+        echo "RESOLVE FORK: the fork point was an upper bound on$(printf ' n%s' $upper); FORK HELD again on ${again:-none} after $(( $(date +%s) - t0 )) s; the chains differ from #$fork: --set-bc-top $((fork - 1))"
+        for i in $again; do
+            tail -n +"$((${lines_i[$i]} + 1))" "$WORK/n$i/node.log" | { grep -a 'FORK HELD since' || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \\1/; s/ What to do:.*//"
+        done
+        if [ -n "$again" ]; then
+            partition_stop_nodes $again
+            for i in $again; do
+                lines=$(wc -l < "$WORK/n$i/node.log")
+                rc=0
+                (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --set-bc-top "$((fork - 1))" </dev/null >> resolve-fork.log 2>&1) || rc=$?
+                echo "RESOLVE FORK: n$i --set-bc-top $((fork - 1)) exit $rc"
+                tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | { grep -aE 'start remove|set-bc-top|error' || true; } | tail -3 | sed "s/^/partition: n$i: /" | cut -c1-260
+                [ "$rc" -eq 0 ] || part_fail="${part_fail:+$part_fail; }--set-bc-top failed on n$i (exit $rc)"
+            done
+            partition_start_after_cut $again
+            echo "RESOLVE FORK: $(printf 'n%s ' $again)started again after --set-bc-top"
+        fi
+    fi
+    part_resolved=$held
 }
 
 while :; do
@@ -2034,6 +2116,7 @@ PY
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
         && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
+        [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
@@ -2644,18 +2727,6 @@ if [ "$OFFICIAL_STOP_AT" -gt 0 ]; then
     if [ -n "$off_fail" ]; then echo "FAIL: official stop: $off_fail"; exit 1; fi
 fi
 
-# chain reorganisations, see below; a partition scenario reports them before its own verdict
-reorg_reported=0
-reorg_report() {
-    reorg_reported=1
-    reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
-    echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
-    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
-    held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
-    [ -z "$held" ] || echo "FORK HELD on: $held"
-}
-
 if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
     reorg_report
     [ "$part_done" -eq 2 ] || part_fail="${part_fail:+$part_fail; }the partition never ended"
@@ -2669,6 +2740,7 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
         echo "partition: n$i logged $(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true) bootstraps," \
             "$(grep -ac 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log" || true) community tables started or taken"
     done
+    [ "$RESOLVE_FORK_AFTER" != 1 ] || echo "RESOLVE FORK: cut back to the official chain:${part_resolved:- none}; $part_restart_fail start(s) right after a cut stopped with an error and were repeated"
     if [ -n "$part_fail" ]; then echo "FAIL: partition: $part_fail"; exit 1; fi
 fi
 

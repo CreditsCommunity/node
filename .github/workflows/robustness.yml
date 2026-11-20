@@ -538,14 +538,11 @@ jobs:
             env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_PARTITION_RESTART=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
             fixed: true
             manual: true
-          # the operator path after a partition: the community nodes hold the fork (FORK HELD, the
-          # longer chain is not vouched for by their confidants); each one is stopped, run once with
-          # --resolve-fork and started again, and every node must end on the official chain. Without
-          # and with the restart after the reconnection
-          - name: official-partition-resolve
-            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 RESOLVE_FORK_AFTER=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
-            fixed: true
-            manual: true
+          # the operator path after a partition: the community nodes, restarted after the
+          # reconnection, hold the fork (FORK HELD: the longer chain is not vouched for by their
+          # confidants); each one is stopped and run once with --resolve-fork, then, if the fork
+          # point was only an upper bound and the node holds the fork again lower, with --set-bc-top
+          # at the last common block; every node must end on the official chain
           - name: official-partition-restart-resolve
             env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_PARTITION_RESTART=1 RESOLVE_FORK_AFTER=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
             fixed: true
