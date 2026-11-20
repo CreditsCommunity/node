@@ -181,6 +181,25 @@ TEST(ForkLocator, DeepForkBeyondTheBound) {
     EXPECT_EQ(p.run(), Status::Deeper);
     EXPECT_EQ(pruned.forkPoint(), 4500u);
 
+    // the genesis block is never asked for, even when a peer would answer it with another hash
+    Harness g;
+    g.chains = {533, 931, 1500};
+    g.answer = [&](const std::vector<cs::Sequence>& seqs) {
+        auto out = g.honest(seqs);
+        for (auto& b : out) {
+            EXPECT_NE(b.seq, 0u);
+            if (b.seq == 0) {
+                b.hash = "other genesis";
+            }
+        }
+        return out;
+    };
+    auto& genesis = g.make();
+    genesis.start(key(7), 930, 0, g.now);
+    EXPECT_EQ(genesis.floor(), 1u);
+    EXPECT_EQ(g.run(), Status::Exact);
+    EXPECT_EQ(genesis.forkPoint(), 533u);
+
     EXPECT_EQ(cs::forkguard::locateDepth(100), 2000u);
     EXPECT_EQ(cs::forkguard::locateDepth(10), 1000u);
     EXPECT_EQ(cs::forkguard::locateDepth(0), 2000u);

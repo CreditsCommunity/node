@@ -76,7 +76,8 @@ public:
     ForkLocator(Hooks hooks, Settings settings);
 
     // starts a search: the chains are known to differ above `upper` (the block at upper + 1 is not
-    // shared); the search goes down to `floor` at most (raised to upper - maxDepth)
+    // shared); the search goes down to `floor` at most (raised to upper - maxDepth, and to block 1:
+    // the genesis block is shared by definition and never asked for)
     void start(const cs::PublicKey& peer, cs::Sequence upper, cs::Sequence floor, Clock::time_point now);
     void stop();
 
