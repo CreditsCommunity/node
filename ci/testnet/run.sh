@@ -1411,7 +1411,7 @@ partition_resolve_fork() {
             [ $(( $(date +%s) - t0 )) -lt 180 ] || break
             sleep 10
         done
-        echo "RESOLVE FORK: the fork point was an upper bound on$(printf ' n%s' $upper); FORK HELD again on ${again:-none} after $(( $(date +%s) - t0 )) s; the chains differ from #$fork: --set-bc-top $((fork - 1))"
+        echo "RESOLVE FORK: the fork point was an upper bound on$(printf ' n%s' $upper); FORK HELD again on$([ -n "$again" ] && printf ' n%s' $again || echo ' none') after $(( $(date +%s) - t0 )) s; the chains differ from #$fork: --set-bc-top $((fork - 1))"
         for i in $again; do
             tail -n +"$((${lines_i[$i]} + 1))" "$WORK/n$i/node.log" | { grep -a 'FORK HELD since' || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \\1/; s/ What to do:.*//"
         done
@@ -2740,7 +2740,7 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
         echo "partition: n$i logged $(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true) bootstraps," \
             "$(grep -ac 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log" || true) community tables started or taken"
     done
-    [ "$RESOLVE_FORK_AFTER" != 1 ] || echo "RESOLVE FORK: cut back to the official chain:${part_resolved:- none}; $part_restart_fail start(s) right after a cut stopped with an error and were repeated"
+    [ "$RESOLVE_FORK_AFTER" != 1 ] || echo "RESOLVE FORK: cut back to the official chain:$([ -n "$part_resolved" ] && printf ' n%s' $part_resolved || echo ' none'); $part_restart_fail start(s) right after a cut stopped with an error and were repeated"
     if [ -n "$part_fail" ]; then echo "FAIL: partition: $part_fail"; exit 1; fi
 fi
 

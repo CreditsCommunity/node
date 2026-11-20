@@ -181,21 +181,51 @@ There is no rule that makes either side yield to the other. What happens at reco
 - official nodes follow the longer chain, as for any two chains, and unwind their blocks above the
   fork; the transactions of those blocks are reverted and must be sent again unless the other
   side also wrote them;
-- community nodes with the bounded-rollback guard (#189, `allow_deep_rollback=false` by default)
-  do not follow a longer chain they cannot authenticate themselves: a node on the shorter side
-  keeps its chain and waits until its operator approves the switch (`[params]
-  allow_deep_rollback` or `CS_ALLOW_DEEP_ROLLBACK`), after which its blocks above the fork, and
-  their transactions, are reverted.
+- community nodes never follow a longer chain on their own unless its blocks are vouched for by
+  confidants they hold (the bounded-rollback guard, see "Consensus fixes"). The blocks of the other
+  side are not, so each community node on the shorter side keeps its chain and reports **FORK
+  HELD** (on every round line, a detail line once a minute, `fork-held.json` next to the
+  database, an unhealthy Docker healthcheck). Its operator checks the other nodes or the monitor
+  and chooses (docs/quick-start.md, "If your node reports FORK HELD"):
+  - **follow the official chain**: stop the node, run it once with `--resolve-fork` (Docker:
+    `resolve-fork`) and start it again. After a partition the node usually knows only an upper
+    bound of the fork point (the block it refused does not continue any block it holds), so
+    `--resolve-fork` removes only the blocks above that bound and the node reports FORK HELD
+    again a block lower; then cut at the last common block with `--set-bc-top <sequence>`. The
+    blocks above the fork, and their transactions, are reverted;
+  - **keep the community chain**: create `dismiss-fork` next to the database; the node keeps
+    refusing that branch and no longer reports it.
 
-Measured in the `official-partition` scenarios of the robustness workflow (before #189, community
-side cut off for 6 minutes, `stall_minutes=2`): the two sides did not look each other up again on
-their own after the cut was lifted, each node keeping only its own side as neighbours, so both
-chains went on side by side until the end of the run. With the community nodes restarted after the
-reconnection (`official-partition-restart`), they connected to the official nodes and unwound
-their shorter chain block by block from #950 to #544, then stopped two blocks above the fork
-(#542) and did not take the official blocks: still no single chain. A
-partition with this option on therefore needs operator attention in any case. Keep
-`stall_minutes` long.
+The fallback's own blocks pass that guard on the community side: a community bootstrap block is
+signed by the confidants of the community table, and a node that took that table holds it as a
+round table it accepted, which is what the guard asks of a bootstrap block. Nothing in this option
+changes what may unwind a node's chain: it does not touch block removal, the rollback bound or the
+fork records. With the option on, the `official-stop-*` scenarios show no refused block and no
+reorganisation on any node.
+
+Measured in the `official-partition` scenarios of the robustness workflow (community side cut off
+for 6 minutes, `stall_minutes=2`, the official nodes run the official build), with the guard:
+
+- the community side restarts by the fallback 120-180 s after its last block; both sides then
+  write blocks (fork at #533-#563);
+- after the cut is lifted the two sides do not look each other up again: every node keeps only
+  the 4 neighbours of its own side, nothing is refused, and both chains go on until the end of the
+  run (`official-partition`);
+- with the community nodes restarted after the reconnection (they dial every host again,
+  `official-partition-restart`), all five report FORK HELD within 20 s and refuse every block of
+  the official chain: the community side is no longer unwound part of the way and left stuck
+  above the fork, as before the guard; it stays on its own chain until its operator decides. In
+  one run the official side had stalled during the cut (3 live initial confidants, fewer than 4),
+  wrote no block of its own, and took the community blocks once the community nodes were
+  restarted: every node then held all 217 community blocks and the same head;
+- with the operator path (`official-partition-restart-resolve`): `--resolve-fork` cut one block
+  (the fork point was an upper bound), FORK HELD came back a block lower within 20 s,
+  `--set-bc-top` at the last common block followed, and every node then held the official chain:
+  one chain, the 179 community blocks and their 42 transactions reverted. The first start after
+  each cut stopped once ("the QUICK START checkpoint continues after the last block on disk") and
+  succeeded when started again.
+
+A partition with this option on therefore needs operator attention. Keep `stall_minutes` long.
 
 ## Start-up behaviour
 
@@ -418,9 +448,9 @@ consensus rules.
   reconnects. The same holds for a node that lags behind with a divergent last block it never
   replaced (for example, it missed a bootstrap round): when the network's next block is not
   confirmed by the confidants of that block, the node waits for the operator instead of unwinding
-  it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. The opt-in
-  community bootstrap fallback (PR #188, not merged yet) expects the longer chain to win after a
-  partition; with this change that switch is an operator decision too.
+  it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. After a
+  partition with the opt-in community bootstrap fallback, the community side holds the fork in the
+  same way and its operator decides (see "Community bootstrap fallback").
 
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
   with a request that takes exactly as long as the others wait for its stage-3. Depending on a few
