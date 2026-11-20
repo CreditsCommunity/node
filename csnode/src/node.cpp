@@ -2611,7 +2611,13 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
 }
 
 void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
-    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    // while FORK HELD the replies bring the other chain's blocks again and again (see PoolSynchronizer)
+    if (blockChain_.forkHeld()) {
+        csdebug() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    }
+    else {
+        csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    }
     // the blocks of this reply come from `sender`: named in the fork record should the node refuse one
     blockChain_.setSyncSource(sender, poolSynchronizer_->announcedSequence(sender));
     struct ClearSource {

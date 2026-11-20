@@ -351,6 +351,7 @@ public:
     void test_setLastBlock(const csdb::Pool& block) { deferredBlock_ = block; lastSequence_ = block.sequence(); }
     // let the episode end as if a block above the reference had been recorded
     void test_onHeadAdvanced() { onHeadAdvanced(); checkApprovedBranch(); }
+    bool test_recordForkHeld(const char* reason) { return recordForkHeld(reason); }
     void test_setSelectionUnfinished(const csdb::PoolHash& lastPrev) { selectionFinished_ = false; lastPrevHash_ = lastPrev; antiForkMode_ = true; emittingRequest_ = 1; }
     bool test_selectionFinished() const { return selectionFinished_; }
     bool test_antiForkMode() const { return antiForkMode_; }
@@ -726,6 +727,8 @@ private:
     mutable std::mutex guardMutex_;
     std::optional<cs::forkguard::ForkRecord> forkRecord_;
     std::chrono::steady_clock::time_point lastDismissedLog_{};  // dismissed branch offered again (hourly)
+    // refused competing blocks: one line, then at most one a minute with the count since (guardMutex_)
+    cs::forkguard::RepeatedLine refusedLine_;
     // --resolve-fork's approved branch (exact fork point only), pending until the node is past it
     std::optional<cs::forkguard::ApprovedBranch> approvedBranch_;
     std::string resolveCompetingHash_;

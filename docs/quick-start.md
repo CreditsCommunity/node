@@ -444,6 +444,9 @@ describe that database: if you delete `db/` by hand to start again, delete these
 
 A block of another chain that the node refuses while its own chain goes on is not reported: FORK
 HELD appears only when the node stays at the same block after the refusal (two rounds, or a minute).
+While the fork is held, peers keep offering their chain: the node logs the refused blocks once a
+minute with a count ("N refused since the previous such line"), and its block requests and replies
+go to the debug log only.
 
 **1. Check before acting.** Compare the node's head (`Last written sequence`) and the block at the
 fork point with other nodes: the [monitor](https://monitor.credits.com), the

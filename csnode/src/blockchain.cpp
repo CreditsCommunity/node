@@ -2937,8 +2937,22 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
                 // last block uncertain (which would let a later replacement remove it). The node
                 // reports FORK HELD until its head moves on or the operator decides.
                 if (recordForkHeld("authority")) {
-                    cslog() << kLogPrefix << "competing block #" << poolSequence
-                            << " is not authenticated by this node's confidants, keep own last block";
+                    // a node holding a fork is offered the other chain's blocks over and over: one
+                    // line, then one a minute with the count (the FORK HELD detail line says the rest)
+                    uint64_t refused = 0;
+                    {
+                        std::lock_guard l(guardMutex_);
+                        refused = refusedLine_.onEvent(std::chrono::steady_clock::now());
+                    }
+                    if (refused > 0) {
+                        cslog() << kLogPrefix << "competing block #" << poolSequence
+                                << " is not authenticated by this node's confidants, keep own last block (" << refused
+                                << " refused since the previous such line)";
+                    }
+                    else {
+                        csdebug() << kLogPrefix << "competing block #" << poolSequence
+                                  << " is not authenticated by this node's confidants, keep own last block";
+                    }
                 }
                 else {
                     csdebug() << kLogPrefix << "competing block #" << poolSequence

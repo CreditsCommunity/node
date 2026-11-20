@@ -1246,8 +1246,12 @@ reorg_report() {
     reorg_reported=1
     reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
     echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
-    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
+    # one line per refusal, or (since the lines are throttled) one a minute with the count since the
+    # previous one
+    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } \
+        | sed -E 's/.*\(([0-9]+) refused since.*/\1/; t; s/.*/1/' | awk '{ n += $1 } END { print n + 0 }')
+    refused_lines=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
+    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants ($refused_lines log lines)"
     held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
     [ -z "$held" ] || echo "FORK HELD on: $held"
 }
