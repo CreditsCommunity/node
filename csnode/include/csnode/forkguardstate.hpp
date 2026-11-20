@@ -34,6 +34,11 @@ inline constexpr size_t kMaxBranchHashes = 256;
 // the folder of these files for a database path: its parent folder ("." for a relative "db")
 std::string stateDirFor(const std::string& dbPath);
 
+// a small file in dir written whole: to a temporary name first, flushed to the disk, then renamed over
+// the old one (the folder entry flushed too on POSIX), so a crash leaves either the old file or the new
+// one. False (nothing replaced) on any failure or an empty dir.
+bool writeFileAtomic(const std::string& dir, const char* name, const std::string& text);
+
 struct Episode {
     cs::Sequence highWater = 0;
 };
@@ -121,7 +126,7 @@ std::string utcTime(int64_t unixSeconds);
 std::string remedy(const ForkRecord& record);
 
 // the periodic FORK HELD detail line: since when, where the chains diverge, the refused peer and the
-// remedy
-std::string summary(const ForkRecord& record);
+// remedy. peerSide (optional): what the refused peer announces, e.g. "official 4.2.532"
+std::string summary(const ForkRecord& record, const std::string& peerSide = std::string());
 
 }  // namespace cs::forkguard

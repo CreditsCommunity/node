@@ -24,6 +24,7 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>
+#include <csnode/peerstatus.hpp>
 
 #include <lib/system/timer.hpp>
 
@@ -331,6 +332,12 @@ public:
         return nodeIdKey_;
     }
 
+    // no official node among the neighbours for 10 minutes, or among the trusted of the last 200
+    // rounds (log and status only; see csnode/peerstatus.hpp)
+    bool officialNodesGone() const {
+        return peerStatus_.officialGone();
+    }
+
     Level getNodeLevel() const {
         return myLevel_;
     }
@@ -480,6 +487,13 @@ private:
     // the fork guard's timer (every 5 s, queued to the processor thread): dismiss-fork, pending holds
     cs::Timer forkGuardTimer_;
     void onForkGuardTick();
+    // who keeps the network going (log and status only): fed by stored blocks, ticked by the fork
+    // guard's timer; the peers' kinds read again every 30 s
+    cs::peerstatus::Tracker peerStatus_;
+    std::chrono::steady_clock::time_point peerStatusRefreshed_{};
+    void onPeerStatusBlock(const csdb::Pool& pool);
+    void onPeerStatusBlockRemoved(const csdb::Pool& pool);
+    void onPeerStatusTick();
     // snapshot.json of a restored folder against the digest of the loaded caches (design 6.8);
     // false with exit code 4 on a mismatch
     bool verifyAtStart();
