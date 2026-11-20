@@ -19,7 +19,9 @@ void ForkLocator::start(const cs::PublicKey& peer, cs::Sequence upper, cs::Seque
     peer_ = peer;
     upper_ = upper;
     const cs::Sequence byDepth = upper > settings_.maxDepth ? upper - settings_.maxDepth : 0;
-    floor_ = std::min(std::max(floor, byDepth), upper);
+    // never block 0: both chains start from the same genesis block, and a peer may serve block 0 in a
+    // form that hashes differently (seen with the official node), which would read as a fork below it
+    floor_ = std::min(std::max({floor, byDepth, cs::Sequence{1}}), std::max(upper, cs::Sequence{1}));
     lo_.reset();
     hi_ = upper + 1;
     known_.clear();
