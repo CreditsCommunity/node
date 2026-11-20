@@ -31,6 +31,8 @@ const std::string DEFAULT_PATH_TO_PRIVATE_KEY = "NodePrivate.txt";
 const uint32_t DEFAULT_MIN_NEIGHBOURS = Neighbourhood::kMinNeighbours;
 const uint32_t DEFAULT_MAX_NEIGHBOURS = Neighbourhood::kMaxNeighbours;
 const uint64_t DEFAULT_MAX_UNCORRECTED_BLOCK = 0;
+// keep in step with Consensus::MaxAutoRollbackDepth (solver/include/solver/consensus.hpp)
+const uint64_t DEFAULT_MAX_AUTO_ROLLBACK = 100;
 const uint32_t DEFAULT_CONNECTION_BANDWIDTH = 1 << 19;
 const uint32_t DEFAULT_OBSERVER_WAIT_TIME = 5 * 60 * 1000;  // ms
 const uint32_t DEFAULT_ROUND_ELAPSE_TIME = 1000 * 60; // ms
@@ -327,6 +329,23 @@ public:
         return maxUncorrectedBlock_;
     }
 
+    // longest-chain guard: the most own confirmed blocks the node will roll back automatically when it
+    // adopts a competing chain during sync, before it stops and waits for the operator.
+    uint64_t maxAutoRollbackDepth() const {
+        return maxAutoRollbackDepth_;
+    }
+
+    // longest-chain guard override: accept a deliberate deep switch without the depth bound (for one
+    // completed rollback episode; then it is off until the node restarts).
+    bool allowDeepRollback() const {
+        return allowDeepRollback_;
+    }
+
+    // --resolve-fork: truncate the chain to the fork point recorded in fork-held.json, then stop
+    bool resolveFork() const {
+        return resolveFork_;
+    }
+
     bool traverseNAT() const {
         return traverseNAT_;
     }
@@ -395,6 +414,9 @@ public:
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
     // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
     static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
+    // the [params] keys of the bound on automatic chain reorganisations: max_auto_rollback (default
+    // DEFAULT_MAX_AUTO_ROLLBACK, 0 = no depth bound) and allow_deep_rollback (default false)
+    static void readRollbackGuardSettings(const boost::property_tree::ptree& params, uint64_t& maxDepth, bool& allowDeep);
 private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
@@ -430,6 +452,9 @@ private:
     bool restrictNeighbours_ = false;
     uint64_t connectionBandwidth_ = DEFAULT_CONNECTION_BANDWIDTH;
     uint64_t maxUncorrectedBlock_ = DEFAULT_MAX_UNCORRECTED_BLOCK;
+    uint64_t maxAutoRollbackDepth_ = DEFAULT_MAX_AUTO_ROLLBACK;
+    bool allowDeepRollback_ = false;
+    bool resolveFork_ = false;
     bool symmetric_ = false;
 
     EndpointData hostAddressEp_;

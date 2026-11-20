@@ -13,6 +13,7 @@
 #include <csnode/blockhashes.hpp>
 #include <csnode/blockverifier.hpp>
 #include <csnode/caches_serialization_manager.hpp>
+#include <csnode/forkguardstate.hpp>
 #include <csnode/snapshot_builder.hpp>
 #include <csnode/statedigest.hpp>
 #include <lib/system/logger.hpp>
@@ -334,6 +335,8 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
     }
     syncPath(nodeDir / "snapshot.json", false);
     syncPath(nodeDir, true);
+    // the bound on automatic reorganisations kept its files for the database this one replaces
+    cs::forkguard::clearAll(cs::forkguard::stateDirFor(dbPath.string()));
     result.ok = true;
     return result;
 }

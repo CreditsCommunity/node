@@ -81,6 +81,8 @@ public:
         // a quick start asked to read from a block after the last one stored: its checkpoint is
         // ahead of the blocks on disk
         StartAfterLastBlock = 7,
+        // --resolve-fork: the block at the requested top is not the one recorded (set_truncate_check)
+        TruncateMismatch = 8,
         UnknownError = 255,
     };
 
@@ -152,6 +154,11 @@ public:
      * In case of fail the error info can be received with methods:  \ref last_error,
      * \ref last_error_message, \ref db_last_error() and \ref db_last_error_message()
      */
+    // The next open() with a new blockchain top (--set-bc-top) cuts the chain only if the stored block
+    // at that top has this hash; otherwise it removes nothing and fails with TruncateMismatch. An
+    // empty hash (the default) checks nothing. Used by --resolve-fork.
+    void set_truncate_check(const PoolHash& expectedTopHash);
+
     // dbBackend: "berkeleydb" (default), "rocksdb", or "lmdb" in <path>/lmdb, whose removed blocks
     // LMDB reuses the space of (pruned storage)
     bool open(const ::std::string& path_to_base = ::std::string{},

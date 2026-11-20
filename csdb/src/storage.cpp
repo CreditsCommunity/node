@@ -218,13 +218,27 @@ private:
     > PoolCache;
     PoolCache pools_cache;
     static const size_t cacheSize = 50;
+    // set_truncate_check(): the hash the block at the new blockchain top must have
+    PoolHash truncate_expected_hash;
 
+    // the cache keeps one pool per sequence and per hash: a pool saved at a sequence whose previous
+    // pool was removed (a chain reorganisation) replaces the cached one, instead of being refused by
+    // the unique index and leaving the removed pool to be returned by pool_load(sequence)
     void pools_cache_insert(const cs::Sequence& seq, const PoolHash &hash, const Pool &pool) {
-        if (pools_cache.size() == cacheSize) {
+        pools_cache_erase(seq, hash);
+        if (pools_cache.size() >= cacheSize) {
             auto random = pools_cache.begin();
             pools_cache.erase(random);
         }
         pools_cache.insert({seq, hash, pool});
+    }
+
+    // forget a pool removed from the top of the chain (by sequence and by hash)
+    void pools_cache_erase(const cs::Sequence& seq, const PoolHash &hash) {
+        pools_cache.get<PoolElement::bySequence>().erase(seq);
+        if (!hash.is_empty()) {
+            pools_cache.get<PoolElement::byHash>().erase(hash);
+        }
     }
 
     friend class ::csdb::Storage;
@@ -465,6 +479,10 @@ Storage::WeakPtr Storage::weak_ptr() const noexcept {
     return d;
 }
 
+void Storage::set_truncate_check(const PoolHash& expectedTopHash) {
+    d->truncate_expected_hash = expectedTopHash;
+}
+
 Storage::Error Storage::last_error() const {
     return last_error_map(d.get()).last_error_;
 }
@@ -537,6 +555,22 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     }
 
     if (opt.newBlockchainTop != cs::kWrongSequence) {
+        if (!d->truncate_expected_hash.is_empty()) {
+            const PoolHash expected = d->truncate_expected_hash;
+            d->truncate_expected_hash = PoolHash{};
+            cs::Bytes topBinary;
+            PoolHash stored;
+            if (d->db->get(static_cast<uint32_t>(opt.newBlockchainTop), &topBinary)) {
+                stored = csdb::Pool::hash_from_binary(std::move(topBinary));
+            }
+            if (stored != expected) {
+                d->set_last_error(TruncateMismatch, "block %llu is %s, not the recorded %s: nothing removed",
+                                  static_cast<unsigned long long>(opt.newBlockchainTop),
+                                  stored.is_empty() ? "not stored" : stored.to_string().c_str(),
+                                  expected.to_string().c_str());
+                return false;
+            }
+        }
         auto seqToRemove = static_cast<uint32_t>(opt.newBlockchainTop + 1);
         auto seqLast = seqToRemove;
         {
@@ -1068,6 +1102,7 @@ Pool Storage::pool_remove_last() {
     bool found = write_queue_pop(res);
 
     if (found) {
+        d->pools_cache_erase(res.sequence(), res.hash());
         std::unique_lock<std::mutex> lock(d->data_lock);
         --d->count_pool;
         d->last_hash = res.previous_hash();
@@ -1099,6 +1134,7 @@ Pool Storage::pool_remove_last() {
 
 	// error nearly impossible
 	/*bool ok =*/ d->db->remove(last_hash().to_binary());
+    d->pools_cache_erase(res.sequence(), res.hash());
 
     --d->count_pool;
     d->last_hash = res.previous_hash();
@@ -1134,6 +1170,7 @@ bool Storage::pool_remove_last_repair(cs::Sequence test_sequence, const csdb::Po
 	if (!write_queue_pop_last(test_hash, queued)) {
 		return false;
 	}
+	d->pools_cache_erase(test_sequence, test_hash);
 	if (queued) {
 		return true;
 	}
@@ -1198,6 +1235,7 @@ bool Storage::pool_remove_(cs::Sequence testSequence) {
     if (!write_queue_pop_last(testHash, queued)) {
         return false;
     }
+    d->pools_cache_erase(testSequence, testHash);
     if (queued) {
         return true;
     }

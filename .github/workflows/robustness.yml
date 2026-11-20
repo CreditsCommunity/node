@@ -121,7 +121,7 @@ jobs:
         with:
           name: testnet-node-${{ github.sha }}
           path: build/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
       # mixed nodes, as in testnet.yml: the even nodes run a node built from another ref
       - name: Build the node under comparison
@@ -182,7 +182,7 @@ jobs:
         with:
           name: testnet-node-alt-${{ github.sha }}
           path: build-alt/client/node
-          retention-days: 7
+          retention-days: ${{ github.ref_name == 'master' && 7 || 3 }}
 
   scenario:
     needs: build
@@ -608,4 +608,4 @@ jobs:
             testnet-run/resources.tsv
             testnet-run/resources-summary.txt
             testnet-run/sampler.log
-          retention-days: 14
+          retention-days: ${{ github.ref_name == 'master' && 14 || 3 }}

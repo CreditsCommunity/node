@@ -218,3 +218,204 @@ TEST(StorageWriter, RemovingTheLastQueuedBlockEndsTheFailure) {
     EXPECT_TRUE(db->has(pools[0].hash()));
     storage.close();
 }
+
+// A chain reorganisation below the deferred block: the node removes stored blocks and saves the
+// competing ones at the same sequences. pool_load(sequence) must then return the new blocks, not the
+// removed ones still held by the storage's read cache (the stale block made the next consistency
+// check fail for ever, and the node stopped two blocks above the fork point).
+namespace {
+
+void checkReplacedBlocksAreLoaded(bool asyncWrites) {
+    auto db = std::make_shared<MemoryDb>();
+    csdb::Storage storage;
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    opt.writeBatchSize = 100;
+    opt.asyncWrites = asyncWrites;
+    ASSERT_TRUE(storage.open(opt));
+
+    const auto own = chain(5);
+    for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+    for (cs::Sequence s = 0; s < 5; ++s) ASSERT_EQ(storage.pool_load(s).hash(), own[s].hash());
+
+    // unwind to #2, then the competing #3 and #4
+    ASSERT_EQ(storage.pool_remove_last().hash(), own[4].hash());
+    ASSERT_EQ(storage.pool_remove_last().hash(), own[3].hash());
+    std::vector<csdb::Pool> other;
+    csdb::PoolHash prev = own[2].hash();
+    for (cs::Sequence s = 3; s < 5; ++s) {
+        csdb::Pool p(prev, s);
+        p.add_user_field(1, std::string(100, static_cast<char>('z' - s)));
+        ASSERT_TRUE(p.compose());
+        ASSERT_NE(p.hash(), own[s].hash());
+        prev = p.hash();
+        other.push_back(p);
+        ASSERT_TRUE(storage.pool_save(p));
+    }
+
+    EXPECT_EQ(storage.pool_load(3).hash(), other[0].hash());
+    EXPECT_EQ(storage.pool_load(4).hash(), other[1].hash());
+    EXPECT_EQ(storage.pool_load(4).previous_hash(), storage.pool_load(3).hash());
+    EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+    EXPECT_FALSE(storage.pool_load(own[4].hash()).is_valid());
+    storage.close();
+}
+
+}  // namespace
+
+TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnes) {
+    checkReplacedBlocksAreLoaded(false);
+}
+
+TEST(StorageWriter, BlocksSavedAfterAnUnwindReplaceTheCachedOnesAsync) {
+    checkReplacedBlocksAreLoaded(true);
+}
+
+// The recovery path of BlockChain::removeLastBlock(): when the removed block cannot be read back, the
+// node removes it with pool_remove_last_repair(). That path must forget the block in the read cache
+// too, and a node restarted afterwards (the storage rescan fills the cache again) must read the blocks
+// saved after the removal, not the removed ones.
+namespace {
+
+csdb::Pool competing(const csdb::PoolHash& prev, cs::Sequence seq) {
+    csdb::Pool p(prev, seq);
+    p.add_user_field(1, std::string(100, static_cast<char>('z' - seq)));
+    EXPECT_TRUE(p.compose());
+    return p;
+}
+
+void checkRepairedBlockIsForgotten(bool asyncWrites) {
+    auto db = std::make_shared<MemoryDb>();
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    opt.writeBatchSize = 100;
+    opt.asyncWrites = asyncWrites;
+
+    const auto own = chain(4);
+    csdb::Pool other;
+    {
+        csdb::Storage storage;
+        ASSERT_TRUE(storage.open(opt));
+        for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+        ASSERT_TRUE(storage.flush());
+        ASSERT_EQ(storage.pool_load(3).hash(), own[3].hash());    // #3 now in the read cache
+
+        ASSERT_TRUE(storage.pool_remove_last_repair(3, own[3].hash()));
+        EXPECT_EQ(storage.size(), 3u);
+        EXPECT_EQ(storage.last_hash(), own[2].hash());
+        EXPECT_FALSE(storage.pool_load(3).is_valid()) << "the repaired block is still read from the cache";
+        EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+
+        other = competing(own[2].hash(), 3);
+        ASSERT_NE(other.hash(), own[3].hash());
+        ASSERT_TRUE(storage.pool_save(other));
+        EXPECT_EQ(storage.pool_load(3).hash(), other.hash());
+        ASSERT_TRUE(storage.flush());
+        storage.close();
+    }
+
+    // restart: the rescan reads every stored block and fills the cache from the database
+    csdb::Storage storage;
+    ASSERT_TRUE(storage.open(opt));
+    EXPECT_EQ(storage.size(), 4u);
+    EXPECT_EQ(storage.last_hash(), other.hash());
+    EXPECT_EQ(storage.pool_load(3).hash(), other.hash());
+    EXPECT_EQ(storage.pool_load(other.hash()).sequence(), 3u);
+    EXPECT_FALSE(storage.pool_load(own[3].hash()).is_valid());
+    storage.close();
+}
+
+}  // namespace
+
+TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacement) {
+    checkRepairedBlockIsForgotten(false);
+}
+
+TEST(StorageWriter, RepairedLastBlockIsForgottenAndRestartReadsItsReplacementAsync) {
+    checkRepairedBlockIsForgotten(true);
+}
+
+// --resolve-fork cuts the chain through the --set-bc-top path, but only when the stored block at the
+// fork point is the recorded one: then every block above it goes and the fork point stays the last
+// block; otherwise nothing is removed and the open fails with TruncateMismatch.
+TEST(StorageWriter, ResolveForkTruncatesExactlyAtTheRecordedForkPoint) {
+    auto db = std::make_shared<MemoryDb>();
+    const auto own = chain(10);
+    {
+        csdb::Storage storage;
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        ASSERT_TRUE(storage.open(opt));
+        for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+        ASSERT_TRUE(storage.flush());
+        storage.close();
+    }
+    ASSERT_EQ(db->stored(), 10u);
+
+    // a record that no longer matches (another hash at #6): refused, nothing removed
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[5].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 6;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(db->stored(), 10u);
+    }
+    // a fork point that is not stored at all: refused too
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[6].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 12;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(db->stored(), 10u);
+    }
+    // a fork point below the oldest stored block (pruned): refused too
+    {
+        auto pruned = std::make_shared<MemoryDb>();
+        {
+            csdb::Storage storage;
+            csdb::Storage::OpenOptions opt;
+            opt.db = pruned;
+            ASSERT_TRUE(storage.open(opt));
+            for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+            ASSERT_TRUE(storage.flush());
+            storage.close();
+        }
+        ASSERT_TRUE(pruned->remove(own[1].hash().to_binary()));
+        csdb::Storage storage;
+        storage.set_truncate_check(own[1].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = pruned;
+        opt.newBlockchainTop = 1;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(pruned->stored(), 9u);
+    }
+    // the recorded block: everything above #6 goes, #6 stays
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(own[6].hash());
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 6;
+        ASSERT_TRUE(storage.open(opt));
+        storage.close();
+    }
+    EXPECT_EQ(db->stored(), 7u);
+    for (cs::Sequence s = 0; s <= 6; ++s) EXPECT_TRUE(db->has(own[s].hash())) << s;
+    for (cs::Sequence s = 7; s < 10; ++s) EXPECT_FALSE(db->has(own[s].hash())) << s;
+
+    // and the storage opens normally afterwards, ending at the fork point
+    csdb::Storage storage;
+    csdb::Storage::OpenOptions opt;
+    opt.db = db;
+    ASSERT_TRUE(storage.open(opt));
+    EXPECT_EQ(storage.size(), 7u);
+    EXPECT_EQ(storage.last_hash(), own[6].hash());
+    storage.close();
+}

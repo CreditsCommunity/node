@@ -58,7 +58,33 @@ case "${1:-}" in
         # configuration or database
         [ -f keys/NodePrivate.txt ] || { log "no $DATA/keys/NodePrivate.txt: copy NodePrivate.txt and NodePublic.txt into the keys folder (~/.credits/keys on the host), owned by uid 1000, then run decrypt-key again"; exit 2; }
         exec "$OPT/node" --decryptkey --db-path db --public-key-file keys/NodePublic.txt --private-key-file keys/NodePrivate.txt ;;
-    *) log "unknown command '$1': the only command is decrypt-key (docker compose run --rm node decrypt-key)"; exit 2 ;;
+    resolve-fork|set-bc-top)
+        # a node that reports FORK HELD, the other chain being the right one (check with other nodes or
+        # the monitor first): resolve-fork cuts the chain at the fork point the node recorded in
+        # fork-held.json (only if the block there is still the recorded one), set-bc-top <sequence> at a
+        # block given by hand; the node then exits and syncs from there at the next start. Stop the
+        # container first: docker compose stop && docker compose run --rm node resolve-fork
+        [ -f config.ini ] && [ -d db ] || { log "no config.ini or db in $DATA: nothing to cut"; exit 2; }
+        if [ "$1" = resolve-fork ]; then
+            node_args=(--resolve-fork)
+        else
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || { log "set-bc-top needs the sequence of the last block to keep: docker compose run --rm node set-bc-top <sequence>"; exit 2; }
+            node_args=(--set-bc-top "$2")
+        fi
+        mkdir -p log
+        rc=0
+        "$OPT/node" --db-path db --config-file config.ini --public-key-file keys/NodePublic.txt \
+            --private-key-file keys/NodePrivate.txt "${node_args[@]}" || rc=$?
+        [ "$rc" = 0 ] && log "done: start the node again with docker compose up -d" || log "$1 failed (exit $rc): nothing to do or nothing removed, see the lines above"
+        exit "$rc" ;;
+    dismiss-fork)
+        # a node that reports FORK HELD, this node's chain being the right one: the node keeps refusing
+        # that branch and stops reporting it. A running node picks the file up within a few seconds
+        # (docker compose exec node touch /data/dismiss-fork does the same); a stopped one at its start
+        touch dismiss-fork
+        log "dismiss-fork left in $DATA: the node dismisses the held fork within a few seconds, or at its next start"
+        exit 0 ;;
+    *) log "unknown command '$1': the commands are decrypt-key, resolve-fork, set-bc-top <sequence> and dismiss-fork (docker compose run --rm node <command>)"; exit 2 ;;
 esac
 # a data directory with a database but no config.ini (removed by hand): without CREDITS_DB_BACKEND,
 # config.ini is written for the backend already there, not for the default
@@ -74,7 +100,8 @@ fi
 rm -rf .restore-tmp .digest-before
 if [ -e .restore-incomplete ]; then
     log "an interrupted snapshot restore of an earlier release left part of a snapshot: removing it"
-    rm -rf db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified
+    rm -rf db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified \
+        reorg-episode.json fork-held.json resolve-approved.json
     rm -f .restore-incomplete
 fi
 
@@ -149,7 +176,7 @@ if [ "$RESET" = 1 ] && { has_data || [ -e caches ] || [ -e qs ]; }; then
     old=old-$(date -u +%Y%m%d-%H%M%S)
     mkdir "$old"
     for p in db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified snapshot.mismatch snapshot.sources.json \
-             snapshot-tmp snapshot-download snapshot .storage; do
+             snapshot-tmp snapshot-download snapshot .storage reorg-episode.json fork-held.json resolve-approved.json; do
         [ ! -e "$p" ] || mv "$p" "$old/"
     done
     log "CREDITS_RESET=1: the previous state is in $DATA/$old; remove CREDITS_RESET from .env"

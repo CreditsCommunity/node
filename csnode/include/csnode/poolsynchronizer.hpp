@@ -30,6 +30,8 @@ public:
     void stop();
 
     cs::Sequence getMaxNeighbourSequence();
+    // the last sequence this neighbour announced above ours, 0 if none
+    cs::Sequence announcedSequence(const cs::PublicKey& key) const;
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
     void getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg);
 

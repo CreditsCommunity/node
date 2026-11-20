@@ -55,6 +55,8 @@ for p in db caches qs roundstat.dat smartcontracts.dat; do
     [ ! -e "$tmp/x/$p" ] || { rm -rf "${data:?}/$p"; mv "$tmp/x/$p" "$data/$p"; }
 done
 mv "$tmp/latest.json" "$data/snapshot.json"
+# the node's files about the database this one replaces (rollback bound, FORK HELD)
+rm -f "$data/reorg-episode.json" "$data/fork-held.json" "$data/resolve-approved.json"
 rm -f "$data/.restore-incomplete"
 rm -rf "$tmp"
 echo "snapshot restored: block $seq from $file"

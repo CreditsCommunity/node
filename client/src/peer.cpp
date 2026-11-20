@@ -144,7 +144,7 @@ bool Peer::onInit(const char*) {
 }
 
 bool Peer::onRun(const char*) {
-    if (vm_.count(cmdline::argSetBCTop) == 0) {
+    if (vm_.count(cmdline::argSetBCTop) == 0 && vm_.count(cmdline::argResolveFork) == 0) {
         cslog() << "Running Node";
         node_->run();
     }
