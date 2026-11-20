@@ -68,6 +68,17 @@ struct ForkRecord {
     cs::Sequence forkPoint = 0;
     std::string forkPointHash;
     bool forkPointExact = false;
+    // the search for the last common block (ForkLocator) while FORK HELD: located is true once it has
+    // an answer, from the upper bound forkPoint had before (upperBound), asking the peer locatedWith.
+    // Either the fork point is now exact (forkPointExact; the competing block is still the one first
+    // refused, so no approval follows from it), or deeper: the chains already differ at block
+    // `deeperThan`, the lowest one searched, and the fork point is below it (forkPoint stays the
+    // upper bound)
+    bool located = false;
+    bool deeper = false;
+    cs::Sequence upperBound = 0;
+    cs::Sequence deeperThan = 0;
+    std::string locatedWith;
     cs::Sequence competingSeq = 0; // the refused block (0: not known, e.g. a bad-hash reply)
     std::string competingHash;
     std::string peerKey;           // base58, empty when not known
@@ -81,6 +92,10 @@ struct ForkRecord {
     std::string dismissedHash;
     std::vector<std::string> branchHashes;
 
+    // "exact", "deeper" (below deeperThan) or "upper bound"
+    std::string forkPointStatus() const {
+        return forkPointExact ? "exact" : (deeper ? "deeper" : "upper bound");
+    }
     bool hasDismissal() const {
         return !branchHashes.empty();
     }

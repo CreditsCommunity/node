@@ -24,6 +24,7 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>
+#include <csnode/forklocator.hpp>
 
 #include <lib/system/timer.hpp>
 
@@ -480,6 +481,14 @@ private:
     // the fork guard's timer (every 5 s, queued to the processor thread): dismiss-fork, pending holds
     cs::Timer forkGuardTimer_;
     void onForkGuardTick();
+    // FORK HELD with only an upper bound of the fork point: the search for the last common block with
+    // the peer of the refused block (read-only; processor thread), for the record forkLocatorFor_;
+    // after a failed search, a new one starts at forkLocatorRetryAt_
+    std::unique_ptr<cs::forkguard::ForkLocator> forkLocator_;
+    std::optional<cs::forkguard::ForkRecord> forkLocatorFor_;
+    std::chrono::steady_clock::time_point forkLocatorRetryAt_{};
+    void tickForkLocator();
+    void startForkLocator(const cs::forkguard::ForkRecord& record);
     // snapshot.json of a restored folder against the digest of the loaded caches (design 6.8);
     // false with exit code 4 on a mismatch
     bool verifyAtStart();

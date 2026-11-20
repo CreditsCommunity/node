@@ -333,6 +333,14 @@ public:
     std::optional<cs::forkguard::ApprovedBranch> approvedBranch() const {
         return approvedBranch_;
     }
+    // The search for the last common block (cs::forkguard::ForkLocator, driven by the node while FORK
+    // HELD) has an answer for the held record `expected` (the record it searched for; nothing is
+    // changed if the record changed since). `located` is the exact fork point (`hash` is our stored
+    // hash there, checked again here), or, with `deeper`, the lowest block searched, where the chains
+    // already differ. Only the record (fork-held.json) changes: nothing is unwound, nothing approved.
+    // True if the record was updated.
+    bool applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located, const std::string& hash,
+                               bool deeper, const std::string& peerKey);
     // init() refused to truncate: the stored block at the requested sequence has another hash
     bool truncationRefused() const {
         return truncationRefused_;
@@ -808,6 +816,9 @@ private:
     }
 
     bool tryQuickStart(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
+    // after a cut at `top` (--set-bc-top, --resolve-fork): the block hashes and the quick-start
+    // checkpoints above it go, so that the next start finds nothing beyond the stored blocks
+    void dropStateAboveTop(cs::Sequence top, cs::CachesSerializationManager* serializationManPtr);
     bool bindSerializationManToCaches(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
 
     cs::CachesSerializationManager* serializationManPtr_ = nullptr;

@@ -652,6 +652,62 @@ bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Byt
     return onChain.empty() || onChain == head.head_hash;
 }
 
+size_t dropCheckpointsAbove(const std::filesystem::path& root, cs::Sequence top) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) {
+        return 0;
+    }
+    std::vector<fs::path> victims;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        // "<n>" and its crash-recovery backup "<n>.prev" (restored as "<n>" at the next start when
+        // "<n>" is missing); ".tmp" and ".bad" are never loaded
+        std::string name = entry.path().filename().string();
+        const std::string prevExt = ".prev";
+        if (name.size() > prevExt.size() && name.compare(name.size() - prevExt.size(), prevExt.size(), prevExt) == 0) {
+            name.resize(name.size() - prevExt.size());
+        }
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            continue;
+        }
+        cs::Sequence version = 0;
+        try {
+            version = static_cast<cs::Sequence>(std::stoull(name));
+        }
+        catch (...) {
+            continue;
+        }
+        const auto head = readCheckpointHead(entry.path());
+        const bool above = head.has_value() ? (head->sequence > top || version > top)
+                                            : (version > top || version == 0);
+        if (above) {
+            victims.push_back(entry.path());
+        }
+    }
+    size_t dropped = 0;
+    for (const auto& path : victims) {
+        fs::remove_all(path, ec);
+        if (ec) {
+            cswarning() << "CachesSerializationManager: cannot remove " << path << " (above the new top " << top
+                        << "): " << ec.message();
+            continue;
+        }
+        ++dropped;
+        cslog() << "CachesSerializationManager: removed " << path.string() << ": it continues above the new top " << top;
+    }
+    if (dropped > 0) {
+        fsyncDir(root);
+    }
+    return dropped;
+}
+
+size_t CachesSerializationManager::dropAbove(cs::Sequence top) {
+    return dropCheckpointsAbove(pImpl_->kQuickStartRoot, top);
+}
+
 bool CachesSerializationManager::load() {
     return load(ChainVerifier{});
 }

@@ -246,6 +246,15 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
     tree.put("fork_point", r.forkPoint);
     tree.put("fork_point_hash", r.forkPointHash);
     tree.put("fork_point_exact", r.forkPointExact);
+    tree.put("fork_point_status", r.forkPointStatus());
+    if (r.located) {
+        tree.put("fork_point_located", true);
+        tree.put("fork_point_upper_bound", r.upperBound);
+        tree.put("fork_point_located_with", r.locatedWith);
+        if (r.deeper) {
+            tree.put("fork_point_below", r.deeperThan);
+        }
+    }
     tree.put("competing_block", r.competingSeq);
     tree.put("competing_hash", r.competingHash);
     tree.put("peer_key", r.peerKey);
@@ -283,6 +292,13 @@ std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt) 
         r.forkPoint = tree->get<cs::Sequence>("fork_point");
         r.forkPointHash = tree->get<std::string>("fork_point_hash", "");
         r.forkPointExact = tree->get<bool>("fork_point_exact", false);
+        r.located = tree->get<bool>("fork_point_located", false);
+        r.upperBound = tree->get<cs::Sequence>("fork_point_upper_bound", 0);
+        r.locatedWith = tree->get<std::string>("fork_point_located_with", "");
+        if (const auto below = tree->get_optional<cs::Sequence>("fork_point_below")) {
+            r.deeper = r.located && !r.forkPointExact;
+            r.deeperThan = *below;
+        }
         r.competingSeq = tree->get<cs::Sequence>("competing_block", 0);
         r.competingHash = tree->get<std::string>("competing_hash", "");
         r.peerKey = tree->get<std::string>("peer_key", "");
@@ -342,6 +358,14 @@ std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* erro
         }
         return std::nullopt;
     }
+    if (record->deeper) {
+        if (error) {
+            *error = "the other chain forks below block #" + std::to_string(record->deeperThan) + " (the chains differ "
+                     "there already; the node searched down to it): nothing removed. Find the last block both chains "
+                     "share with the monitor or other nodes and cut there with --set-bc-top <sequence>";
+        }
+        return std::nullopt;
+    }
     if (record->forkPointHash.empty()) {
         if (error) {
             *error = "the fork record has no hash for block #" + std::to_string(record->forkPoint) +
@@ -367,6 +391,15 @@ std::string utcTime(int64_t unixSeconds) {
 
 std::string remedy(const ForkRecord& r) {
     std::ostringstream os;
+    if (r.deeper) {
+        os << "first check the chain with other nodes or the monitor. If this node's chain is the right one: create "
+           << "the file " << kDismissTrigger << " next to the db folder (native: touch " << kDismissTrigger << " in the "
+           << "node folder; Docker: docker compose exec node touch /data/" << kDismissTrigger << "). If the other chain "
+           << "is the right one: the chains differ already at block #" << r.deeperThan << ", so --resolve-fork removes "
+           << "nothing; stop the node, find the last block both chains share and run once --set-bc-top <that block> "
+           << "(Docker: docker compose run --rm node set-bc-top <that block>), then start it as usual.";
+        return os.str();
+    }
     os << "first check the head and the block at #" << r.forkPoint << " with other nodes or the monitor. If this node's "
        << "chain is the right one: create the file " << kDismissTrigger << " next to the db folder (native: touch "
        << kDismissTrigger << " in the node folder; Docker: docker compose exec node touch /data/" << kDismissTrigger
@@ -390,9 +423,18 @@ std::string summary(const ForkRecord& r) {
     else {
         os << "a competing chain asks to unwind beyond the automatic bound (reference head #" << r.highWater << ")";
     }
-    os << ". Fork point: block #" << r.forkPoint << (r.forkPointExact ? "" : " or lower");
-    if (!r.forkPointHash.empty()) {
-        os << " (" << r.forkPointHash << ")";
+    if (r.deeper) {
+        os << ". Fork point: below block #" << r.deeperThan << " (the chains differ there already; searched from #"
+           << r.upperBound << ")";
+    }
+    else {
+        os << ". Fork point: block #" << r.forkPoint << (r.forkPointExact ? "" : " or lower");
+        if (!r.forkPointHash.empty()) {
+            os << " (" << r.forkPointHash << ")";
+        }
+        if (r.located && r.forkPointExact) {
+            os << ", the last common block, located from #" << r.upperBound;
+        }
     }
     os << "; our head #" << r.ourHead;
     if (r.competingSeq != 0) {

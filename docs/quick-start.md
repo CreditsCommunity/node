@@ -461,10 +461,26 @@ fork point with other nodes: the [monitor](https://monitor.credits.com), the
 `--resolve-fork` refuses, and removes nothing, when there is no fork record or when the block at
 the recorded fork point is no longer the recorded one. To cut the chain at a block of your choice
 instead, use `--set-bc-top <sequence>` (the last block to keep) with the node stopped; Docker:
-`docker compose run --rm node set-bc-top <sequence>`. If the detail line says
-`Fork point: block #N or lower`, the node knows only an upper bound: should the other chain fork
-lower, the node reports FORK HELD again with a lower fork point. Then find the last common block
-with the monitor or other nodes and cut there with `--set-bc-top`.
+`docker compose run --rm node set-bc-top <sequence>`.
+
+**The fork point.** `--resolve-fork` now finds the last common block itself; the manual
+`--set-bc-top` remains. When the node first refuses, it may know only an upper bound of the fork
+point (`Fork point: block #N or lower`), for example after a long partition. While FORK HELD it
+then asks the peer of the refused block for a few of its blocks below that bound, compares their
+hashes with its own and narrows down to the last block both chains share. This only reads: nothing
+is stored, removed or approved, and a peer that answers wrongly can only make the search fail. After
+a minute or two the detail line says `Fork point: block #M (...), the last common block, located
+from #N`, and `fork-held.json` has `"fork_point_status": "exact"`: `--resolve-fork` then cuts there in
+one run. The search covers 20 times `max_auto_rollback` blocks (2,000 by default, between 1,000 and
+10,000). If the chains differ already at its lowest block, the line says `Fork point: below block
+#L` (`"fork_point_status": "deeper"`) and `--resolve-fork` removes nothing: find the last common
+block with the monitor or other nodes and cut there with `--set-bc-top`. Run `--resolve-fork` after
+the line shows the exact point; run before, it cuts at the upper bound, and if the other chain forks
+lower the node reports FORK HELD again with a lower fork point.
+
+After a cut (`--resolve-fork` or `--set-bc-top`) the node also removes the quick-start checkpoints
+above the new last block, so the next start uses an older checkpoint or reads the chain from the
+start, and does not stop on a checkpoint that no longer matches the blocks on disk.
 
 **Last resort.** `allow_deep_rollback=true` in `[params]` of `config.ini` (or the
 `CS_ALLOW_DEEP_ROLLBACK` environment variable) lets the node follow any competing chain without the

@@ -41,6 +41,13 @@ std::optional<CheckpointHead> readCheckpointHead(const std::filesystem::path& di
 
 bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Bytes(cs::Sequence)>& chainHashAt);
 
+// After the chain was cut at `top` (--set-bc-top, --resolve-fork): removes from the quick-start
+// folder `root` every checkpoint that continues above `top` (its head, or its name for a periodic
+// checkpoint without head.bin, is above it; a qs/0 without head.bin cannot be placed and goes too),
+// with its .prev backup. The next start then quick-starts from the highest checkpoint at or below the
+// new top, or slow-starts. Returns the number of checkpoints removed.
+size_t dropCheckpointsAbove(const std::filesystem::path& root, cs::Sequence top);
+
 class CachesSerializationManager {
 public:
     CachesSerializationManager();
@@ -81,6 +88,8 @@ public:
     void setCompletedFromGenesis();
     bool isLoadedFromCompletedSnapshot() const;
     void pruneCheckpoints(size_t keep);
+    // dropCheckpointsAbove() on this node's quick-start folder
+    size_t dropAbove(cs::Sequence top);
 
 private:
     struct Impl;

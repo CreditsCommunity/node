@@ -273,6 +273,7 @@ bool BlockChain::init(
 
     if (newBlockchainTop != cs::kWrongSequence) {
         if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
+        dropStateAboveTop(newBlockchainTop, serializationManPtr);
         // the operator truncated: the rollback episode and FORK HELD end here
         const std::string dir = cs::forkguard::stateDirFor(path);
         cs::forkguard::clearForkRecord(dir);
@@ -355,6 +356,28 @@ bool BlockChain::init(
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
     return true;
+}
+
+// The chain was cut at `top` at start-up (--set-bc-top, --resolve-fork): the storage no longer has
+// the blocks above it, so neither may what describes them. The block hashes databases forget them
+// (else a checkpoint above the top would still look "on this chain"), and every quick-start
+// checkpoint above the top goes (the shutdown checkpoint qs/0 was saved at the old head: the next
+// start would load it and then stop, its blocks being gone). The next start quick-starts from the
+// highest checkpoint at or below the top, or slow-starts.
+void BlockChain::dropStateAboveTop(cs::Sequence top, cs::CachesSerializationManager* serializationManPtr) {
+    size_t hashes = 0;
+    if (blockHashes_) {
+        for (cs::Sequence seq = top + 1; blockHashes_->remove(seq); ++seq) {
+            ++hashes;
+        }
+        blockHashes_->flush();
+    }
+    size_t checkpoints = 0;
+    if (serializationManPtr != nullptr) {
+        checkpoints = serializationManPtr->dropAbove(top);
+    }
+    cslog() << kLogPrefix << "chain cut at #" << WithDelimiters(top) << ": " << hashes << " block hash(es) and "
+            << checkpoints << " quick-start checkpoint(s) above it removed";
 }
 
 bool BlockChain::isGood() const {
@@ -1100,6 +1123,52 @@ bool BlockChain::promotePendingHold(bool roundStarted) {
         return false;
     }
     holdFork(pendingHold_->record);
+    return true;
+}
+
+bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located,
+                                       const std::string& hash, bool deeper, const std::string& peerKey) {
+    // our block at the located point must still be the one the search compared (read before the lock:
+    // the hash lookups take the storage lock)
+    if (!deeper && (hash.empty() || located > lastSequence_.load() || getHashBySequence(located).to_string() != hash)) {
+        cswarning() << kLogPrefix << "fork point search: block #" << WithDelimiters(located)
+                    << " changed since the search compared it, the record is left as it was";
+        return false;
+    }
+    cs::forkguard::ForkRecord r;
+    {
+        std::lock_guard l(guardMutex_);
+        if (!forkRecord_.has_value() || !forkRecord_->held || forkRecord_->located ||
+            forkRecord_->sinceUnix != expected.sinceUnix || forkRecord_->forkPoint != expected.forkPoint ||
+            forkRecord_->competingHash != expected.competingHash) {
+            return false;  // another record (or none) by now: the answer is for a fork no longer held
+        }
+        forkRecord_->located = true;
+        forkRecord_->upperBound = forkRecord_->forkPoint;
+        forkRecord_->locatedWith = peerKey;
+        if (deeper) {
+            forkRecord_->deeper = true;
+            forkRecord_->deeperThan = located;
+        }
+        else {
+            forkRecord_->forkPoint = located;
+            forkRecord_->forkPointHash = hash;
+            forkRecord_->forkPointExact = true;
+        }
+        r = *forkRecord_;
+    }
+    cs::forkguard::saveForkRecord(guardStateDir_, r);
+    if (deeper) {
+        cserror() << kLogPrefix << "fork point search: the chains differ already at block #" << WithDelimiters(located)
+                  << ", " << (r.upperBound - located) << " blocks below the upper bound #" << WithDelimiters(r.upperBound)
+                  << ": the fork is deeper. --resolve-fork removes nothing; cut by hand with --set-bc-top";
+    }
+    else {
+        cswarning() << kLogPrefix << "fork point search: the last common block is #" << WithDelimiters(located) << " ("
+                    << hash << "), located from the upper bound #" << WithDelimiters(r.upperBound)
+                    << "; --resolve-fork now cuts there";
+    }
+    cserror() << kLogPrefix << cs::forkguard::summary(r);
     return true;
 }
 
