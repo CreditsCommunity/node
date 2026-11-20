@@ -48,8 +48,11 @@ struct Chains {
     std::string theirs(cs::Sequence s) const {
         return s <= fork ? common(s) : "P" + std::to_string(s);
     }
+    // verifiable: the node can verify the peer's first block after the fork point against its own
+    // confidants (false: e.g. a bootstrap block)
+    bool verifiable = true;
     Locator::PeerBlock peerBlock(cs::Sequence s) const {
-        return {s, theirs(s), s == 0 ? std::string{} : theirs(s - 1)};
+        return {s, theirs(s), s == 0 ? std::string{} : theirs(s - 1), verifiable && s > 0 && s <= fork + 1};
     }
 };
 
@@ -128,6 +131,7 @@ TEST(ForkLocator, FindsTheExactForkPoint) {
     EXPECT_EQ(h.run(), Status::Exact);
     EXPECT_EQ(loc.forkPoint(), 533u);
     EXPECT_EQ(loc.forkPointHash(), Chains::common(533));
+    EXPECT_TRUE(loc.verified());
     EXPECT_LE(h.requests.size(), 8u);
     for (const auto& r : h.requests) {
         EXPECT_LE(r.size(), h.settings.probesPerRequest);
@@ -388,14 +392,55 @@ cs::forkguard::ForkRecord heldRecord() {
 }
 }  // namespace
 
-// the record of a located fork point: exact (and --resolve-fork cuts there), or deeper (and
-// --resolve-fork removes nothing); both in fork-held.json and the detail line
+// a lying peer that reports a deeper fork point: it can send blocks of its own below the real fork,
+// chained and consistent, but it cannot make the block after its claimed point verify against our
+// confidants there: the point is found but not verified (a hint only), and a bootstrap-flagged block
+// after the point stays unverified too
+TEST(ForkLocator, LyingPeerReportingADeeperPointIsNotVerified) {
+    Harness h;
+    h.chains = {533, 931, 1500};
+    Chains fake = h.chains;
+    fake.fork = 300;  // the liar's chain parts from ours at #300
+    h.answer = [&](const std::vector<cs::Sequence>& seqs) {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            auto b = fake.peerBlock(s);
+            b.verified = false;  // its forged blocks never verify against our confidants
+            out.push_back(b);
+        }
+        return out;
+    };
+    auto& loc = h.make();
+    loc.start(key(7), 930, 0, h.now);
+    EXPECT_EQ(h.run(), Status::Exact);
+    EXPECT_EQ(loc.forkPoint(), 300u);
+    EXPECT_FALSE(loc.verified());
+
+    // an honest peer whose block after the fork point is a bootstrap block: located, not verified
+    Harness b;
+    b.chains = {533, 931, 1500};
+    b.chains.verifiable = false;
+    auto& boot = b.make();
+    boot.start(key(7), 930, 0, b.now);
+    EXPECT_EQ(b.run(), Status::Exact);
+    EXPECT_EQ(boot.forkPoint(), 533u);
+    EXPECT_FALSE(boot.verified());
+}
+
+// the record of a located fork point and what --resolve-fork does with it: a verified point is the
+// fork point and the cut goes there; an unverified one is a hint, the cut stays at the upper bound
+// unless the operator asks for it (--to-located); "deeper" is a hint as well
 TEST(ForkLocator, LocatedRecordAndResolvePlan) {
     TempFolder dir("record");
+    std::string error;
+
     auto r = heldRecord();
     r.located = true;
+    r.locatedVerified = true;
     r.upperBound = 930;
     r.locatedWith = "key";
+    r.locatedPoint = 533;
+    r.locatedHash = "C533";
     r.forkPoint = 533;
     r.forkPointHash = "C533";
     r.forkPointExact = true;
@@ -405,23 +450,64 @@ TEST(ForkLocator, LocatedRecordAndResolvePlan) {
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         EXPECT_NE(text.find("\"fork_point_status\": \"exact\""), std::string::npos) << text;
         EXPECT_NE(text.find("\"fork_point_upper_bound\": \"930\""), std::string::npos) << text;
+        EXPECT_NE(text.find("\"located_verified\": \"true\""), std::string::npos) << text;
     }
     auto back = cs::forkguard::loadForkRecord(dir.str());
     ASSERT_TRUE(back.has_value());
     EXPECT_TRUE(back->located);
+    EXPECT_TRUE(back->locatedVerified);
     EXPECT_TRUE(back->forkPointExact);
     EXPECT_FALSE(back->deeper);
     EXPECT_EQ(back->upperBound, 930u);
+    EXPECT_EQ(back->locatedPoint, 533u);
     EXPECT_EQ(back->locatedWith, "key");
-    std::string error;
-    const auto plan = cs::forkguard::planResolve(dir.str(), &error);
+    auto plan = cs::forkguard::planResolve(dir.str(), &error);
     ASSERT_TRUE(plan.has_value()) << error;
-    EXPECT_EQ(plan->top, 533u);
+    EXPECT_EQ(plan->top, 533u);  // a verified point: cut exactly there
     EXPECT_EQ(plan->hash, "C533");
-    const auto line = cs::forkguard::summary(*back);
-    EXPECT_NE(line.find("Fork point: block #533 (C533), the last common block, located from #930"), std::string::npos) << line;
+    auto overview = cs::forkguard::resolveOverview(*plan);
+    EXPECT_NE(overview.find("our head #931"), std::string::npos) << overview;
+    EXPECT_NE(overview.find("upper bound #930"), std::string::npos) << overview;
+    EXPECT_NE(overview.find("located #533 (verified)"), std::string::npos) << overview;
+    EXPECT_NE(overview.find("Cutting at #533: 398 block(s) removed"), std::string::npos) << overview;
+    auto line = cs::forkguard::summary(*back);
+    EXPECT_NE(line.find("Fork point: block #533 (C533), the last common block, verified (located from #930)"), std::string::npos) << line;
     EXPECT_NE(line.find("--set-bc-top 533"), std::string::npos) << line;
 
+    // not verified: the fork point stays the upper bound; the located point is a hint
+    auto hint = heldRecord();
+    hint.located = true;
+    hint.upperBound = 930;
+    hint.locatedWith = "key";
+    hint.locatedPoint = 300;
+    hint.locatedHash = "C300";
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.str(), hint));
+    back = cs::forkguard::loadForkRecord(dir.str());
+    ASSERT_TRUE(back.has_value());
+    EXPECT_FALSE(back->locatedVerified);
+    EXPECT_FALSE(back->forkPointExact);
+    EXPECT_EQ(back->forkPointStatus(), "located (unverified)");
+    plan = cs::forkguard::planResolve(dir.str(), &error);
+    ASSERT_TRUE(plan.has_value()) << error;
+    EXPECT_EQ(plan->top, 930u);  // no deeper cut without the operator's confirmation
+    EXPECT_EQ(plan->hash, "C930");
+    EXPECT_FALSE(plan->toLocated);
+    overview = cs::forkguard::resolveOverview(*plan);
+    EXPECT_NE(overview.find("located #300 (NOT verified)"), std::string::npos) << overview;
+    EXPECT_NE(overview.find("Cutting at #930: 1 block(s) removed"), std::string::npos) << overview;
+    plan = cs::forkguard::planResolve(dir.str(), &error, true);  // --to-located
+    ASSERT_TRUE(plan.has_value()) << error;
+    EXPECT_EQ(plan->top, 300u);
+    EXPECT_EQ(plan->hash, "C300");
+    EXPECT_TRUE(plan->toLocated);
+    overview = cs::forkguard::resolveOverview(*plan);
+    EXPECT_NE(overview.find("Cutting at #300 (--to-located): 631 block(s) removed"), std::string::npos) << overview;
+    line = cs::forkguard::summary(*back);
+    EXPECT_NE(line.find("Fork point: block #930 or lower (C930)"), std::string::npos) << line;
+    EXPECT_NE(line.find("NOT verified"), std::string::npos) << line;
+    EXPECT_NE(line.find("--to-located at #300"), std::string::npos) << line;
+
+    // deeper: a hint as well; --resolve-fork cuts at the upper bound, --to-located has no point
     auto deep = heldRecord();
     deep.located = true;
     deep.deeper = true;
@@ -433,69 +519,108 @@ TEST(ForkLocator, LocatedRecordAndResolvePlan) {
     EXPECT_TRUE(back->deeper);
     EXPECT_EQ(back->deeperThan, 100u);
     EXPECT_EQ(back->forkPointStatus(), "deeper");
-    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error).has_value());
-    EXPECT_NE(error.find("below block #100"), std::string::npos) << error;
-    EXPECT_NE(error.find("--set-bc-top"), std::string::npos) << error;
-    const auto deepLine = cs::forkguard::summary(*back);
-    EXPECT_NE(deepLine.find("Fork point: below block #100"), std::string::npos) << deepLine;
+    plan = cs::forkguard::planResolve(dir.str(), &error);
+    ASSERT_TRUE(plan.has_value()) << error;
+    EXPECT_EQ(plan->top, 930u);
+    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error, true).has_value());
+    EXPECT_NE(error.find("--to-located"), std::string::npos) << error;
+    line = cs::forkguard::summary(*back);
+    EXPECT_NE(line.find("differs already at #100 (not verified)"), std::string::npos) << line;
+
+    // --to-located without any located point
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.str(), heldRecord()));
+    EXPECT_FALSE(cs::forkguard::planResolve(dir.str(), &error, true).has_value());
 }
 
+namespace {
+// a BlockChain holding a fork after a depth refusal at 4900 (reference 5000), fork point an upper
+// bound, with its last block (the only one the test chain can name) at 4800
+struct HeldChain {
+    TempFolder dir{"chain"};
+    BlockChain chain{csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001"),
+                     csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002")};
+    cs::forkguard::ForkRecord held;
+    std::string hash;
+    HeldChain() {
+        cs::ConfigHolder::instance().setConfig(Config{});
+        chain.test_resetRollbackEpisode();
+        chain.setGuardStateDir(dir.str());
+        chain.test_setLastSequence(5000);
+        EXPECT_TRUE(chain.guardAutoRollback());
+        chain.test_setLastSequence(4900);
+        EXPECT_FALSE(chain.guardAutoRollback());
+        held = *chain.forkHeldRecord();
+        csdb::Pool block(csdb::PoolHash{}, 4800);
+        block.add_user_field(200, std::string("located"));
+        EXPECT_TRUE(block.compose());
+        chain.test_setLastBlock(block);
+        hash = block.hash().to_string();
+    }
+    ~HeldChain() {
+        chain.test_resetRollbackEpisode();
+        cs::forkguard::clearAll(dir.str());
+    }
+};
+}  // namespace
+
 // the node puts the answer in the held record only if it is still the record searched for and our
-// block at the point is still the one compared; nothing else changes
+// block at the point is still the one compared; a verified answer becomes the fork point, an
+// unverified one stays a hint; nothing else changes
 TEST(ForkLocator, BlockChainTakesTheAnswer) {
-    cs::ConfigHolder::instance().setConfig(Config{});
-    TempFolder dir("chain");
-    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
-    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
-    BlockChain chain(genesis, start);
-    chain.test_resetRollbackEpisode();
-    chain.setGuardStateDir(dir.str());
+    {
+        HeldChain h;
+        auto& chain = h.chain;
+        ASSERT_FALSE(h.held.forkPointExact);
+        // another record than the one searched for: ignored
+        auto other = h.held;
+        other.sinceUnix += 1;
+        EXPECT_FALSE(chain.applyLocatedForkPoint(other, 4800, h.hash, false, "peer", true));
+        // our block there is not the one compared: ignored
+        EXPECT_FALSE(chain.applyLocatedForkPoint(h.held, 4800, "00", false, "peer", true));
+        EXPECT_FALSE(chain.forkHeldRecord()->located);
 
-    // a depth refusal at 4900 (reference 5000): FORK HELD, fork point an upper bound
-    chain.test_setLastSequence(5000);
-    ASSERT_TRUE(chain.guardAutoRollback());
-    chain.test_setLastSequence(4900);
-    ASSERT_FALSE(chain.guardAutoRollback());
-    const auto held = chain.forkHeldRecord();
-    ASSERT_TRUE(held.has_value());
-    ASSERT_FALSE(held->forkPointExact);
-
-    // our block at the located point (the last block here, the only one this test chain can name)
-    csdb::Pool block(csdb::PoolHash{}, 4800);
-    block.add_user_field(200, std::string("located"));
-    ASSERT_TRUE(block.compose());
-    chain.test_setLastBlock(block);
-    const std::string hash = block.hash().to_string();
-
-    // another record than the one searched for: ignored
-    auto other = *held;
-    other.sinceUnix += 1;
-    EXPECT_FALSE(chain.applyLocatedForkPoint(other, 4800, hash, false, "peer"));
-    // our block there is not the one compared: ignored
-    EXPECT_FALSE(chain.applyLocatedForkPoint(*held, 4800, "00", false, "peer"));
-    EXPECT_FALSE(chain.forkHeldRecord()->located);
-
-    EXPECT_TRUE(chain.applyLocatedForkPoint(*held, 4800, hash, false, "peer"));
-    const auto located = chain.forkHeldRecord();
-    ASSERT_TRUE(located.has_value());
-    EXPECT_TRUE(located->held);
-    EXPECT_TRUE(located->located);
-    EXPECT_TRUE(located->forkPointExact);
-    EXPECT_EQ(located->forkPoint, 4800u);
-    EXPECT_EQ(located->forkPointHash, hash);
-    EXPECT_EQ(located->upperBound, held->forkPoint);
-    EXPECT_EQ(located->competingSeq, held->competingSeq);  // the refused block stays the one refused
-    EXPECT_EQ(chain.getLastSeq(), 4800u);                  // nothing unwound
-    EXPECT_FALSE(chain.approvedBranch().has_value());     // nothing approved
-    const auto onDisk = cs::forkguard::loadForkRecord(dir.str());
-    ASSERT_TRUE(onDisk.has_value());
-    EXPECT_EQ(onDisk->forkPoint, 4800u);
-    EXPECT_TRUE(onDisk->located);
-    // once located, a second answer changes nothing
-    EXPECT_FALSE(chain.applyLocatedForkPoint(*held, 4800, hash, true, "peer"));
-
-    chain.test_resetRollbackEpisode();
-    cs::forkguard::clearAll(dir.str());
+        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", true));
+        const auto located = chain.forkHeldRecord();
+        ASSERT_TRUE(located.has_value());
+        EXPECT_TRUE(located->held);
+        EXPECT_TRUE(located->located);
+        EXPECT_TRUE(located->locatedVerified);
+        EXPECT_TRUE(located->forkPointExact);
+        EXPECT_EQ(located->forkPoint, 4800u);
+        EXPECT_EQ(located->forkPointHash, h.hash);
+        EXPECT_EQ(located->upperBound, h.held.forkPoint);
+        EXPECT_EQ(located->competingSeq, h.held.competingSeq);  // the refused block stays the one refused
+        EXPECT_EQ(chain.getLastSeq(), 4800u);                    // nothing unwound
+        EXPECT_FALSE(chain.approvedBranch().has_value());       // nothing approved
+        const auto plan = cs::forkguard::planResolve(h.dir.str(), nullptr);
+        ASSERT_TRUE(plan.has_value());
+        EXPECT_EQ(plan->top, 4800u);  // the verified point cuts exactly
+        // once located, a second answer changes nothing
+        EXPECT_FALSE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, true, "peer"));
+    }
+    {
+        // not verified (a lying peer's deeper point, a bootstrap block after it): a hint only
+        HeldChain h;
+        auto& chain = h.chain;
+        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", false));
+        const auto hint = chain.forkHeldRecord();
+        ASSERT_TRUE(hint.has_value());
+        EXPECT_TRUE(hint->located);
+        EXPECT_FALSE(hint->locatedVerified);
+        EXPECT_FALSE(hint->forkPointExact);
+        EXPECT_EQ(hint->forkPoint, h.held.forkPoint);  // still the upper bound
+        EXPECT_EQ(hint->locatedPoint, 4800u);
+        std::string error;
+        // no deeper cut without confirmation: the recorded upper bound, or nothing (this test chain
+        // has no hash for it)
+        auto plan = cs::forkguard::planResolve(h.dir.str(), &error);
+        if (plan.has_value()) {
+            EXPECT_EQ(plan->top, h.held.forkPoint);
+        }
+        plan = cs::forkguard::planResolve(h.dir.str(), &error, true);
+        ASSERT_TRUE(plan.has_value()) << error;
+        EXPECT_EQ(plan->top, 4800u);
+    }
 }
 
 namespace {

@@ -23,8 +23,11 @@ namespace cs::forkguard {
 // "match" is a block identical to ours, and the answer is checked to hold together (matches strictly
 // below mismatches, consecutive blocks chained, the first differing block of the peer built on our
 // block at the fork point). A peer that lies can at worst make the search fail or move the point
-// within [floor, bound]; the operator still decides, and the cut (--resolve-fork) still checks that
-// our stored block at the point is the recorded one.
+// within [floor, bound]. So the answer is taken as the fork point only when the peer's block right
+// after it verifies as a synced block would after our block there (PeerBlock::verified: signatures,
+// and round confirmations by the confidants of our block at the point); otherwise it stays a hint
+// that --resolve-fork follows only on the operator's explicit request (--to-located). The cut still
+// checks that our stored block at the point is the recorded one.
 //
 // One request at a time, at most one per Settings::minInterval (the peer refuses a second request
 // within 5 s of its reply as a duplicate). Single-threaded: the node calls it from its processor
@@ -49,17 +52,23 @@ public:
         std::function<bool(const cs::PublicKey&, const std::vector<cs::Sequence>&)> sendRequest;
     };
 
-    // a block of the peer, as far as the search needs it (hashes in hex)
+    // a block of the peer, as far as the search needs it (hashes in hex). verified: the node checked
+    // it as a synced block after OUR block at seq - 1: built on it (previous is our hash there), its
+    // signatures verify against its confidants and its round confirmations against the confidants of
+    // our block at seq - 1 (never so for a bootstrap block, which carries no confirmations)
     struct PeerBlock {
         cs::Sequence seq = 0;
         std::string hash;
         std::string previous;
+        bool verified = false;
     };
 
     enum class Status {
         Idle,       // never started, or stopped
         Searching,
-        Exact,      // forkPoint is the last common block, forkPointHash our hash there
+        Exact,      // forkPoint is the last common block, forkPointHash our hash there; verified() says
+                    // whether the peer's next block was verified against our confidants there (only
+                    // then may the node take it as the fork point; otherwise it is a hint)
         Deeper,     // the chains already differ at forkPoint (the floor): the fork is below it
         Failed      // why() says why; the node may start again later
     };
@@ -105,6 +114,9 @@ public:
     const std::string& forkPointHash() const {
         return forkPointHash_;
     }
+    bool verified() const {
+        return verified_;
+    }
     const std::string& why() const {
         return why_;
     }
@@ -139,6 +151,7 @@ private:
     size_t requests_ = 0;
     cs::Sequence forkPoint_ = 0;
     std::string forkPointHash_;
+    bool verified_ = false;
     std::string why_;
 };
 

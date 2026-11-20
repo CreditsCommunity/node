@@ -69,12 +69,21 @@ struct ForkRecord {
     std::string forkPointHash;
     bool forkPointExact = false;
     // the search for the last common block (ForkLocator) while FORK HELD: located is true once it has
-    // an answer, from the upper bound forkPoint had before (upperBound), asking the peer locatedWith.
-    // Either the fork point is now exact (forkPointExact; the competing block is still the one first
-    // refused, so no approval follows from it), or deeper: the chains already differ at block
-    // `deeperThan`, the lowest one searched, and the fork point is below it (forkPoint stays the
-    // upper bound)
+    // an answer, found from the upper bound forkPoint had before (upperBound) with the peer locatedWith.
+    // - verified (locatedVerified): the peer's block right after the located point is built on our
+    //   block there, and its signatures and round confirmations verify against the confidants of our
+    //   block there, as a synced block's would. Only then is the point the fork point: forkPoint and
+    //   forkPointHash are set to it and forkPointExact turns true (the competing block is still the
+    //   one first refused, so no approval follows from it).
+    // - not verified (a bootstrap block, or confirmations that do not verify): a hint only. forkPoint
+    //   stays the upper bound; locatedPoint/locatedHash keep the hint, and --resolve-fork cuts there
+    //   only with --to-located.
+    // - deeper: the peer's block at deeperThan, the lowest one searched, already differs from ours; a
+    //   hint as well (a peer can claim it), forkPoint stays the upper bound
     bool located = false;
+    bool locatedVerified = false;
+    cs::Sequence locatedPoint = 0;
+    std::string locatedHash;
     bool deeper = false;
     cs::Sequence upperBound = 0;
     cs::Sequence deeperThan = 0;
@@ -92,9 +101,15 @@ struct ForkRecord {
     std::string dismissedHash;
     std::vector<std::string> branchHashes;
 
-    // "exact", "deeper" (below deeperThan) or "upper bound"
+    // "exact", "located (unverified)", "deeper" (below deeperThan, unverified) or "upper bound"
     std::string forkPointStatus() const {
-        return forkPointExact ? "exact" : (deeper ? "deeper" : "upper bound");
+        if (forkPointExact) {
+            return "exact";
+        }
+        if (located && !deeper && !locatedHash.empty()) {
+            return "located (unverified)";
+        }
+        return deeper ? "deeper" : "upper bound";
     }
     bool hasDismissal() const {
         return !branchHashes.empty();
@@ -121,12 +136,19 @@ void clearAll(const std::string& dir);
 // --resolve-fork: the fork point to cut the chain at and the hash the stored block there must have,
 // from the record in dir; nothing (and *error says why) when there is no record or it cannot be
 // checked against the database
+// toLocated (--resolve-fork --to-located): the located but unverified last common block instead of
+// the recorded fork point
 struct ResolvePlan {
     cs::Sequence top = 0;
     std::string hash;
     ForkRecord record;
+    bool toLocated = false;
 };
-std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error);
+std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error, bool toLocated = false);
+
+// what --resolve-fork shows before it cuts: our head, the upper bound, the located point and whether
+// it is verified, where the cut goes and how many blocks it removes
+std::string resolveOverview(const ResolvePlan& plan);
 
 // "2026-11-19 10:04:05 UTC"
 std::string utcTime(int64_t unixSeconds);

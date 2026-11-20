@@ -1127,7 +1127,7 @@ bool BlockChain::promotePendingHold(bool roundStarted) {
 }
 
 bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located,
-                                       const std::string& hash, bool deeper, const std::string& peerKey) {
+                                       const std::string& hash, bool deeper, const std::string& peerKey, bool verified) {
     // our block at the located point must still be the one the search compared (read before the lock:
     // the hash lookups take the storage lock)
     if (!deeper && (hash.empty() || located > lastSequence_.load() || getHashBySequence(located).to_string() != hash)) {
@@ -1151,22 +1151,34 @@ bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected
             forkRecord_->deeperThan = located;
         }
         else {
-            forkRecord_->forkPoint = located;
-            forkRecord_->forkPointHash = hash;
-            forkRecord_->forkPointExact = true;
+            forkRecord_->locatedPoint = located;
+            forkRecord_->locatedHash = hash;
+            forkRecord_->locatedVerified = verified;
+            if (verified) {
+                // the other branch provably continues from our block there: that is the fork point
+                forkRecord_->forkPoint = located;
+                forkRecord_->forkPointHash = hash;
+                forkRecord_->forkPointExact = true;
+            }
         }
         r = *forkRecord_;
     }
     cs::forkguard::saveForkRecord(guardStateDir_, r);
     if (deeper) {
-        cserror() << kLogPrefix << "fork point search: the chains differ already at block #" << WithDelimiters(located)
+        cserror() << kLogPrefix << "fork point search: a peer's block already differs from ours at #" << WithDelimiters(located)
                   << ", " << (r.upperBound - located) << " blocks below the upper bound #" << WithDelimiters(r.upperBound)
-                  << ": the fork is deeper. --resolve-fork removes nothing; cut by hand with --set-bc-top";
+                  << " (not verified): the fork may be deeper; --resolve-fork still cuts at the upper bound";
+    }
+    else if (verified) {
+        cswarning() << kLogPrefix << "fork point search: the last common block is #" << WithDelimiters(located) << " ("
+                    << hash << "), verified, located from the upper bound #" << WithDelimiters(r.upperBound)
+                    << "; --resolve-fork now cuts there";
     }
     else {
-        cswarning() << kLogPrefix << "fork point search: the last common block is #" << WithDelimiters(located) << " ("
-                    << hash << "), located from the upper bound #" << WithDelimiters(r.upperBound)
-                    << "; --resolve-fork now cuts there";
+        cswarning() << kLogPrefix << "fork point search: a peer's blocks place the last common block at #"
+                    << WithDelimiters(located) << ", but its next block could not be verified against our confidants: "
+                    << "a hint only. --resolve-fork cuts at the upper bound #" << WithDelimiters(r.upperBound)
+                    << "; --resolve-fork --to-located at #" << WithDelimiters(located);
     }
     cserror() << kLogPrefix << cs::forkguard::summary(r);
     return true;
@@ -1393,12 +1405,33 @@ bool BlockChain::deepRollbackApproved() const {
 // unwind. Bootstrap blocks carry no such confirmations and fail here; they go through
 // isBootstrapAuthenticatedLocally() instead.
 bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
+    return confirmedByConfidants(competing, getLastBlock().confidants());
+}
+
+bool BlockChain::verifiesAfterOurBlock(const csdb::Pool& block) const {
+    if (!block.is_valid() || block.sequence() < 2) {
+        return false;
+    }
+    const csdb::Pool parent = loadBlock(block.sequence() - 1);
+    if (!parent.is_valid() || block.previous_hash() != parent.hash()) {
+        return false;
+    }
+    std::string reason;
+    if (!cs::BlockVerifier::verifySignatures(block, reason)) {
+        csdebug() << kLogPrefix << "block #" << block.sequence() << " signatures: " << reason;
+        return false;
+    }
+    // a bootstrap block is refused here: it carries no confirmations to check
+    return confirmedByConfidants(block, parent.confidants());
+}
+
+bool BlockChain::confirmedByConfidants(const csdb::Pool& competing, const std::vector<cs::PublicKey>& trustedConfidants) const {
     // Strict pre-checks for the unwind decision only; BlockVerifier::verifyConfirmations keeps the
     // exceptions it has for normal block validation (sequence < 2, one-entry masks), which must not be
     // enough to make this node unwind its own chain.
     const auto fail = [&competing](const char* why) {
         csdebug() << kLogPrefix << "competing block #" << competing.sequence()
-                  << " not confirmed by our last block's confidants: " << why;
+                  << " not confirmed by our confidants: " << why;
         return false;
     };
     if (!competing.is_valid() || competing.sequence() < 2) {
@@ -1408,13 +1441,12 @@ bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
     if (BlockChain::isBootstrap(competing)) {
         return fail("bootstrap block carries no confirmations");
     }
-    const auto trustedConfidants = getLastBlock().confidants();
     if (competing.numberConfirmations() == 0 || competing.roundConfirmations().empty()) {
         return fail("no round confirmations");
     }
     const auto confMask = cs::Utils::bitsToMask(competing.numberConfirmations(), competing.roundConfirmationMask());
     if (confMask.size() <= 1 || confMask.size() != trustedConfidants.size()) {
-        return fail("confirmation mask does not match our last block's confidants");
+        return fail("confirmation mask does not match our confidants");
     }
     const size_t confirming = NodeUtils::realTrustedValue(confMask);
     if (competing.roundConfirmations().size() != confirming) {

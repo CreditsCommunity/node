@@ -32,6 +32,7 @@ void ForkLocator::start(const cs::PublicKey& peer, cs::Sequence upper, cs::Seque
     requests_ = 0;
     forkPoint_ = 0;
     forkPointHash_.clear();
+    verified_ = false;
     why_.clear();
 }
 
@@ -231,6 +232,7 @@ void ForkLocator::evaluate() {
         status_ = Status::Exact;
         forkPoint_ = *lo_;
         forkPointHash_ = ours;
+        verified_ = first->second.verified;
     }
 }
 

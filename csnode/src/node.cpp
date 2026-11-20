@@ -345,9 +345,11 @@ void Node::tickForkLocator() {
         const bool deeper = forkLocator_->status() == Status::Deeper;
         const cs::Sequence point = forkLocator_->forkPoint();
         const std::string hash = forkLocator_->forkPointHash();
-        cslog() << "FORK HELD: fork point search done after " << forkLocator_->requestsSent() << " request(s)";
+        const bool verified = forkLocator_->verified();
+        cslog() << "FORK HELD: fork point search done after " << forkLocator_->requestsSent() << " request(s)"
+                << (deeper ? "" : (verified ? ", next block verified" : ", next block NOT verified"));
         forkLocator_->stop();
-        blockChain_.applyLocatedForkPoint(*forkLocatorFor_, point, hash, deeper, forkLocatorFor_->peerKey);
+        blockChain_.applyLocatedForkPoint(*forkLocatorFor_, point, hash, deeper, forkLocatorFor_->peerKey, verified);
         break;
     }
     case Status::Failed:
@@ -373,24 +375,39 @@ std::optional<cs::Sequence> Node::resolveForkTop() {
         return std::nullopt;
     }
     std::string error;
-    const auto plan = cs::forkguard::planResolve(cs::forkguard::stateDirFor(config->getPathToDB()), &error);
+    if (config->resolveToLocated() && !config->resolveFork()) {
+        cserror() << "--to-located goes with --resolve-fork";
+        return std::nullopt;
+    }
+    const auto plan = cs::forkguard::planResolve(cs::forkguard::stateDirFor(config->getPathToDB()), &error,
+                                                 config->resolveToLocated());
     if (!plan.has_value()) {
         cserror() << "--resolve-fork: " << error;
         return std::nullopt;
     }
     cslog() << cs::forkguard::summary(plan->record);
+    // before anything is removed: the bound, the located point and its status, the cut
+    cswarning() << "--resolve-fork: " << cs::forkguard::resolveOverview(*plan);
     cslog() << "--resolve-fork: removing every block above #" << WithDelimiters(plan->top) << " (" << plan->hash
             << "), our head was #" << WithDelimiters(plan->record.ourHead) << ", if the block at #"
             << WithDelimiters(plan->top) << " is still the recorded one";
-    if (plan->record.forkPointExact && !plan->record.located && plan->record.competingSeq == plan->top + 1) {
+    if (plan->toLocated) {
+        // the operator's explicit choice of the located point (verified or not); no branch is approved
+        cswarning() << "--resolve-fork --to-located: cutting at #" << WithDelimiters(plan->top) << ", the last common "
+                    << "block located with " << plan->record.locatedWith << " from the upper bound #"
+                    << WithDelimiters(plan->record.upperBound)
+                    << (plan->record.locatedVerified ? " (verified)" : " (NOT verified: the operator's choice)");
+        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+    }
+    else if (plan->record.forkPointExact && !plan->record.located && plan->record.competingSeq == plan->top + 1) {
         blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash), plan->record.competingHash);
     }
     else if (plan->record.forkPointExact) {
-        // located by the node (the last common block): the cut goes there; the competing block first
-        // refused is higher up, so no branch is approved
-        cslog() << "--resolve-fork: #" << WithDelimiters(plan->top) << " is the last common block, located from the "
-                << "upper bound #" << WithDelimiters(plan->record.upperBound) << "; the node syncs the other chain "
-                << "from there at the next start";
+        // located and verified by the node (the last common block): the cut goes there; the competing
+        // block first refused is higher up, so no branch is approved
+        cslog() << "--resolve-fork: #" << WithDelimiters(plan->top) << " is the last common block, verified, located "
+                << "from the upper bound #" << WithDelimiters(plan->record.upperBound) << "; the node syncs the other "
+                << "chain from there at the next start";
         blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
     }
     else {
@@ -2678,7 +2695,13 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
             std::vector<cs::forkguard::ForkLocator::PeerBlock> blocks;
             blocks.reserve(poolsBlock.size());
             for (const auto& b : poolsBlock) {
-                blocks.push_back({b.sequence(), b.hash().to_string(), b.previous_hash().to_string()});
+                // a block built on ours is also checked as a synced block after it (signatures, and
+                // confirmations by the confidants of our block): only such a block makes the located
+                // point the fork point
+                const bool child = b.sequence() > 0 && b.sequence() <= blockChain_.getLastSeq() + 1 &&
+                                   b.previous_hash() == blockChain_.getHashBySequence(b.sequence() - 1);
+                blocks.push_back({b.sequence(), b.hash().to_string(), b.previous_hash().to_string(),
+                                  child && blockChain_.verifiesAfterOurBlock(b)});
             }
             forkLocator_->onReply(sender, blocks, std::chrono::steady_clock::now());
             tickForkLocator();

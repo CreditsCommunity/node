@@ -103,8 +103,11 @@ docker compose stop && docker compose run --rm node set-bc-top <sequence> && doc
 
 `resolve-fork` removes nothing when there is no record, the fork was dismissed, or the block at the
 recorded fork point is no longer the recorded one. When the node knows only an upper bound of the
-fork point, it finds the last common block itself within a minute or two (the detail line then says
-`the last common block`): run `resolve-fork` after that. With a key encrypted by the node, `resolve-fork`
+fork point, it finds the last common block itself within a minute or two. If it can verify the
+point (the detail line says `the last common block, verified`), `resolve-fork` cuts there. If it
+cannot (`NOT verified`), `resolve-fork` cuts at the upper bound. After checking the located block
+with other nodes, `docker compose run --rm node resolve-fork to-located` cuts at it instead, without
+asking. With a key encrypted by the node, `resolve-fork`
 and `set-bc-top` start the node, which asks the key's password in the terminal (`docker compose run`
 is interactive). See "If your node reports FORK HELD" in `docs/quick-start.md`.
 
