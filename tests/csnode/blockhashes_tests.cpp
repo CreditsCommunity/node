@@ -182,3 +182,32 @@ TEST(BlockHashes, RepairBottomMixed) {
     hashes.flush();
     hashes.close();
 }
+
+// After a cut at the start (--set-bc-top, --resolve-fork) the entries of every block above the new top
+// go, through the last block stored before the cut even across a gap, and on past it up to the first
+// missing sequence (entries written ahead of the storage); those at or below the top stay.
+TEST(BlockHashes, RemoveAboveTheTopAcrossGaps) {
+    auto dir = freshDir("cut");
+    cs::BlockHashes hashes(dir.string());
+    for (cs::Sequence s = 0; s < 30; ++s) {
+        hashes.update(block(s));
+    }
+    ASSERT_TRUE(hashes.remove(cs::Sequence{15}));  // a gap above the top
+    EXPECT_EQ(hashes.removeAbove(10, 25), 18u);    // 11..14, 16..29
+    for (cs::Sequence s = 0; s <= 10; ++s) {
+        EXPECT_EQ(hashes.find(s), block(s).hash()) << s;
+    }
+    for (cs::Sequence s = 11; s < 30; ++s) {
+        EXPECT_TRUE(hashes.find(s).is_empty()) << s;
+        EXPECT_EQ(hashes.find(block(s).hash()), cs::kWrongSequence) << s;
+    }
+    EXPECT_EQ(hashes.size(), 11u);
+    EXPECT_TRUE(hashes.consistentWith(0, 10, [](cs::Sequence s) { return block(s).hash(); }));
+    // the last block before the cut not known (0): up to the first missing sequence
+    for (cs::Sequence s = 11; s < 20; ++s) {
+        hashes.update(block(s));
+    }
+    EXPECT_EQ(hashes.removeAbove(10, 0), 9u);
+    EXPECT_EQ(hashes.size(), 11u);
+    hashes.close();
+}

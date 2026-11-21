@@ -345,6 +345,10 @@ public:
     bool resolveFork() const {
         return resolveFork_;
     }
+    // --resolve-fork --to-located: cut at the located but unverified last common block instead
+    bool resolveToLocated() const {
+        return resolveToLocated_;
+    }
 
     bool traverseNAT() const {
         return traverseNAT_;
@@ -455,6 +459,7 @@ private:
     uint64_t maxAutoRollbackDepth_ = DEFAULT_MAX_AUTO_ROLLBACK;
     bool allowDeepRollback_ = false;
     bool resolveFork_ = false;
+    bool resolveToLocated_ = false;
     bool symmetric_ = false;
 
     EndpointData hostAddressEp_;

@@ -67,6 +67,12 @@ case "${1:-}" in
         [ -f config.ini ] && [ -d db ] || { log "no config.ini or db in $DATA: nothing to cut"; exit 2; }
         if [ "$1" = resolve-fork ]; then
             node_args=(--resolve-fork)
+            # resolve-fork to-located: the located (unverified) last common block, see fork-held.json
+            case "${2:-}" in
+                "") ;;
+                to-located|--to-located) node_args+=(--to-located) ;;
+                *) log "resolve-fork takes no argument but to-located: docker compose run --rm node resolve-fork [to-located]"; exit 2 ;;
+            esac
         else
             [[ "${2:-}" =~ ^[0-9]+$ ]] || { log "set-bc-top needs the sequence of the last block to keep: docker compose run --rm node set-bc-top <sequence>"; exit 2; }
             node_args=(--set-bc-top "$2")

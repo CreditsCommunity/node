@@ -269,6 +269,13 @@ public:
     // Strict for the unwind decision: a confirmation mask of more than one entry, of the same size as our
     // last block's confidants, with as many signatures as it marks, and a majority of them confirming.
     bool hasTrustedConfirmations(const csdb::Pool& competing) const;
+    // the same checks against the given confidants
+    bool confirmedByConfidants(const csdb::Pool& competing, const std::vector<cs::PublicKey>& trustedConfidants) const;
+    // The fork point search (ForkLocator): `block` (a peer's, not stored) is built on our stored block
+    // at its sequence - 1, its signatures verify against its own confidants, and its round
+    // confirmations, by a majority, against the confidants of that block of ours, as hasTrustedConfirmations
+    // checks them. A bootstrap block never passes (it carries no confirmations). Read-only.
+    bool verifiesAfterOurBlock(const csdb::Pool& block) const;
 
     // True if a bootstrap-flagged competing block is authenticated locally: its own signatures verify
     // against its confidants AND those confidants are exactly the confidants of a round table this node
@@ -333,9 +340,24 @@ public:
     std::optional<cs::forkguard::ApprovedBranch> approvedBranch() const {
         return approvedBranch_;
     }
+    // The search for the last common block (cs::forkguard::ForkLocator, driven by the node while FORK
+    // HELD) has an answer for the held record `expected` (the record it searched for; nothing is
+    // changed if the record changed since). `located` is the last common block the peer's answers
+    // give (`hash` is our stored hash there, checked again here): the fork point only when `verified`
+    // (the peer's next block verified against our confidants there), otherwise a hint; or, with
+    // `deeper`, the lowest block searched, where the peer's block already differs (a hint). Only the
+    // record (fork-held.json) changes: nothing is unwound, nothing approved.
+    // True if the record was updated.
+    bool applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located, const std::string& hash,
+                               bool deeper, const std::string& peerKey, bool verified = false);
     // init() refused to truncate: the stored block at the requested sequence has another hash
     bool truncationRefused() const {
         return truncationRefused_;
+    }
+    // init() refused to truncate: the storage does not start at block 0 and no quick-start checkpoint
+    // is left at or below the requested top, so the node could not start after the cut
+    bool truncationNoCheckpoint() const {
+        return truncationNoCheckpoint_;
     }
 
 #ifdef TESTING
@@ -747,6 +769,7 @@ private:
     cs::Sequence resolveForkSeq_ = cs::kWrongSequence;
     csdb::PoolHash resolveForkHash_;
     bool truncationRefused_ = false;
+    bool truncationNoCheckpoint_ = false;
     // starts the episode at the current head if none is running (persisting its reference)
     void beginRollbackEpisode();
     // the chain grew: ends the episode once the head is above its reference
@@ -808,6 +831,9 @@ private:
     }
 
     bool tryQuickStart(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
+    // after a cut at `top` (--set-bc-top, --resolve-fork): the block hashes and the quick-start
+    // checkpoints above it go, so that the next start finds nothing beyond the stored blocks
+    void dropStateAboveTop(cs::Sequence top, cs::CachesSerializationManager* serializationManPtr);
     bool bindSerializationManToCaches(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
 
     cs::CachesSerializationManager* serializationManPtr_ = nullptr;

@@ -652,6 +652,109 @@ bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Byt
     return onChain.empty() || onChain == head.head_hash;
 }
 
+namespace {
+// the checkpoints in a quick-start folder: "<n>" and its crash-recovery backup "<n>.prev" (restored
+// as "<n>" at the next start when "<n>" is missing); ".tmp" and ".bad" are never loaded
+struct CheckpointDir {
+    std::filesystem::path path;
+    cs::Sequence version = 0;
+    bool prev = false;
+    std::optional<CheckpointHead> head;
+    // the block it continues after: its head, or its name for a periodic one without head.bin; none
+    // for a qs/0 without head.bin (cannot be placed)
+    std::optional<cs::Sequence> top() const {
+        if (head.has_value()) {
+            return std::max<cs::Sequence>(head->sequence, version);
+        }
+        if (version == 0) {
+            return std::nullopt;
+        }
+        return version;
+    }
+};
+
+std::vector<CheckpointDir> checkpointDirs(const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    std::vector<CheckpointDir> dirs;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) {
+        return dirs;
+    }
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        std::string name = entry.path().filename().string();
+        const std::string prevExt = ".prev";
+        bool prev = false;
+        if (name.size() > prevExt.size() && name.compare(name.size() - prevExt.size(), prevExt.size(), prevExt) == 0) {
+            name.resize(name.size() - prevExt.size());
+            prev = true;
+        }
+        if (name.empty() || name.size() > 19 || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            continue;
+        }
+        CheckpointDir d;
+        d.path = entry.path();
+        d.version = static_cast<cs::Sequence>(std::stoull(name));
+        d.prev = prev;
+        d.head = readCheckpointHead(entry.path());
+        dirs.push_back(std::move(d));
+    }
+    return dirs;
+}
+}  // namespace
+
+size_t dropCheckpointsAbove(const std::filesystem::path& root, cs::Sequence top) {
+    namespace fs = std::filesystem;
+    size_t dropped = 0;
+    for (const auto& d : checkpointDirs(root)) {
+        const auto at = d.top();
+        if (at.has_value() && *at <= top) {
+            continue;
+        }
+        // set aside as "<name>.bad" (kept for inspection, never loaded), replacing an older one
+        std::error_code ec;
+        const fs::path bad = d.path.string() + ".bad";
+        fs::remove_all(bad, ec);
+        fs::rename(d.path, bad, ec);
+        if (ec) {
+            cswarning() << "CachesSerializationManager: cannot set " << d.path << " aside (above the new top " << top
+                        << "): " << ec.message() << "; removing it";
+            fs::remove_all(d.path, ec);
+            if (ec) {
+                cserror() << "CachesSerializationManager: cannot remove " << d.path << ": " << ec.message();
+                continue;
+            }
+        }
+        ++dropped;
+        cslog() << "CachesSerializationManager: " << d.path.string() << " continues above the new top " << top
+                << ", set aside as " << bad.string();
+    }
+    if (dropped > 0) {
+        fsyncDir(root);
+    }
+    return dropped;
+}
+
+bool hasCheckpointAtOrBelow(const std::filesystem::path& root, cs::Sequence top) {
+    for (const auto& d : checkpointDirs(root)) {
+        const auto at = d.top();
+        if (!d.prev && at.has_value() && *at <= top) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t CachesSerializationManager::dropAbove(cs::Sequence top) {
+    return dropCheckpointsAbove(pImpl_->kQuickStartRoot, top);
+}
+
+bool CachesSerializationManager::hasCheckpointAtOrBelow(cs::Sequence top) const {
+    return cs::hasCheckpointAtOrBelow(pImpl_->kQuickStartRoot, top);
+}
+
 bool CachesSerializationManager::load() {
     return load(ChainVerifier{});
 }
