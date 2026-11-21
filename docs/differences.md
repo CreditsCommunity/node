@@ -331,7 +331,9 @@ consensus rules.
   upper bound, and cuts at the hint only with `--to-located`; it prints the bound, the located point,
   its status and the number of blocks it removes before cutting. `--set-bc-top <sequence>` still cuts by
   hand at a block of the operator's choice. After either cut the quick-start checkpoints above the
-  new top are removed, so the first start after it does not stop on one. Both are one-shot
+  new top are set aside (`qs/<n>.bad`), so the first start after it does not stop on one. A node
+  whose storage does not start at block 0 (pruned, or a backfill in progress) cannot slow-start, so
+  on such a node a cut with no checkpoint left at or below the new top is refused and removes nothing. Both are one-shot
   and exit; neither advice is ever "restart", since a restart alone changes nothing. See "If your
   node reports FORK HELD" in `docs/quick-start.md`.
 

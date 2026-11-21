@@ -90,6 +90,18 @@ bool BlockHashes::remove(const csdb::PoolHash& hash) {
     return true;
 }
 
+size_t BlockHashes::removeAbove(cs::Sequence top, cs::Sequence last) {
+    size_t removed = 0;
+    cs::Sequence seq = top + 1;
+    for (; seq <= last; ++seq) {
+        removed += remove(seq) ? 1 : 0;
+    }
+    for (; remove(seq); ++seq) {
+        ++removed;
+    }
+    return removed;
+}
+
 bool BlockHashes::rebuildRequested() const {
     std::error_code ec;
     return std::filesystem::exists(path_ + rebuildMarker, ec);

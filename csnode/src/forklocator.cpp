@@ -31,6 +31,7 @@ void ForkLocator::start(const cs::PublicKey& peer, cs::Sequence upper, cs::Seque
     everSent_ = false;
     attempts_ = 0;
     duplicates_ = 0;
+    floorRaises_ = 0;
     requests_ = 0;
     forkPoint_ = 0;
     forkPointHash_.clear();
@@ -116,13 +117,18 @@ void ForkLocator::tick(Clock::time_point now) {
 }
 
 bool ForkLocator::expects(const cs::PublicKey& sender, const std::vector<cs::Sequence>& replySeqs) const {
-    if (status_ != Status::Searching || inFlight_.empty() || sender != peer_ || replySeqs.empty()) {
+    if (status_ != Status::Searching || inFlight_.empty() || sender != peer_ || replySeqs.empty() ||
+        replySeqs.size() > inFlight_.size()) {
         return false;
     }
+    std::vector<cs::Sequence> seen;
+    seen.reserve(replySeqs.size());
     for (const auto s : replySeqs) {
-        if (std::find(inFlight_.begin(), inFlight_.end(), s) == inFlight_.end()) {
+        if (std::find(inFlight_.begin(), inFlight_.end(), s) == inFlight_.end() ||
+            std::find(seen.begin(), seen.end(), s) != seen.end()) {
             return false;
         }
+        seen.push_back(s);
     }
     return true;
 }
@@ -152,15 +158,29 @@ void ForkLocator::onReply(const cs::PublicKey& sender, const std::vector<PeerBlo
     evaluate();
 }
 
-void ForkLocator::onRefused(const cs::PublicKey& sender, Clock::time_point now, bool duplicate) {
+void ForkLocator::onRefused(const cs::PublicKey& sender, Clock::time_point now, Refusal why) {
     (void)now;
     if (status_ != Status::Searching || inFlight_.empty() || sender != peer_) {
         return;
     }
+    const std::vector<cs::Sequence> asked = std::move(inFlight_);
     inFlight_.clear();
-    if (duplicate) {
+    if (why == Refusal::Duplicate) {
         if (++duplicates_ >= settings_.maxDuplicates) {
             fail("the peer refuses the requests as duplicates");
+        }
+        return;
+    }
+    if (why == Refusal::NoSuchBlocks && !lo_.has_value() && !asked.empty() && asked.front() >= floor_) {
+        // the peer does not store the lowest height asked for: search above it (the heights between it
+        // and the next one asked for were never asked, so skip to that one)
+        if (++floorRaises_ > settings_.maxFloorRaises) {
+            fail("the peer does not store the blocks to search");
+            return;
+        }
+        floor_ = asked.size() > 1 ? asked[1] : asked.front() + 1;
+        if (floor_ >= hi_) {
+            fail("the peer does not store the blocks to search");
         }
         return;
     }
