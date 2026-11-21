@@ -72,8 +72,9 @@
 #        one and configured like it; each must start from a snapshot (or fall back as JOIN_EXPECT says)
 #        and reach the target. STRESS_WINDOW (seconds, default 0 = off): the block rate and the round
 #        times of n1 in that many seconds before the joins and after they started are compared; the
-#        run fails when the rate falls by more than 10 % or the 95th percentile of the round time rises
-#        by more than 20 %
+#        rate of a window is the median of its one-minute rates, so one slow minute does not decide.
+#        The run fails when the rate falls by more than STRESS_RATE_DROP % (default 10) or the 95th
+#        percentile of the round time rises by more than STRESS_P95_RISE % (default 20)
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate, partition,
 #        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
@@ -426,6 +427,8 @@ is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
 alt_node() { [ -n "$BIN_ALT" ] && [ $(( $1 % 2 )) -eq 0 ] && ! { [ "${JOIN_COMMUNITY:-0}" = 1 ] && [ "$1" -eq "$JOIN_NODE" ]; }; }
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
+STRESS_RATE_DROP=${STRESS_RATE_DROP:-10}
+STRESS_P95_RISE=${STRESS_P95_RISE:-20}
 BACKFILL_RATE=${BACKFILL_RATE:-}
 BACKFILL_BATCH=${BACKFILL_BATCH:-}
 BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
@@ -2706,9 +2709,10 @@ done
 # the consensus while the snapshots are served: n1's block rate and round times in the same number of
 # seconds before the joins and after they started
 if [ "$STRESS_WINDOW" -gt 0 ] && [ -n "${join_started:-}" ]; then
-    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
-import re, sys, datetime
+    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" "$STRESS_RATE_DROP" "$STRESS_P95_RISE" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
+import re, sys, datetime, statistics
 log, start, window = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+max_drop, max_rise = float(sys.argv[4]), float(sys.argv[5])
 stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
 def t(line):
     m = stamp.match(line)
@@ -2724,25 +2728,34 @@ for line in open(log, errors="replace"):
         m = re.search(r"Last written sequence = ([0-9']+)", line)
         if x is not None and m:
             seqs.append((x, int(m.group(1).replace("'", ""))))
+def rate_in(a, b):
+    s = [q for x, q in seqs if a <= x < b]
+    return (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
 def window_stats(a, b):
     r = [y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b]
-    s = [q for x, q in seqs if a <= x < b]
-    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    # the median of the one-minute rates (at least 3 parts): a single slow minute, e.g. a burst of
+    # lost packets, moves the median far less than the rate over the whole window
+    parts = max(3, (b - a) // 60)
+    step = (b - a) / parts
+    rate = statistics.median(rate_in(a + k * step, a + (k + 1) * step) for k in range(parts))
     r.sort()
     p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
     return rate, p95, len(r)
 base = window_stats(start - window, start)
 load = window_stats(start, start + window)
-print(f"consensus: before the joins {base[0]:.2f} blocks/s, round p95 {base[1]:.2f} s ({base[2]} rounds); "
+print(f"consensus: before the joins {base[0]:.2f} blocks/s (median minute), round p95 {base[1]:.2f} s ({base[2]} rounds); "
       f"while serving {load[0]:.2f} blocks/s, round p95 {load[1]:.2f} s ({load[2]} rounds)")
-ok = base[2] > 10 and load[2] > 10
+ok = base[2] > 10 and load[2] > 10 and base[0] > 0 and base[1] > 0
 if not ok:
     print("FAIL: too few rounds in a window to compare")
-elif load[0] < 0.9 * base[0]:
-    print(f"FAIL: block rate fell by {100 * (1 - load[0] / base[0]):.0f} % (10 % allowed)")
+    sys.exit(1)
+drop, rise = 100 * (1 - load[0] / base[0]), 100 * (load[1] / base[1] - 1)
+print(f"consensus: block rate {-drop:+.1f} % ({max_drop:g} % fall allowed), round p95 {rise:+.1f} % ({max_rise:g} % rise allowed)")
+if drop > max_drop:
+    print(f"FAIL: block rate fell by {drop:.0f} % ({max_drop:g} % allowed)")
     ok = False
-elif load[1] > 1.2 * base[1]:
-    print(f"FAIL: round time p95 rose by {100 * (load[1] / base[1] - 1):.0f} % (20 % allowed)")
+if rise > max_rise:
+    print(f"FAIL: round time p95 rose by {rise:.0f} % ({max_rise:g} % allowed)")
     ok = False
 sys.exit(0 if ok else 1)
 PY
