@@ -1223,7 +1223,11 @@ bool Node::takeCommunityTable(const cs::PublicKeys& table, bool own) {
     const uint64_t elapse = cs::ConfigHolder::instance().config()->roundElapseTime();
     std::lock_guard lock(communityMutex_);
     const uint64_t now = stat_.msSinceStart();
-    if (table.empty() || !communityGate_.mayTake(weight, table.front(), now, elapse)) {
+    if (table.empty()) {
+        cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "not starting" : "dropping") << " an empty table";
+        return false;
+    }
+    if (!communityGate_.mayTake(weight, table.front(), now, elapse)) {
         cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "not starting" : "dropping") << " a table of " << table.size()
                 << " keys: another was taken less than half a round_elapse_time ago, and this one is not heavier with a starter key not above its starter's";
         return false;
@@ -5602,12 +5606,21 @@ void Node::onRoundTimeElapsed() {
 
     transport_->forEachNeighbour(std::move(callback));
     // an odd table: the last key of an even set goes, unless a community table would lose its
-    // majority of the list with it (cs::dropForOddTable; without the fallback open, always)
-    if (cs::dropForOddTable(initialConfidants_, listed, cs::PublicKeys(actualConfidants.cbegin(), actualConfidants.cend()))) {
-        auto it = actualConfidants.end();
-        --it;
-        it = actualConfidants.erase(it);
-
+    // majority of the list with it (cs::dropForOddTable; without the fallback open, always). A set
+    // with listed keys that is not a community table: the initial confidants in it, as without the
+    // list, so that it never holds back a regular restart (cs::bootstrapTableOf)
+    {
+        const auto isOutsideInitial = [this](const cs::PublicKey& key) {
+            return initialConfidants_.count(key) == 0;
+        };
+        const size_t seen = actualConfidants.size();
+        const bool seenListed = std::any_of(actualConfidants.cbegin(), actualConfidants.cend(), isOutsideInitial);
+        actualConfidants = cs::bootstrapTableOf(initialConfidants_, listed, actualConfidants);
+        if (seenListed && std::none_of(actualConfidants.cbegin(), actualConfidants.cend(), isOutsideInitial)) {
+            cslog() << "COMMUNITY BOOTSTRAP: " << seen << " confidants with max sequence " << maxGlobalBlock
+                    << " do not hold more than half of the " << listed.size()
+                    << " listed keys, regular table of the initial confidants among them";
+        }
     }
     initBootstrapRP(actualConfidants);
 
@@ -5656,6 +5669,7 @@ void Node::onRoundTimeElapsed() {
         return initialConfidants_.count(key) == 0;
     });
     if (communityTable && !cs::isCommunityTable(initialConfidants_, listed, confs)) {
+        // cs::bootstrapTableOf never gives such a set; kept as a guard
         cslog() << "COMMUNITY BOOTSTRAP: " << confs.size() << " confidants with max sequence " << maxGlobalBlock
                 << " do not hold more than half of the " << listed.size() << " listed keys, wait";
         return;

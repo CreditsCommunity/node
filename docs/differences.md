@@ -157,7 +157,8 @@ neighbour reports a block two or more above its own (one above only holds it for
   `round_elapse_time` with new random bytes after the signature, so that a node whose fallback
   opens later gets the repeat (the transport drops a message it has seen before);
 - of an even set of nodes the starter drops the last key, as the official code does, unless that
-  would leave the table without more than half of the listed keys;
+  would leave the table without more than half of the listed keys (it does drop it when the rest
+  is a regular table of initial confidants);
 - a jump of the clock between two checks (the host suspended and resumed, the clock set) counts
   as progress: the node watches again for `stall_minutes` before it acts.
 
@@ -237,6 +238,26 @@ for 6 minutes, `stall_minutes=2`, the official nodes run the official build), wi
   cut fails.
 
 A partition with this option on therefore needs operator attention. Keep `stall_minutes` long.
+
+**Known limitations** (accepted; the operators control the list):
+
+- **A hostile lowest listed key.** The starter of a table is its lowest key, and a node takes a new
+  community table once half a `round_elapse_time` has passed since the last one. A listed node with
+  the lowest key that turns hostile can therefore send, every half `round_elapse_time`, a table
+  padded with keys of stopped nodes that cannot decide a round, and keep the community restart
+  from deciding while the stall lasts. It cannot write blocks the others would not sign, and a
+  regular table still replaces its table at once; the remedy is to take its key off the list.
+- **Replay across a chain cut.** A community table is signed over the round and the keys only.
+  After `--set-bc-top` or `--resolve-fork` below the round of a table sent earlier, that table
+  verifies again for the same round on a node whose fallback is open. It changes nothing unless its
+  confidants are themselves running and stalled at that height. Binding the last block hash into
+  the signed bytes would change the format a project-signed table shares; it is left to the
+  BootstrapSignature protocol of the decentralisation plan.
+
+A set at the highest block with listed keys that hold no more than half of the list is no
+community table; the initial confidants in it then make the regular table they would make without
+the list (the official odd rule applies), so a node with the list never holds back a regular
+restart, for example when the official nodes come back while a minority of the listed nodes runs.
 
 **Decentralisation plan.** When `H_activate_decentralization` of BK's plan lands, the fallback is to
 be gated on `lastSeq + 1 < H_activate` (it acts only before the activation height) and later folded

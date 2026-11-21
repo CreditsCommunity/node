@@ -907,6 +907,7 @@ net_fault_off() {
 # the p2p ports (a node sends its datagrams from its own port), TCP by the sender's cgroup
 partition_on() {
     local i j
+    partition_off  # a chain left by an earlier cut: -N would fail, and its rules would stay
     sudo iptables -N CSPART
     sudo iptables -I OUTPUT 1 -o lo -j CSPART
     for i in $COMMUNITY_NODES; do

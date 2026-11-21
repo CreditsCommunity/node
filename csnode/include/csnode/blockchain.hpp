@@ -352,6 +352,9 @@ public:
     // let the episode end as if a block above the reference had been recorded
     void test_onHeadAdvanced() { onHeadAdvanced(); checkApprovedBranch(); }
     bool test_recordForkHeld(const char* reason) { return recordForkHeld(reason); }
+    uint64_t test_onRefusedBlock(std::chrono::steady_clock::time_point now) {
+        std::lock_guard l(guardMutex_); return refusedLine_.onEvent(now);
+    }
     void test_setSelectionUnfinished(const csdb::PoolHash& lastPrev) { selectionFinished_ = false; lastPrevHash_ = lastPrev; antiForkMode_ = true; emittingRequest_ = 1; }
     bool test_selectionFinished() const { return selectionFinished_; }
     bool test_antiForkMode() const { return antiForkMode_; }

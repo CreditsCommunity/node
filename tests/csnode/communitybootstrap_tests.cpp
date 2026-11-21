@@ -282,6 +282,29 @@ TEST(CommunityBootstrap, AnEvenSetKeepsItsMajorityOfTheList) {
     EXPECT_FALSE(dropForOddTable(initial, six, table({1, 3, 5, 7, 9})));
     EXPECT_TRUE(dropForOddTable(initial, {}, table({2, 4, 6, 8})));
     EXPECT_TRUE(dropForOddTable(initial, six, table({2, 4, 6, 8})));
+    // a community table whose only key outside the initial confidants is its last: the rest is a
+    // regular table, the official rule applies
+    EXPECT_TRUE(dropForOddTable(kInitial, kCommunity, table({1, 2, 3, 4, 5, 7})));
+    EXPECT_FALSE(isCommunityTable(kInitial, kCommunity, table({1, 2, 3, 4, 5})));
+}
+
+// a set with a listed key that holds no majority of the list must not hold back the regular restart
+// the initial confidants in it would make without the list
+TEST(CommunityBootstrap, AMixedSetWithoutAMajorityOfTheListFallsBackToTheRegularTable) {
+    using cs::bootstrapTableOf;
+    const std::set<cs::PublicKey> initial = keys({1, 2, 3, 4, 6});
+    const std::set<cs::PublicKey> list = keys({5, 7, 9, 11, 13});
+    // the 5 initial confidants and listed 5 alive: 1 of 5 listed is no community table; the 5 initial
+    // ones make the regular table they make on a node without the list
+    EXPECT_EQ(bootstrapTableOf(initial, list, keys({1, 2, 3, 4, 5, 6})), keys({1, 2, 3, 4, 6}));
+    EXPECT_EQ(bootstrapTableOf(initial, {}, keys({1, 2, 3, 4, 6})), keys({1, 2, 3, 4, 6}));
+    // 4 initial ones and listed 5: even, the official odd rule leaves 3, below MinTrustedNodes: wait
+    EXPECT_EQ(bootstrapTableOf(initial, list, keys({1, 2, 3, 4, 5})), keys({1, 2, 3}));
+    // a community table stays one
+    EXPECT_EQ(bootstrapTableOf(initial, list, keys({1, 5, 7, 9})), keys({1, 5, 7, 9}));
+    EXPECT_EQ(bootstrapTableOf(initial, list, keys({1, 3, 5, 7, 9, 11})), keys({1, 3, 5, 7, 9}));
+    // initial keys only: as before
+    EXPECT_EQ(bootstrapTableOf(initial, list, keys({1, 2, 3, 4})), keys({1, 2, 3}));
 }
 
 namespace {
