@@ -348,8 +348,9 @@ public:
     // the abandoned block stays refused until the operator acts again. Processor thread
     void checkResolvePreference(int64_t nowUnix);
     // The branch abandoned with --resolve-fork (abandonedLine_: the abandoned block, and the blocks seen
-    // built on it whose own signatures verify, a bounded list): a block built on one of them is never
-    // cached, also once the chosen block is stored. Blocks of that branch cached before the preference
+    // built on it confirmed by their parent's confidants, a bounded list): while the preference lasts, a
+    // block built on one of them is never cached; once it ends (chosen block stored, timeout, approval
+    // ended) the line is forgotten. Blocks of that branch cached before the preference
     // began (e.g. before a restart) are dropped once at its start: only those, never the rest of the
     // cache. Called by the node outside storeBlock (processor thread); returns the blocks removed
     size_t dropAbandonedFromCache();
@@ -788,10 +789,18 @@ private:
     void logBranchRefusal(const csdb::Pool& pool, const char* what);
     std::chrono::steady_clock::time_point lastBranchRefusalLog_{};
     size_t branchRefusals_ = 0;
-    // the abandoned block and the blocks seen built on the line whose signatures verify (bounded)
+    // while the preference lasts: the abandoned block (its confidants once it is offered and refused),
+    // then the blocks seen built on the line whose round confirmations a majority of their parent's
+    // confidants signed (bounded)
     static constexpr size_t kMaxAbandonedLine = 256;
-    std::vector<std::string> abandonedLine_;
+    struct AbandonedLink {
+        std::string hash;
+        std::vector<cs::PublicKey> confidants;
+    };
+    std::vector<AbandonedLink> abandonedLine_;
+    const AbandonedLink* abandonedLink(const std::string& hash) const;
     bool inAbandonedLine(const std::string& hash) const;
+    void learnAbandonedBlock(const csdb::Pool& block);
     void extendAbandonedLine(const csdb::Pool& block);
     void resetAbandonedLine();
     std::atomic<bool> cacheDropPending_{false};  // the one cleanup at the start of the preference

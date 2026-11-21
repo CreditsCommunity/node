@@ -1422,6 +1422,7 @@ void BlockChain::checkResolvePreference(int64_t nowUnix) {
         return;
     }
     cs::forkguard::saveApprovedBranch(guardStateDir_, *approvedBranch_);
+    resetAbandonedLine();
     cserror() << kLogPrefix << "the block #" << WithDelimiters(approvedBranch_->seq) << " (" << approvedBranch_->hash
               << ") chosen with --resolve-fork was not received within " << cs::forkguard::kPreferenceSeconds / 60
               << " minutes: the preference for it ends, but the abandoned block " << approvedBranch_->abandonedHash
@@ -1429,30 +1430,53 @@ void BlockChain::checkResolvePreference(int64_t nowUnix) {
               << "the monitor, then run --resolve-fork or --set-bc-top <sequence> again";
 }
 
+const BlockChain::AbandonedLink* BlockChain::abandonedLink(const std::string& hash) const {
+    if (hash.empty()) {
+        return nullptr;
+    }
+    for (const auto& link : abandonedLine_) {
+        if (link.hash == hash) {
+            return &link;
+        }
+    }
+    return nullptr;
+}
+
 bool BlockChain::inAbandonedLine(const std::string& hash) const {
-    return !hash.empty() && std::find(abandonedLine_.begin(), abandonedLine_.end(), hash) != abandonedLine_.end();
+    return abandonedLink(hash) != nullptr;
+}
+
+void BlockChain::learnAbandonedBlock(const csdb::Pool& block) {
+    // the abandoned block itself, recognised by its hash: its confidants vouch for its children
+    if (!abandonedLine_.empty() && abandonedLine_.front().confidants.empty() &&
+        block.hash().to_string() == abandonedLine_.front().hash) {
+        abandonedLine_.front().confidants = block.confidants();
+    }
 }
 
 void BlockChain::extendAbandonedLine(const csdb::Pool& block) {
-    // only a block that extends the line (its parent is in it) and carries valid signatures of its own
-    // confidants: anyone can send blocks that name a hash of the line, but not fill the list with them
+    // a block joins the line only if its round confirmations are signed by a majority of its parent's
+    // confidants, the parent being in the line with known confidants: as the chain itself is linked, so
+    // anyone can name a hash of the line, but nobody can fill the list without those confidants
+    const auto* parent = abandonedLink(block.previous_hash().to_string());
     const std::string hash = block.hash().to_string();
-    if (hash.empty() || inAbandonedLine(hash) || abandonedLine_.size() >= kMaxAbandonedLine ||
-        !inAbandonedLine(block.previous_hash().to_string())) {
+    if (parent == nullptr || parent->confidants.empty() || abandonedLine_.size() >= kMaxAbandonedLine ||
+        inAbandonedLine(hash) || !confirmedByConfidants(block, parent->confidants)) {
         return;
     }
     std::string reason;
     if (!cs::BlockVerifier::verifySignatures(block, reason)) {
-        return;
+        return;  // and signed by the confidants it names, as a synced block
     }
-    abandonedLine_.push_back(hash);
+    abandonedLine_.push_back({hash, block.confidants()});
 }
 
 void BlockChain::resetAbandonedLine() {
+    // only while the preference lasts: once it ends the node takes blocks as it did before
     abandonedLine_.clear();
     cacheDropPending_ = false;
-    if (approvedBranch_.has_value() && !approvedBranch_->abandonedHash.empty()) {
-        abandonedLine_.push_back(approvedBranch_->abandonedHash);
+    if (approvedBranch_.has_value() && approvedBranch_->preferring() && !approvedBranch_->abandonedHash.empty()) {
+        abandonedLine_.push_back({approvedBranch_->abandonedHash, {}});
         cacheDropPending_ = true;  // the cleanup at the start of the preference
     }
 }
@@ -1516,6 +1540,7 @@ void BlockChain::dropApprovedBranch(const char* why) {
     cslog() << kLogPrefix << "branch approved with --resolve-fork (block #" << WithDelimiters(approvedBranch_->seq)
             << "): " << why << "; the approval ends";
     approvedBranch_.reset();
+    resetAbandonedLine();
     cs::forkguard::clearApprovedBranch(guardStateDir_);
 }
 
@@ -3232,6 +3257,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
         // once the preference timed out, anything but the abandoned block). Refusing only.
         if (approvedBranch_.has_value() &&
             cs::forkguard::judgeBlock(*approvedBranch_, poolSequence, pool.hash().to_string()) == cs::forkguard::BranchVerdict::Refuse) {
+            learnAbandonedBlock(pool);
             return refuseForApprovedBranch(pool, "block");
         }
 
