@@ -347,13 +347,15 @@ public:
     // the preference for the approved branch times out at its deadline (wall clock, UTC seconds): logged,
     // the abandoned block stays refused until the operator acts again. Processor thread
     void checkResolvePreference(int64_t nowUnix);
-    // Blocks of the branch abandoned with --resolve-fork may sit in the block cache above the cut. A drop
-    // is requested only by a refused block that is of that branch (the abandoned block itself, or one
-    // built on a block of it) or that verifies after our block, and by the chosen block once stored; it
-    // removes only the cached blocks that descend from the abandoned branch, never the rest of the
-    // cache, and runs at most once per preference. Called by the node outside storeBlock (processor
-    // thread); returns the blocks removed
+    // The branch abandoned with --resolve-fork (abandonedLine_: the abandoned block, and the blocks seen
+    // built on it whose own signatures verify, a bounded list): a block built on one of them is never
+    // cached, also once the chosen block is stored. Blocks of that branch cached before the preference
+    // began (e.g. before a restart) are dropped once at its start: only those, never the rest of the
+    // cache. Called by the node outside storeBlock (processor thread); returns the blocks removed
     size_t dropAbandonedFromCache();
+    size_t abandonedLineSize() const {
+        return abandonedLine_.size();
+    }
     bool abandonedCacheDropPending() const {
         return cacheDropPending_;
     }
@@ -782,19 +784,17 @@ private:
     std::string resolveAbandonedHash_;
     std::string resolvePeerKey_;
     // a block refused by the preference for the approved branch (logged once, then once a minute)
-    // ofAbandoned: the block is of the abandoned branch (its hash, or its parent, is one of
-    // abandonedLine_); authenticated: it verifies after our block. Only these request a cache drop
-    bool refuseForApprovedBranch(const csdb::Pool& pool, const char* what, bool ofAbandoned, bool authenticated);
+    bool refuseForApprovedBranch(const csdb::Pool& pool, const char* what);
+    void logBranchRefusal(const csdb::Pool& pool, const char* what);
     std::chrono::steady_clock::time_point lastBranchRefusalLog_{};
     size_t branchRefusals_ = 0;
-    // the abandoned block and the refused blocks seen built on it (bounded), for the cache drop
+    // the abandoned block and the blocks seen built on the line whose signatures verify (bounded)
+    static constexpr size_t kMaxAbandonedLine = 256;
     std::vector<std::string> abandonedLine_;
     bool inAbandonedLine(const std::string& hash) const;
-    void addToAbandonedLine(const std::string& hash);
-    void requestAbandonedCacheDrop();
+    void extendAbandonedLine(const csdb::Pool& block);
     void resetAbandonedLine();
-    std::atomic<bool> cacheDropPending_{false};
-    bool cacheDropDone_ = false;  // once per preference
+    std::atomic<bool> cacheDropPending_{false};  // the one cleanup at the start of the preference
     std::vector<cs::PublicKey> refusedPeers_;  // guarded by guardMutex_
     // the approved branch is settled: the node is past its block, or another block took that height
     void checkApprovedBranch();
