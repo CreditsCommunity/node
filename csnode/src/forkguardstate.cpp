@@ -48,15 +48,8 @@ void syncDir(const fs::path& dir) {
 #endif
 }
 
-// a small file written whole: to a temporary name first, flushed to the disk, then renamed over the
-// old one, so a crash leaves either the old file or the new one
+// a small file written as JSON with writeFileAtomic
 bool writeTree(const std::string& dir, const char* name, const ptree& tree) {
-    if (dir.empty()) {
-        return false;
-    }
-    std::error_code ec;
-    const fs::path target = fs::path(dir) / name;
-    const fs::path tmp = fs::path(dir) / (std::string(name) + ".tmp");
     std::string text;
     try {
         std::ostringstream out;
@@ -66,23 +59,7 @@ bool writeTree(const std::string& dir, const char* name, const ptree& tree) {
     catch (const std::exception&) {
         return false;
     }
-    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
-    if (f == nullptr) {
-        return false;
-    }
-    const bool written = std::fwrite(text.data(), 1, text.size(), f) == text.size() && syncFile(f);
-    const bool closed = std::fclose(f) == 0;
-    if (!written || !closed) {
-        fs::remove(tmp, ec);
-        return false;
-    }
-    fs::rename(tmp, target, ec);
-    if (ec) {
-        fs::remove(tmp, ec);
-        return false;
-    }
-    syncDir(fs::path(dir));
-    return true;
+    return writeFileAtomic(dir, name, text);
 }
 
 // the file's tree; nothing when it does not exist. A file that exists but cannot be read sets
@@ -128,6 +105,32 @@ void removeFile(const std::string& dir, const char* name) {
 }
 
 }  // namespace
+
+bool writeFileAtomic(const std::string& dir, const char* name, const std::string& text) {
+    if (dir.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const fs::path target = fs::path(dir) / name;
+    const fs::path tmp = fs::path(dir) / (std::string(name) + ".tmp");
+    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
+    if (f == nullptr) {
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), f) == text.size() && syncFile(f);
+    const bool closed = std::fclose(f) == 0;
+    if (!written || !closed) {
+        fs::remove(tmp, ec);
+        return false;
+    }
+    fs::rename(tmp, target, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        return false;
+    }
+    syncDir(fs::path(dir));
+    return true;
+}
 
 std::string stateDirFor(const std::string& dbPath) {
     fs::path p(dbPath);
@@ -434,7 +437,7 @@ std::string remedy(const ForkRecord& r) {
     return os.str();
 }
 
-std::string summary(const ForkRecord& r) {
+std::string summary(const ForkRecord& r, const std::string& peerSide) {
     std::ostringstream os;
     os << "FORK HELD since " << utcTime(r.sinceUnix) << ": ";
     if (r.reason == "authority") {
@@ -475,6 +478,9 @@ std::string summary(const ForkRecord& r) {
     }
     if (r.peerHeight != 0) {
         os << ", peer height #" << r.peerHeight;
+    }
+    if (!peerSide.empty()) {
+        os << "; the other side is " << peerSide;
     }
     os << ". The node keeps its chain. What to do: " << remedy(r);
     return os.str();

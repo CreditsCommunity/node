@@ -269,6 +269,22 @@ Then ask the node with the wallet, in the `csnode` folder:
 
 It shows the network, the last block and `synced`. Wait for `synced: yes` before sending anything.
 
+**Who keeps the network going.** Once at the start and then every 10 minutes the log has a line like
+
+```
+PEERS: 16 neighbours (11 official, 5 community); last 1000 rounds: trusted seats 76% official, 24% community; this node trusted in 41%
+```
+
+Peers announce their version when they connect: official nodes (4.2.532) count as `official`,
+community releases as `community`, peers not heard from yet as `unknown`. The trusted seats are the
+confidants that signed the last 1000 blocks this node stored. If no official node has been a
+neighbour for 10 minutes, or none signed any of the last 200 blocks, the node warns
+`OFFICIAL NODES GONE` (again every 10 minutes while it lasts) and `OFFICIAL NODES BACK` when they
+return; `TRUSTED SEATS COMMUNITY-ONLY` means every seat of the last 1000 blocks was a community node.
+These lines are information, not faults: the network goes on with community nodes. The latest state
+is also in `peer-status.json` next to the `db` folder, and the Docker healthcheck prints it
+(`docker inspect --format '{{json .State.Health}}' <container>`) without turning unhealthy.
+
 ## 8. The wallet in two lines
 
 Open it with `./credits-wallet --config wallet.toml` in `csnode` (`credits-wallet.exe` on Windows;
@@ -436,6 +452,10 @@ chain and waits for you. Nothing is lost and nothing was changed. The state show
 line (`| FORK HELD`), as a detail line once a minute, in `fork-held.json` next to the `db` folder
 (the `csnode` folder; `~/.credits` in Docker), and as an unhealthy container in `docker ps`. It
 clears by itself if the node's chain grows past the point where the rollback started.
+
+When the node knows the version the refused peer announced, the detail line ends its peer part with
+`the other side is an official node (4.2.532)` or `... a community node`: a fork against official
+nodes usually means the two releases disagree on a block, which is worth reporting.
 
 A restart changes nothing: the node remembers the fork and the rollback limit across restarts, in
 `reorg-episode.json`, `fork-held.json` and `resolve-approved.json` next to the `db` folder. They

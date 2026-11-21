@@ -222,6 +222,20 @@ rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md
   even though the network executed the call. The community node marks the blocks as read when
   it starts running.
 
+- **Who keeps the network going.** Every 10 minutes (and once at the start) the log has a `PEERS`
+  line: the neighbours by announced version (official 4.2.532 when the handshake's minor version is
+  0, community when it is higher, unknown when not announced yet), the share of official and
+  community nodes among the trusted seats (confidants whose bit is set in the block's realTrusted
+  mask) of the last 1000 stored blocks, and how often this node was among them. The node warns
+  `OFFICIAL NODES GONE` when no official node has been a neighbour for 10 minutes or signed any of the
+  last 200 blocks (with at least half the seats classified), `OFFICIAL NODES BACK` when they return,
+  and `TRUSTED SEATS COMMUNITY-ONLY` when every seat of the last 1000 blocks was a community node;
+  each once on the change, then at most every 10 minutes. The state is written to
+  `peer-status.json` next to the `db` folder (atomically, like `fork-held.json`), printed by the
+  Docker healthcheck (never unhealthy for this), and the FORK HELD detail line says whether the
+  refused peer is an official or a community node. Log and status only: nothing is sent, signed,
+  hashed or validated differently, and there is no new option.
+
 ## Security and correctness fixes
 
 These were found by reviewing the official code. None of them changes the blocks or the

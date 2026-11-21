@@ -326,6 +326,21 @@ set +e; out=$(health "$d"); rc=$?; set -e
     && grep -q 'resolve-fork' <<<"$out" && grep -q 'dismiss-fork' <<<"$out" || { echo "$out"; fail "healthcheck with a fork held: exit $rc"; }
 printf '{\n    "held": "false",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
 out=$(health "$d") || { echo "$out"; fail "healthcheck with a dismissed fork"; }
-pass "resolve-fork (also to-located), set-bc-top and dismiss-fork; the healthcheck reports FORK HELD"
+# peer-status.json: printed, never unhealthy by itself, FORK HELD still is
+cat > "$d/peer-status.json" <<'EOF2'
+{
+    "summary": "PEERS: 6 neighbours (0 official, 6 community); last 1000 rounds: trusted seats 0% official, 100% community; this node trusted in 41%",
+    "official_gone": "true",
+    "official_gone_reason": "no official neighbour for 12 min",
+    "community_only": "true"
+}
+EOF2
+out=$(health "$d") || { echo "$out"; fail "healthcheck with official nodes gone must stay healthy"; }
+grep -q 'PEERS: 6 neighbours (0 official, 6 community)' <<<"$out" && grep -q 'OFFICIAL NODES GONE: no official neighbour for 12 min' <<<"$out" \
+    && grep -q 'TRUSTED SEATS COMMUNITY-ONLY' <<<"$out" || { echo "$out"; fail "healthcheck does not print the peer status"; }
+printf '{\n    "held": "true",\n    "since": "2026-11-19 10:00:00 UTC",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
+set +e; out=$(health "$d"); rc=$?; set -e
+[ "$rc" = 1 ] && grep -q 'FORK HELD since' <<<"$out" && grep -q 'PEERS:' <<<"$out" || { echo "$out"; fail "healthcheck with a fork held and peer status: exit $rc"; }
+pass "resolve-fork (also to-located), set-bc-top and dismiss-fork; the healthcheck reports FORK HELD and the peer status"
 
 echo "PASS: entrypoint"

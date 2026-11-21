@@ -157,6 +157,8 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&snapshotTickTimer_.timeOut, this, &Node::onSnapshotTick);
     cs::Connector::connect(&backfillTimer_.timeOut, this, &Node::onBackfillTick);
     cs::Connector::connect(&forkGuardTimer_.timeOut, this, &Node::onForkGuardTick);
+    cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::onPeerStatusBlock);
+    cs::Connector::connect(&blockChain_.removeBlockEvent, this, &Node::onPeerStatusBlockRemoved);
 
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
@@ -256,7 +258,21 @@ void Node::logForkHeldDetail(const std::optional<cs::forkguard::ForkRecord>& for
         const auto now = std::chrono::steady_clock::now();
         if (lastForkHeldDetail_ == std::chrono::steady_clock::time_point{} || now - lastForkHeldDetail_ >= std::chrono::minutes(1)) {
             lastForkHeldDetail_ = now;
-            cswarning() << " " << cs::forkguard::summary(*forkHeld);
+            // the refused peer's announced version, when known (the PEERS status)
+            std::string side;
+            if (!forkHeld->peerKey.empty()) {
+                switch (peerStatus_.kindOfBase58(forkHeld->peerKey)) {
+                    case cs::peerstatus::Kind::Official:
+                        side = "an official node (4.2.532)";
+                        break;
+                    case cs::peerstatus::Kind::Community:
+                        side = "a community node";
+                        break;
+                    default:
+                        break;
+                }
+            }
+            cswarning() << " " << cs::forkguard::summary(*forkHeld, side);
         }
     }
     else {
@@ -274,6 +290,58 @@ void Node::onForkGuardTick() {
     blockChain_.promotePendingHold(false);
     tickForkLocator();
     logForkHeldDetail(blockChain_.forkHeldRecord());
+    onPeerStatusTick();
+}
+
+void Node::onPeerStatusBlock(const csdb::Pool& pool) {
+    peerStatus_.addBlock(pool.sequence(), pool.confidants(), pool.realTrusted());
+}
+
+void Node::onPeerStatusBlockRemoved(const csdb::Pool& pool) {
+    peerStatus_.removeBlock(pool.sequence());
+}
+
+// every 30 s: the peers' announced versions and the neighbours; the PEERS line every 10 minutes and the
+// official-gone alerts, peer-status.json next to the db folder. Reads only what the node already has.
+void Node::onPeerStatusTick() {
+    const auto now = std::chrono::steady_clock::now();
+    if (peerStatusRefreshed_ != std::chrono::steady_clock::time_point{} && now - peerStatusRefreshed_ < std::chrono::seconds(30)) {
+        return;
+    }
+    peerStatusRefreshed_ = now;
+    std::vector<cs::PeerData> known;
+    transport_->getKnownPeers(known);
+    std::map<cs::PublicKey, cs::peerstatus::Kind> kinds;
+    for (const auto& p : known) {
+        kinds[p.key] = cs::peerstatus::classify(static_cast<uint16_t>(p.version), p.minorVersion);
+    }
+    peerStatus_.setSelf(nodeIdKey_, Config::getMinorNodeVersion() == 0 ? cs::peerstatus::Kind::Official : cs::peerstatus::Kind::Community);
+    peerStatus_.setKinds(std::move(kinds));
+    std::vector<cs::PublicKey> neighbours;
+    transport_->forEachNeighbour([&neighbours](const cs::PublicKey& key, cs::Sequence, cs::RoundNumber) {
+        neighbours.push_back(key);
+    });
+    const auto counts = peerStatus_.countNeighbours(neighbours);
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    const bool goneBefore = peerStatus_.officialGone();
+    const bool onlyBefore = peerStatus_.communityOnly();
+    const auto lines = peerStatus_.tick(seconds, counts);
+    for (const auto& line : lines) {
+        if (line.warning) {
+            cswarning() << line.text;
+        }
+        else {
+            cslog() << line.text;
+        }
+    }
+    // the status file with every PEERS line, alert and change of state (a few times an hour)
+    if (!lines.empty() || goneBefore != peerStatus_.officialGone() || onlyBefore != peerStatus_.communityOnly()) {
+        const auto dir = cs::forkguard::stateDirFor(cs::ConfigHolder::instance().config()->getPathToDB());
+        const auto wall = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (!cs::forkguard::writeFileAtomic(dir, cs::peerstatus::kStatusFile, peerStatus_.statusJson(wall))) {
+            csdebug() << "PEERS: cannot write " << cs::peerstatus::kStatusFile << " in " << dir;
+        }
+    }
 }
 
 void Node::startForkLocator(const cs::forkguard::ForkRecord& record) {
