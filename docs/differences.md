@@ -169,14 +169,19 @@ community table (it holds a key that is not an initial confidant and is not sign
 project); they then take the blocks written meanwhile through ordinary sync once they are back,
 as the `official-stop-*` scenarios of the robustness workflow check.
 
-Every node that should take part needs the same list: it only helps when more than half of the
-listed nodes are running. The set-up scripts and the Docker image do not offer the option; edit
-`config.ini` by hand (in Docker, `~/.credits/config.ini`).
+**An expert option, not in the set-up.** Every node that should take part needs the same list: it
+only helps when more than half of the listed nodes are running, and mismatched lists weaken that
+majority rule. So `setup.sh`, `setup.ps1` and the Docker environment do not offer it until the
+option has been reviewed and a coordinated list exists (possibly shipped like `known_hosts.txt`);
+edit `config.ini` by hand (in Docker, `~/.credits/config.ini`, which the entrypoint writes only
+when it is missing).
 
 The risk it brings is a partition. If a network partition cuts more than half of the listed nodes
 off from the official nodes for longer than `stall_minutes`, while the official nodes keep
 producing blocks, the listed nodes restart on their own and the two sides write different blocks.
-There is no rule that makes either side yield to the other. What happens at reconnection:
+There is no rule that makes either side yield to the other, and the threshold stays "more than
+half of the list". What happens at reconnection (option A of the bounded-rollback guard, #189: the
+shorter side waits for its operator):
 
 - official nodes follow the longer chain, as for any two chains, and unwind their blocks above the
   fork; the transactions of those blocks are reverted and must be sent again unless the other
@@ -187,12 +192,15 @@ There is no rule that makes either side yield to the other. What happens at reco
   HELD** (on every round line, a detail line once a minute, `fork-held.json` next to the
   database, an unhealthy Docker healthcheck). Its operator checks the other nodes or the monitor
   and chooses (docs/quick-start.md, "If your node reports FORK HELD"):
-  - **follow the official chain**: stop the node, run it once with `--resolve-fork` (Docker:
-    `resolve-fork`) and start it again. After a partition the node usually knows only an upper
-    bound of the fork point (the block it refused does not continue any block it holds), so
-    `--resolve-fork` removes only the blocks above that bound and the node reports FORK HELD
-    again a block lower; then cut at the last common block with `--set-bc-top <sequence>`. The
-    blocks above the fork, and their transactions, are reverted;
+  - **follow the official chain**: after a partition the block the node refused does not continue
+    any block it holds, so at first it knows only an upper bound of the fork point. While FORK
+    HELD it looks for the last common block itself (#192). Wait until `fork-held.json` shows
+    `"fork_point_status": "exact"`, then stop the node, run it once with `--resolve-fork` (Docker:
+    `resolve-fork`) and start it again: it cuts at that block in one run. If the status is
+    `"located (unverified)"`, check the point against other nodes or the monitor and add
+    `--to-located`; if it stays `"upper bound"` or `"deeper"`, cut at the last common block by hand
+    with `--set-bc-top <sequence>`. The blocks above the fork, and their transactions, are
+    reverted; the quick-start checkpoints above the new top go with them;
   - **keep the community chain**: create `dismiss-fork` next to the database; the node keeps
     refusing that branch and no longer reports it.
 
@@ -218,14 +226,21 @@ for 6 minutes, `stall_minutes=2`, the official nodes run the official build), wi
   one run the official side had stalled during the cut (3 live initial confidants, fewer than 4),
   wrote no block of its own, and took the community blocks once the community nodes were
   restarted: every node then held all 217 community blocks and the same head;
-- with the operator path (`official-partition-restart-resolve`): `--resolve-fork` cut one block
-  (the fork point was an upper bound), FORK HELD came back a block lower within 20 s,
-  `--set-bc-top` at the last common block followed, and every node then held the official chain:
-  one chain, the 179 community blocks and their 42 transactions reverted. The first start after
-  each cut stopped once ("the QUICK START checkpoint continues after the last block on disk") and
-  succeeded when started again.
+- with the operator path (`official-partition-restart-resolve`) and the fork locator of #192: the
+  five community nodes held the fork within 20 s and found the exact fork point (#506) 30 s later;
+  one `--resolve-fork` each cut there, every start after it succeeded, and every node then held
+  the official chain: one chain, 275 community blocks and their 63 transactions reverted. Without
+  the locator, `--resolve-fork` cut a single block (the upper bound), FORK HELD came back a block
+  lower, and `--set-bc-top` at the last common block was needed (179-215 blocks reverted); the
+  first start after each such cut stopped once on a quick-start checkpoint above the new top,
+  which #192 removes. The scenario now fails if a cut lands on an upper bound or a start after a
+  cut fails.
 
 A partition with this option on therefore needs operator attention. Keep `stall_minutes` long.
+
+**Decentralisation plan.** When `H_activate_decentralization` of BK's plan lands, the fallback is to
+be gated on `lastSeq + 1 < H_activate` (it acts only before the activation height) and later folded
+into the plan's BootstrapSignature protocol.
 
 ## Start-up behaviour
 

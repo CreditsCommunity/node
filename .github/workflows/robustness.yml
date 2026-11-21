@@ -392,14 +392,20 @@ jobs:
             contracts: true
           # stress on the confidants that serve (n1, n3, n5, n7): four nodes join at once, the first killed
           # during its fetch and its import; n3 and n9 on a 2 Mbit/s link. The block rate and the round
-          # times while serving must stay within 10 % / 20 % of the same window before the joins
+          # times while serving must stay within 10 % / 20 % of the same window before the joins (the rate
+          # is the median of the one-minute rates)
           - name: snapshot-p2p-stress
             official: 'no'   # four joining nodes: the even ones would be official
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 JOIN_FETCH_RATE=200 JOIN_KILL_DURING_FETCH=1 NET_FAULT=rate NET_FAULT_RATE=2mbit NET_FAULT_NODES=3,9
             fixed: true
+          # 5 % loss on n3 and n9: 20 % / 50 % allowed. The loss reaches the joiner n9 only once it has
+          # joined, so the second window has more lossy traffic than the first, whatever serving costs;
+          # and the first window's round p95 alone varies between identical runs (0.57 s or 0.8-0.93 s).
+          # Measured: a steady fall of 5-16 % (-10 % failed the former 10 % limit); the same logs slowed
+          # by 30 % (or 20 %) give -37 to -40 % (-26 to -31 %), which still fails
           - name: snapshot-p2p-stress-loss
             official: 'no'   # four joining nodes: the even ones would be official
-            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 NET_FAULT=loss NET_FAULT_PCT=5 NET_FAULT_NODES=3,9
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 STRESS_RATE_DROP=20 STRESS_P95_RISE=50 TARGET_SEQ=3300 JOIN_EXTRA=3 NET_FAULT=loss NET_FAULT_PCT=5 NET_FAULT_NODES=3,9
             fixed: true
           # with contracts running before and during the joins
           - name: snapshot-p2p-stress-contracts
