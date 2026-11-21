@@ -348,7 +348,9 @@ consensus rules.
   sync it back on top of the cut), asking first, in random order, a few peers that likely have it
   (a peer that brings no block within 20 s is dropped from them, and with none left the usual random
   choice applies, so a peer cannot hold the sync by what it claims); blocks of the abandoned branch
-  waiting in the block cache are dropped once (only those that descend from it); after 30 minutes without it
+  are never cached (a block built on the abandoned block, or on a block of that branch whose
+  signatures verify, also once the chosen block is stored), and those cached before the preference
+  began are dropped once at its start, nothing else; after 30 minutes without it
   (logged as an error) only the abandoned block stays refused there, until the operator cuts again.
   The same one-shot preference applies to the recorded competing block of an exact fork point. It
   only refuses blocks (kept in `resolve-approved.json`).
