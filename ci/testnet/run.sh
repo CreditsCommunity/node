@@ -8,6 +8,7 @@
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
 #        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
+#        (INITIAL_NODES, comma separated: these nodes instead)
 #        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
 #        ROUND_ELAPSE_MS (default 20000): round_elapse_time of every node
 #        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
@@ -71,8 +72,9 @@
 #        one and configured like it; each must start from a snapshot (or fall back as JOIN_EXPECT says)
 #        and reach the target. STRESS_WINDOW (seconds, default 0 = off): the block rate and the round
 #        times of n1 in that many seconds before the joins and after they started are compared; the
-#        run fails when the rate falls by more than 10 % or the 95th percentile of the round time rises
-#        by more than 20 %
+#        rate of a window is the median of its one-minute rates, so one slow minute does not decide.
+#        The run fails when the rate falls by more than STRESS_RATE_DROP % (default 10) or the 95th
+#        percentile of the round time rises by more than STRESS_ROUND_RISE % (default 20)
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate, partition,
 #        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
@@ -198,6 +200,42 @@
 #        state digest (needs sudo). With DISK_FULL_STOP=1 the node gets SIGTERM halfway through the
 #        full-disk period and must exit within 120 s, as an operator would stop it
 #
+#        OFFICIAL_STOP_AT (default 0 = off, needs BIN_ALT_OFFICIAL=1): at that sequence, in a round whose
+#        table the official (even) nodes hold the majority of, every official node is killed at once;
+#        they stay down OFFICIAL_STOP_MINUTES (default 5) and are started again, and must end on the
+#        same blocks as the community nodes (every block compared). OFFICIAL_FUND (FUND amount of the
+#        even nodes, default the others' 60000): more stake than the community nodes, so that the
+#        official nodes take the trusted seats as on mainnet. COMMUNITY_BOOTSTRAP says what the
+#        community nodes may do meanwhile: none (default) - nothing, the network must stay stalled
+#        until the official nodes are back; trusted - their own trusted.txt also lists every community
+#        node, the network must restart without them; config - the community nodes run the community
+#        bootstrap fallback ([community_bootstrap] confidants = every community key, stall_minutes =
+#        COMMUNITY_STALL_MINUTES, default 2), the network must restart without them. COMMUNITY_BOOTSTRAP=config
+#        also runs without OFFICIAL_STOP_AT: the fallback must then never act (no "COMMUNITY BOOTSTRAP:"
+#        table started or taken), and with OFFICIAL_STOP_AT never before the official nodes stop.
+#        COMMUNITY_STALL_STARTER (minutes, default 0 = off, with COMMUNITY_BOOTSTRAP=config): the
+#        community node with the lowest key, which starts the community table, gets that stall_minutes
+#        and the others COMMUNITY_STALL_MINUTES: its first tables reach nodes whose fallback is still
+#        closed, so the restart needs a repeat of the table to get through (each community node other
+#        than the starter must drop one table and take a later one)
+#        OFFICIAL_PARTITION_AT (default 0 = off, needs BIN_ALT_OFFICIAL=1 and Linux; not with
+#        OFFICIAL_STOP_AT): at that sequence the community (odd) nodes are cut off from the official
+#        (even) ones, all of them running (iptables: UDP between their p2p ports, TCP by cgroup), for
+#        OFFICIAL_PARTITION_MINUTES (default 6), then reconnected. With COMMUNITY_BOOTSTRAP=config the
+#        community side restarts on its own after stall_minutes: two chains until the reconnection.
+#        partition.py reports where they forked, which side the nodes kept and how many blocks and
+#        transactions the other side lost; every node must then end on one chain. The nodes only
+#        reconnect if they look each other up again: 120 s after the cut is lifted the run reports
+#        how many neighbours each node has. OFFICIAL_PARTITION_RESTART=1: then the community nodes are
+#        restarted (they dial every node of hosts.txt again), as an operator would.
+#        RESOLVE_FORK_AFTER=1: then, as an operator choosing the official chain, wait up to
+#        RESOLVE_FORK_WAIT minutes (default 5) for FORK HELD on the community nodes (the bounded-rollback
+#        guard refuses the longer chain their confidants do not vouch for), stop every community node
+#        holding a fork, run it once with --resolve-fork and start it again; a node whose fork point
+#        was only an upper bound and that holds the fork again lower is cut with --set-bc-top at the
+#        last common block (docs/quick-start.md, "If your node reports FORK HELD"). A start right after
+#        a cut that stops at once is reported and repeated. Every node must then end on one chain
+#
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
 set -euo pipefail
@@ -233,6 +271,12 @@ case "$TRUSTED_NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
     *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
 esac
+# INITIAL_NODES (comma separated, TRUSTED_NODES of them): these nodes are the initial confidants
+# instead of the first TRUSTED_NODES, e.g. a set the official (even) nodes hold the majority of
+INITIAL_NODES=${INITIAL_NODES:-$(seq -s, 1 "$TRUSTED_NODES")}
+[ "$(tr ',' '\n' <<<"$INITIAL_NODES" | sort -un | grep -c .)" -eq "$TRUSTED_NODES" ] \
+    || { echo "INITIAL_NODES must name $TRUSTED_NODES distinct nodes, got '$INITIAL_NODES'"; exit 1; }
+is_initial() { [[ ",$INITIAL_NODES," == *",$1,"* ]]; }
 # ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i, diag 9400 + i
 [ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
     || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
@@ -297,6 +341,20 @@ TERM_KILL_NODE=${TERM_KILL_NODE:-0}
 TERM_KILL_TIMES=${TERM_KILL_TIMES:-4}
 TERM_KILL_FROM=${TERM_KILL_FROM:-150}
 CRASH_ALL_AT=${CRASH_ALL_AT:-0}
+OFFICIAL_STOP_AT=${OFFICIAL_STOP_AT:-0}
+OFFICIAL_STOP_MINUTES=${OFFICIAL_STOP_MINUTES:-5}
+OFFICIAL_FUND=${OFFICIAL_FUND:-0}
+COMMUNITY_BOOTSTRAP=${COMMUNITY_BOOTSTRAP:-none}
+case "$COMMUNITY_BOOTSTRAP" in none|trusted|config) ;; *) echo "COMMUNITY_BOOTSTRAP must be none, trusted or config, got '$COMMUNITY_BOOTSTRAP'"; exit 1 ;; esac
+COMMUNITY_STALL_MINUTES=${COMMUNITY_STALL_MINUTES:-2}
+COMMUNITY_STALL_STARTER=${COMMUNITY_STALL_STARTER:-0}
+COMMUNITY_STARTER=0       # the node given COMMUNITY_STALL_STARTER, set with the configs
+OFFICIAL_PARTITION_AT=${OFFICIAL_PARTITION_AT:-0}
+OFFICIAL_PARTITION_MINUTES=${OFFICIAL_PARTITION_MINUTES:-6}
+OFFICIAL_PARTITION_RESTART=${OFFICIAL_PARTITION_RESTART:-0}
+RESOLVE_FORK_AFTER=${RESOLVE_FORK_AFTER:-0}
+RESOLVE_LOCATE_WAIT=${RESOLVE_LOCATE_WAIT:-6}   # minutes to wait for the located fork point
+RESOLVE_FORK_WAIT=${RESOLVE_FORK_WAIT:-5}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -370,6 +428,8 @@ is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
 alt_node() { [ -n "$BIN_ALT" ] && [ $(( $1 % 2 )) -eq 0 ] && ! { [ "${JOIN_COMMUNITY:-0}" = 1 ] && [ "$1" -eq "$JOIN_NODE" ]; }; }
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
+STRESS_RATE_DROP=${STRESS_RATE_DROP:-10}
+STRESS_ROUND_RISE=${STRESS_ROUND_RISE:-20}
 BACKFILL_RATE=${BACKFILL_RATE:-}
 BACKFILL_BATCH=${BACKFILL_BATCH:-}
 BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
@@ -532,6 +592,25 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     [ -z "$DB_BACKEND" ] || echo "mixed nodes: the official nodes run BerkeleyDB whatever DB_BACKEND ($DB_BACKEND) says"
 fi
 
+# every official node stopped at once: the community nodes alone are left (see OFFICIAL_STOP_AT above)
+if [ "$OFFICIAL_STOP_AT" -gt 0 ]; then
+    [ "$BIN_ALT_OFFICIAL" = 1 ] || { echo "FAIL: OFFICIAL_STOP_AT needs official even nodes (BIN_ALT_OFFICIAL=1)"; exit 1; }
+    [ "$CRASH_ALL_AT" -eq 0 ] && [ "$DPOS_AT" -eq 0 ] && [ "$JOIN_NODE" -eq 0 ] \
+        || { echo "FAIL: OFFICIAL_STOP_AT runs without CRASH_ALL_AT, DPOS_AT and a joining node"; exit 1; }
+    # the community nodes that could start a bootstrap with the extra keys: MinTrustedNodes is 4
+    [ $(( (NODES + 1) / 2 )) -ge 5 ] || { echo "FAIL: OFFICIAL_STOP_AT needs at least 5 community (odd) nodes, NODES >= 9"; exit 1; }
+fi
+# the community nodes cut off from the running official nodes (see OFFICIAL_PARTITION_AT above)
+if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    [ "$BIN_ALT_OFFICIAL" = 1 ] || { echo "FAIL: OFFICIAL_PARTITION_AT needs official even nodes (BIN_ALT_OFFICIAL=1)"; exit 1; }
+    [ "$OS_KIND" = linux ] || { echo "FAIL: OFFICIAL_PARTITION_AT needs Linux (iptables, cgroups)"; exit 1; }
+    [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$CRASH_ALL_AT" -eq 0 ] && [ "$DPOS_AT" -eq 0 ] && [ "$JOIN_NODE" -eq 0 ] && [ -z "$NET_FAULT" ] \
+        || { echo "FAIL: OFFICIAL_PARTITION_AT runs without OFFICIAL_STOP_AT, CRASH_ALL_AT, DPOS_AT, NET_FAULT and a joining node"; exit 1; }
+    [ $(( (NODES + 1) / 2 )) -ge 5 ] || { echo "FAIL: OFFICIAL_PARTITION_AT needs at least 5 community (odd) nodes, NODES >= 9"; exit 1; }
+fi
+[ "$RESOLVE_FORK_AFTER" = 0 ] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || { echo "FAIL: RESOLVE_FORK_AFTER needs OFFICIAL_PARTITION_AT"; exit 1; }
+[ "$COMMUNITY_STALL_STARTER" -eq 0 ] || [ "$COMMUNITY_BOOTSTRAP" = config ] \
+    || { echo "FAIL: COMMUNITY_STALL_STARTER needs COMMUNITY_BOOTSTRAP=config"; exit 1; }
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
 
 if [ "$FUND" = "1" ]; then
@@ -688,7 +767,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
-        [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
+        ! is_initial "$j" || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
         [ "$j" -ne "$i" ] && echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
@@ -724,6 +803,39 @@ Append=true
 Format="[%TimeStamp%] %Severity% %Message%"
 CFG
 done
+
+# COMMUNITY_BOOTSTRAP=trusted: each community node lists every community node among its initial
+# confidants, next to the genesis ones; the official nodes keep the genesis list
+if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$COMMUNITY_BOOTSTRAP" = trusted ]; then
+    for i in $(seq 1 "$NODES"); do
+        official_node "$i" && continue
+        for j in $(seq 1 "$NODES"); do
+            is_initial "$j" || official_node "$j" || echo "${KEYS[$((j - 1))]}" >> "$WORK/n$i/trusted.txt"
+        done
+    done
+    echo "official stop: the community nodes list $(grep -c . "$WORK/n1/trusted.txt") initial confidants, the official nodes $TRUSTED_NODES"
+fi
+
+# COMMUNITY_BOOTSTRAP=config: the community bootstrap fallback on every node of this build, listing
+# every node of this build (the official nodes, even, have no such option)
+if [ "$COMMUNITY_BOOTSTRAP" = config ]; then
+    listed=""
+    for j in $(seq 1 "$NODES"); do alt_node "$j" || listed="$listed${listed:+,}${KEYS[$((j - 1))]}"; done
+    # COMMUNITY_STALL_STARTER: the node of this build with the lowest key (bytes, as cs::PublicKey
+    # compares) starts the community table; it waits less than the others
+    if [ "$COMMUNITY_STALL_STARTER" -gt 0 ]; then
+        COMMUNITY_STARTER=$(for j in $(seq 1 "$NODES"); do alt_node "$j" || echo "$j ${KEYS[$((j - 1))]}"; done \
+            | python3 -c 'import sys, base58; print(min((base58.b58decode(k), int(j)) for j, k in (l.split() for l in sys.stdin))[1])')
+    fi
+    for i in $(seq 1 "$NODES"); do
+        alt_node "$i" && continue
+        stall=$COMMUNITY_STALL_MINUTES
+        [ "$i" -ne "$COMMUNITY_STARTER" ] || stall=$COMMUNITY_STALL_STARTER
+        printf '\n[community_bootstrap]\nconfidants=%s\nstall_minutes=%s\n' "$listed" "$stall" >> "$WORK/n$i/config.ini"
+    done
+    echo "community bootstrap: on in every node of this build, $(tr ',' '\n' <<<"$listed" | grep -c .) keys listed, stall_minutes=$COMMUNITY_STALL_MINUTES" \
+        "$([ "$COMMUNITY_STARTER" -eq 0 ] || echo "(n$COMMUNITY_STARTER, the starter: $COMMUNITY_STALL_STARTER)")"
+fi
 
 # test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
 [ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
@@ -764,7 +876,7 @@ start_node() {
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
     # marked for the network fault (its executor, started later, inherits the cgroup)
-    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]]; then
+    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
         sudo mkdir -p "/sys/fs/cgroup/cstest-$i"
         if [[ ",$SLOW_NODES," == *",$i,"* ]]; then
             echo "$((SLOW_CPU * 1000)) 100000" | sudo tee "/sys/fs/cgroup/cstest-$i/cpu.max" > /dev/null
@@ -791,6 +903,32 @@ net_fault_on() {
 net_fault_off() {
     sudo tc qdisc del dev lo root 2>/dev/null || true
     sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
+}
+# OFFICIAL_PARTITION_AT: nothing passes between a community and an official node, both ways. UDP by
+# the p2p ports (a node sends its datagrams from its own port), TCP by the sender's cgroup
+partition_on() {
+    local i j
+    partition_off  # a chain left by an earlier cut: -N would fail, and its rules would stay
+    sudo iptables -N CSPART
+    sudo iptables -I OUTPUT 1 -o lo -j CSPART
+    for i in $COMMUNITY_NODES; do
+        for j in $OFFICIAL_NODES; do
+            sudo iptables -A CSPART -p udp --sport $((BASE_PORT + i)) --dport $((BASE_PORT + j)) -j DROP
+            sudo iptables -A CSPART -p udp --sport $((BASE_PORT + j)) --dport $((BASE_PORT + i)) -j DROP
+            sudo iptables -A CSPART -p tcp -m cgroup --path "cstest-$i" --dport $((BASE_PORT + j)) -j DROP \
+                || echo "partition: no cgroup match, TCP from n$i to n$j still passes"
+            sudo iptables -A CSPART -p tcp -m cgroup --path "cstest-$j" --dport $((BASE_PORT + i)) -j DROP \
+                || echo "partition: no cgroup match, TCP from n$j to n$i still passes"
+        done
+    done
+}
+partition_off() {
+    sudo iptables -D OUTPUT -o lo -j CSPART 2>/dev/null || true
+    sudo iptables -F CSPART 2>/dev/null || true
+    sudo iptables -X CSPART 2>/dev/null || true
+}
+partition_stats() {
+    sudo iptables -L CSPART -v -x -n 2>/dev/null | awk 'NR > 2 { p += $1 } END { print p + 0 }'
 }
 node_nets_on() {
     for i in $(seq 1 "$ALL_NODES"); do
@@ -834,6 +972,7 @@ stop_all() {
         echo "net fault: until the end ($(net_fault_stats))"
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
+    [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || partition_off
     [ "$NODE_NETS" != 1 ] || node_nets_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
@@ -982,6 +1121,353 @@ backfill_node_started() {
         echo "${entry#*:} 1000" > "$WORK/n${entry%%:*}/testnet-tamper-replies"
         echo "backfill test: n${entry%%:*} serves blocks below 1000 with an altered ${entry#*:}"
     done
+}
+
+# OFFICIAL_STOP_AT: the community and official nodes, the highest sequence of the community nodes
+off_done=0                # 1 once the official nodes were stopped, 2 once they were started again
+off_fail=""               # what went against the expectation of COMMUNITY_BOOTSTRAP
+off_restart_t=0
+off_restart_seq=0
+off_caught=0
+COMMUNITY_NODES=""
+OFFICIAL_NODES=""
+for i in $(seq 1 "$NODES"); do
+    if official_node "$i"; then OFFICIAL_NODES+="$i "; else COMMUNITY_NODES+="$i "; fi
+done
+community_max() {
+    local m=0 s i
+    for i in $COMMUNITY_NODES; do s=$(seq_of "$i"); s=${s:-0}; [ "$s" -le "$m" ] || m=$s; done
+    echo "$m"
+}
+community_min() {
+    local m=-1 s i
+    for i in $COMMUNITY_NODES; do s=$(seq_of "$i"); s=${s:-0}; { [ "$m" -ge 0 ] && [ "$s" -ge "$m" ]; } || m=$s; done
+    echo "$m"
+}
+# the header of node i's latest round, "R-1'234.0 TRUSTED" or "R-1'234.0 NORMAL"
+round_header() {
+    tail -n 3000 "$WORK/n$1/node.log" 2>/dev/null | grep -a ' R-[0-9'"'"']*\.[0-9]* \(TRUSTED\|NORMAL\)' | tail -1 \
+        | sed -E 's/.* (R-[0-9'"'"']+\.[0-9]+) (TRUSTED|NORMAL).*/\1 \2/' || true
+}
+bootstrap_lines() {
+    local n=0 i
+    for i in $COMMUNITY_NODES; do n=$((n + $(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true))); done
+    echo "$n"
+}
+official_stop() {
+    local t0 round official community h r i hdr seen
+    # wait for a round whose table the official nodes hold the majority of (seen by every node): without
+    # them that round cannot be decided (TrustedStage3State::take_urgent_decision)
+    t0=$(date +%s)
+    seen=""
+    while [ $(( $(date +%s) - t0 )) -lt 300 ]; do
+        round=""; official=0; community=0
+        for i in $(seq 1 "$NODES"); do
+            hdr=$(round_header "$i")
+            r=${hdr%% *}
+            [ -n "$r" ] || { round=""; break; }
+            if [ -z "$round" ]; then round=$r; elif [ "$r" != "$round" ]; then round=""; break; fi
+            if [ "${hdr##* }" = TRUSTED ]; then
+                if official_node "$i"; then official=$((official + 1)); else community=$((community + 1)); fi
+            fi
+        done
+        if [ -n "$round" ] && [ $((official + community)) -gt 0 ] && [ $((community * 2)) -lt $((official + community + 1)) ]; then
+            seen="$round: $official official and $community community confidants"
+            break
+        fi
+        sleep 0.2
+    done
+    [ -n "$seen" ] || seen="no round with an official majority seen in 300 s, stopped anyway"
+    for i in $OFFICIAL_NODES; do kill -KILL "${PIDS[$i]}" 2>/dev/null || true; done
+    for i in $OFFICIAL_NODES; do wait "${PIDS[$i]}" 2>/dev/null || true; REPORTED_DOWN[$i]=1; done
+    local t_kill s0 b0 first_t=0 first_seq=0 c end
+    t_kill=$(date +%s)
+    # the fallback must not have acted while the official nodes ran
+    for i in $COMMUNITY_NODES; do
+        if grep -aq 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log"; then
+            off_fail="${off_fail:+$off_fail; }n$i used the community bootstrap while the official nodes ran"
+            grep -a 'COMMUNITY BOOTSTRAP' "$WORK/n$i/node.log" | head -3
+        fi
+    done
+    s0=$(community_max)
+    b0=$(bootstrap_lines)
+    echo "official stop: killed $(printf 'n%s ' $OFFICIAL_NODES)at once (round $seen); community head $s0, COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+    end=$(( t_kill + OFFICIAL_STOP_MINUTES * 60 ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        sleep 2
+        c=$(community_max)
+        if [ "$first_t" -eq 0 ] && [ "$c" -gt "$s0" ]; then
+            first_t=$(date +%s); first_seq=$c
+            echo "official stop: community block $c $((first_t - t_kill)) s after the stop"
+        fi
+    done
+    c=$(community_max)
+    echo "official stop: after $OFFICIAL_STOP_MINUTES min the community head is $c ($((c - s0)) blocks since the stop), $(( $(bootstrap_lines) - b0 )) 'Bootstrap on' lines on the community nodes"
+    for i in $COMMUNITY_NODES; do
+        { grep -a 'NODE> Bootstrap on\|Bootstrap available nodes' "$WORK/n$i/node.log" || true; } | tail -2 | sed "s/^/official stop: n$i: /"
+    done
+    if [ "$COMMUNITY_BOOTSTRAP" = none ]; then
+        [ "$first_t" -eq 0 ] || off_fail="the community nodes wrote blocks without the official nodes and without the extra keys"
+    else
+        if [ "$first_t" -eq 0 ]; then
+            off_fail="the community nodes did not restart the network in $OFFICIAL_STOP_MINUTES min"
+        else
+            echo "OFFICIAL STOP RESULT: restart after $((first_t - t_kill)) s (first block $first_seq), $((c - s0)) blocks in $OFFICIAL_STOP_MINUTES min"
+        fi
+    fi
+    # COMMUNITY_STALL_STARTER: the others dropped the starter's first tables (fallback still closed)
+    # and took a repeat: a repeat in the same round is a new message, not a p2p duplicate
+    if [ "$COMMUNITY_STARTER" -gt 0 ] && [ "$first_t" -gt 0 ]; then
+        local dropped taken
+        for i in $COMMUNITY_NODES; do
+            [ "$i" -ne "$COMMUNITY_STARTER" ] || continue
+            dropped=$(grep -ac 'community bootstrap table .* has not stalled long enough' "$WORK/n$i/node.log" || true)
+            taken=$(grep -ac 'COMMUNITY BOOTSTRAP: taking' "$WORK/n$i/node.log" || true)
+            echo "OFFICIAL STOP RESULT: n$i dropped $dropped community tables while its fallback was closed, then took $taken"
+            if [ "$dropped" -eq 0 ] || [ "$taken" -eq 0 ]; then
+                off_fail="${off_fail:+$off_fail; }n$i: $dropped tables dropped and $taken taken, a repeat taken after a drop expected"
+            fi
+        done
+        grep -a 'COMMUNITY BOOTSTRAP: starting' "$WORK/n$COMMUNITY_STARTER/node.log" | head -3 | sed "s/^/official stop: n$COMMUNITY_STARTER (starter): /"
+    fi
+    # the community nodes agree on every block they hold (all of them, compared over the API)
+    local ports="" head
+    head=$(community_min)
+    for i in $COMMUNITY_NODES; do ports="$ports $i:$(api_port "$i")"; done
+    if (cd "$HERE" && python3 blockhashes.py --head "$head" --step 1 $ports); then
+        echo "OFFICIAL STOP RESULT: the community nodes hold the same blocks up to $head"
+    else
+        off_fail="${off_fail:+$off_fail; }the community nodes hold different blocks while the official nodes were down"
+    fi
+    off_restart_seq=$c
+    for i in $OFFICIAL_NODES; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+    off_restart_t=$(date +%s)
+    off_done=2
+    echo "official stop: $(printf 'n%s ' $OFFICIAL_NODES)started again, community head $c"
+}
+
+# chain reorganisations (see "REORG DEPTHS" near the end); a partition scenario reports them before its own verdict
+reorg_reported=0
+reorg_report() {
+    reorg_reported=1
+    reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
+    echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
+    # one line per refusal, or (since the lines are throttled) one a minute with the count since the
+    # previous one
+    refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } \
+        | sed -E 's/.*\(([0-9]+) refused since.*/\1/; t; s/.*/1/' | awk '{ n += $1 } END { print n + 0 }')
+    refused_lines=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
+    echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants ($refused_lines log lines)"
+    held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+    [ -z "$held" ] || echo "FORK HELD on: $held"
+}
+
+# OFFICIAL_PARTITION_AT: the community nodes cut off from the running official nodes
+part_done=0               # 1 while partitioned, 2 once reconnected
+part_fail=""
+part_from=0               # the community head at the cut: the chains are dumped from a little below it
+official_max() {
+    local m=0 s i
+    for i in $OFFICIAL_NODES; do s=$(seq_of "$i"); s=${s:-0}; [ "$s" -le "$m" ] || m=$s; done
+    echo "$m"
+}
+official_partition() {
+    local t_cut s0 o0 first_t=0 c o end i
+    for i in $COMMUNITY_NODES; do
+        if grep -aq 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log"; then
+            part_fail="${part_fail:+$part_fail; }n$i used the community bootstrap before the partition"
+        fi
+    done
+    s0=$(community_max); o0=$(official_max)
+    part_from=$(( s0 > 5 ? s0 - 5 : 0 ))
+    partition_on
+    t_cut=$(date +%s)
+    echo "partition: $(printf 'n%s ' $COMMUNITY_NODES)cut off from $(printf 'n%s ' $OFFICIAL_NODES)for $OFFICIAL_PARTITION_MINUTES min (community head $s0, official head $o0), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+    end=$(( t_cut + OFFICIAL_PARTITION_MINUTES * 60 ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        sleep 5
+        c=$(community_max)
+        if [ "$first_t" -eq 0 ] && [ "$c" -gt $((s0 + 1)) ]; then
+            first_t=$(date +%s)
+            echo "partition: community block $c $((first_t - t_cut)) s after the cut"
+        fi
+    done
+    c=$(community_max); o=$(official_max)
+    echo "PARTITION RESULT: after $OFFICIAL_PARTITION_MINUTES min the community head is $c ($((c - s0)) blocks, restart after" \
+        "$([ "$first_t" -eq 0 ] && echo never || echo "$((first_t - t_cut)) s")), the official head $o ($((o - o0)) blocks); $(partition_stats) packets dropped"
+    for i in $COMMUNITY_NODES; do
+        { grep -a 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log" || true; } | tail -1 | sed "s/^/partition: n$i: /"
+    done
+    # the two chains just before the reconnection: a community and an official node
+    local cn on
+    cn=$(echo $COMMUNITY_NODES | cut -d' ' -f1); on=$(echo $OFFICIAL_NODES | cut -d' ' -f1)
+    (cd "$HERE" && python3 partition.py dump --from "$part_from" --port "$(api_port "$cn")") > "$WORK/partition-community.txt" \
+        || part_fail="${part_fail:+$part_fail; }no chain dump of n$cn"
+    (cd "$HERE" && python3 partition.py dump --from "$part_from" --port "$(api_port "$on")") > "$WORK/partition-official.txt" \
+        || part_fail="${part_fail:+$part_fail; }no chain dump of n$on"
+    partition_off
+    part_done=2
+    echo "partition: reconnected (community head $c, official head $o)"
+    # have the two sides found each other again? (each node logs its neighbour count with its blocks)
+    sleep 120
+    for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
+        echo "partition: 120 s after the reconnection n$i has $(grep -a 'neighbour nodes = ' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*neighbour nodes = ([0-9]+).*/\1/') neighbours, head $(seq_of "$i")"
+    done
+    if [ "$OFFICIAL_PARTITION_RESTART" = 1 ]; then
+        echo "partition: restarting $(printf 'n%s ' $COMMUNITY_NODES)(community head $(community_max), official head $(official_max))"
+        partition_stop_nodes $COMMUNITY_NODES
+        for i in $COMMUNITY_NODES; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+        echo "partition: community nodes started again"
+    fi
+    [ "$RESOLVE_FORK_AFTER" != 1 ] || partition_resolve_fork
+}
+
+# stop nodes as an operator would: SIGTERM, then SIGKILL after 60 s (a trusted node waits for its
+# round before it exits, and with most of the round's confidants stopping that round never ends)
+partition_stop_nodes() {
+    local i t_stop
+    for i in "$@"; do kill -TERM "${PIDS[$i]}" 2>/dev/null || true; REPORTED_DOWN[$i]=1; done
+    t_stop=$(date +%s)
+    for i in "$@"; do
+        while kill -0 "${PIDS[$i]}" 2>/dev/null && [ $(( $(date +%s) - t_stop )) -lt 60 ]; do sleep 1; done
+        if kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            echo "partition: n$i still running 60 s after SIGTERM, SIGKILL"
+            kill -KILL "${PIDS[$i]}" 2>/dev/null || true
+        fi
+        wait "${PIDS[$i]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
+    done
+}
+
+# RESOLVE_FORK_AFTER: the operator of each community node holding a fork follows the official chain,
+# as docs/quick-start.md ("If your node reports FORK HELD") says: --resolve-fork; if the node knows
+# only an upper bound of the fork point and reports FORK HELD again lower, --set-bc-top at the last
+# common block (here from the chains dumped before the reconnection, as an operator would take it
+# from the monitor)
+part_resolved=""          # community nodes cut back to the official chain
+part_restart_fail=0       # starts right after a cut that stopped with an error (started again)
+
+# nodes holding a fork: fork-held.json and a FORK HELD line after line $2 of node.log
+partition_held() {
+    local i from=$1 held=""
+    for i in $COMMUNITY_NODES; do
+        [ -f "$WORK/n$i/fork-held.json" ] && tail -n +"$((from + 1))" "$WORK/n$i/node.log" | grep -aq 'FORK HELD since' && held="$held $i"
+    done
+    echo $held
+}
+
+# start a node after its chain was cut; if it stops at once (the first start after a cut can fail
+# on a quick-start checkpoint above the new head), report it and start it once more
+partition_start_after_cut() {
+    local i t0 status
+    for i in "$@"; do start_node "$i"; REPORTED_DOWN[$i]=""; done
+    t0=$(date +%s)
+    while [ $(( $(date +%s) - t0 )) -lt 60 ]; do sleep 2; done
+    for i in "$@"; do
+        kill -0 "${PIDS[$i]}" 2>/dev/null && continue
+        status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+        part_restart_fail=$((part_restart_fail + 1))
+        echo "RESOLVE FORK: n$i stopped at its first start after the cut (exit $status):"
+        { grep -a ' error ' "$WORK/n$i/node.log" || true; } | tail -4 | sed "s/^/partition: n$i: /" | cut -c1-260
+        start_node "$i"; REPORTED_DOWN[$i]=""
+        echo "RESOLVE FORK: n$i started again"
+    done
+}
+
+partition_resolve_fork() {
+    local t0 held i n_comm rc fork lines upper="" again
+    local -a lines_i=()
+    n_comm=$(echo $COMMUNITY_NODES | wc -w)
+    t0=$(date +%s)
+    while :; do
+        held=$(partition_held 0)
+        [ "$(echo $held | wc -w)" -lt "$n_comm" ] || break
+        [ $(( $(date +%s) - t0 )) -lt $(( RESOLVE_FORK_WAIT * 60 )) ] || break
+        sleep 10
+    done
+    echo "RESOLVE FORK: FORK HELD on $(echo $held | wc -w) of $n_comm community nodes${held:+$(printf ' n%s' $held)} after $(( $(date +%s) - t0 )) s (community head $(community_max), official head $(official_max))"
+    for i in $COMMUNITY_NODES; do
+        { grep -a 'FORK HELD since' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \\1/; s/ What to do:.*//"
+    done
+    if [ -z "$held" ]; then
+        part_fail="${part_fail:+$part_fail; }no community node reported FORK HELD within $RESOLVE_FORK_WAIT min, nothing to resolve"
+        return 0
+    fi
+    # 0. while FORK HELD the node looks for the last common block itself: wait until every node holding
+    #    the fork knows it ("fork_point_status": "exact" in fork-held.json; "deeper" is an answer too)
+    local pending status to_located="" extra
+    t0=$(date +%s)
+    while :; do
+        pending=""
+        for i in $held; do
+            grep -aqE '"fork_point_status": "(exact|deeper|located \(unverified\))"' "$WORK/n$i/fork-held.json" 2>/dev/null || pending="$pending $i"
+        done
+        [ -n "$pending" ] || break
+        [ $(( $(date +%s) - t0 )) -lt $(( RESOLVE_LOCATE_WAIT * 60 )) ] || break
+        sleep 10
+    done
+    echo "RESOLVE FORK: fork point located on$(printf ' n%s' $held) but$([ -n "$pending" ] && printf ' n%s' $pending || echo ' none') after $(( $(date +%s) - t0 )) s"
+    for i in $held; do
+        status=$(sed -nE 's/.*"fork_point_status": "([a-z ()]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null)
+        echo "RESOLVE FORK: n$i fork point #$(sed -nE 's/.*"fork_point": "([0-9]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null) ($status), upper bound #$(sed -nE 's/.*"fork_point_upper_bound": "([0-9]+)".*/\1/p' "$WORK/n$i/fork-held.json" 2>/dev/null)"
+        { grep -aE 'fork point search|last common block' "$WORK/n$i/node.log" || true; } | tail -3 | sed "s/^/partition: n$i: /" | cut -c1-260
+        case "$status" in
+            exact) ;;
+            "located (unverified)") to_located="$to_located $i"; echo "RESOLVE FORK: n$i: located but not verified: the operator confirms it with --to-located" ;;
+            *) part_fail="${part_fail:+$part_fail; }n$i: the fork point was not located ($status) before --resolve-fork" ;;
+        esac
+    done
+    # 1. --resolve-fork on every node holding the fork
+    partition_stop_nodes $held
+    for i in $held; do
+        lines=$(wc -l < "$WORK/n$i/node.log")
+        rc=0
+        extra=""; case " $to_located " in *" $i "*) extra=--to-located ;; esac
+        (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --resolve-fork $extra </dev/null >> resolve-fork.log 2>&1) || rc=$?
+        echo "RESOLVE FORK: n$i --resolve-fork $extra exit $rc"
+        tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | { grep -a -- '--resolve-fork' || true; } | sed -E "s/^.*(--resolve-fork)/partition: n$i: \\1/" | cut -c1-260
+        if [ "$rc" -ne 0 ]; then part_fail="${part_fail:+$part_fail; }--resolve-fork failed on n$i (exit $rc)"; continue; fi
+        tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | grep -aq 'the fork point is an upper bound' && upper="$upper $i"
+    done
+    for i in $held; do lines_i[$i]=$(wc -l < "$WORK/n$i/node.log"); done
+    partition_start_after_cut $held
+    echo "RESOLVE FORK: $(printf 'n%s ' $held)started again after --resolve-fork"
+    # one --resolve-fork, at the exact fork point, and no start-up failure after the cut
+    [ -z "$upper" ] || part_fail="${part_fail:+$part_fail; }--resolve-fork cut at an upper bound on$(printf ' n%s' $upper)"
+    [ "$part_restart_fail" -eq 0 ] || part_fail="${part_fail:+$part_fail; }$part_restart_fail start(s) right after the cut stopped with an error"
+    # 2. the fork point was an upper bound: the node holds the fork again, lower; cut at the last
+    #    common block by hand
+    if [ -n "$upper" ]; then
+        fork=$(cd "$HERE" && python3 partition.py fork --community "$WORK/partition-community.txt" --official "$WORK/partition-official.txt")
+        t0=$(date +%s)
+        while :; do
+            again=""
+            for i in $upper; do
+                tail -n +"$((${lines_i[$i]} + 1))" "$WORK/n$i/node.log" | grep -aq 'FORK HELD since' && again="$again $i"
+            done
+            [ "$(echo $again | wc -w)" -lt "$(echo $upper | wc -w)" ] || break
+            [ $(( $(date +%s) - t0 )) -lt 180 ] || break
+            sleep 10
+        done
+        echo "RESOLVE FORK: the fork point was an upper bound on$(printf ' n%s' $upper); FORK HELD again on$([ -n "$again" ] && printf ' n%s' $again || echo ' none') after $(( $(date +%s) - t0 )) s; the chains differ from #$fork: --set-bc-top $((fork - 1))"
+        for i in $again; do
+            tail -n +"$((${lines_i[$i]} + 1))" "$WORK/n$i/node.log" | { grep -a 'FORK HELD since' || true; } | tail -1 | sed -E "s/^.*(FORK HELD since)/partition: n$i: \\1/; s/ What to do:.*//"
+        done
+        if [ -n "$again" ]; then
+            partition_stop_nodes $again
+            for i in $again; do
+                lines=$(wc -l < "$WORK/n$i/node.log")
+                rc=0
+                (cd "$WORK/n$i" && exec timeout 600 "$(bin_of "$i")" --db-path db --config-file config.ini --set-bc-top "$((fork - 1))" </dev/null >> resolve-fork.log 2>&1) || rc=$?
+                echo "RESOLVE FORK: n$i --set-bc-top $((fork - 1)) exit $rc"
+                tail -n +"$((lines + 1))" "$WORK/n$i/node.log" | { grep -aE 'start remove|set-bc-top|error' || true; } | tail -3 | sed "s/^/partition: n$i: /" | cut -c1-260
+                [ "$rc" -eq 0 ] || part_fail="${part_fail:+$part_fail; }--set-bc-top failed on n$i (exit $rc)"
+            done
+            partition_start_after_cut $again
+            echo "RESOLVE FORK: $(printf 'n%s ' $again)started again after --set-bc-top"
+        fi
+    fi
+    part_resolved=$held
 }
 
 while :; do
@@ -1136,6 +1622,24 @@ while :; do
         for i in $(seq 1 "$NODES"); do start_node "$i"; done
         crashed_all=1
         echo "crash test: network restarted"
+    fi
+
+    if [ "$OFFICIAL_PARTITION_AT" -gt 0 ] && [ "$part_done" -eq 0 ] && [ "$min" -ge "$OFFICIAL_PARTITION_AT" ]; then
+        part_done=1
+        official_partition
+    fi
+    if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$off_done" -eq 0 ] && [ "$min" -ge "$OFFICIAL_STOP_AT" ]; then
+        off_done=1
+        official_stop
+    fi
+    if [ "$off_done" -eq 2 ] && [ "$off_caught" -eq 0 ]; then
+        lowest=-1
+        for i in $OFFICIAL_NODES; do s=$(seq_of "$i"); s=${s:-0}; { [ "$lowest" -ge 0 ] && [ "$s" -ge "$lowest" ]; } || lowest=$s; done
+        if [ "$lowest" -ge "$off_restart_seq" ]; then
+            off_caught=$(( $(date +%s) - off_restart_t ))
+            [ "$off_caught" -gt 0 ] || off_caught=1
+            echo "OFFICIAL STOP RESULT: the official nodes reached the community head of their restart ($off_restart_seq) in about $off_caught s"
+        fi
     fi
 
     if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ] \
@@ -1611,8 +2115,8 @@ PY
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
             --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
-            --low-stake-nodes "$LOW_STAKE_NODES" \
-            $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
+            --low-stake-nodes "$LOW_STAKE_NODES" --even-amount "$OFFICIAL_FUND" \
+            $([ "$DELEGATE" = "1" ] && echo --delegations) $([ "$RESOLVE_FORK_AFTER" = 1 ] && echo --chain-cut) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
 
@@ -1662,6 +2166,7 @@ PY
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
         && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
+        [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
@@ -2218,9 +2723,10 @@ done
 # the consensus while the snapshots are served: n1's block rate and round times in the same number of
 # seconds before the joins and after they started
 if [ "$STRESS_WINDOW" -gt 0 ] && [ -n "${join_started:-}" ]; then
-    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
-import re, sys, datetime
+    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" "$STRESS_RATE_DROP" "$STRESS_ROUND_RISE" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
+import re, sys, datetime, statistics
 log, start, window = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+max_drop, max_rise = float(sys.argv[4]), float(sys.argv[5])
 stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
 def t(line):
     m = stamp.match(line)
@@ -2236,28 +2742,66 @@ for line in open(log, errors="replace"):
         m = re.search(r"Last written sequence = ([0-9']+)", line)
         if x is not None and m:
             seqs.append((x, int(m.group(1).replace("'", ""))))
+def rate_in(a, b):
+    s = [q for x, q in seqs if a <= x < b]
+    return (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
 def window_stats(a, b):
     r = [y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b]
-    s = [q for x, q in seqs if a <= x < b]
-    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    # the median of the one-minute rates (at least 3 parts): a single slow minute, e.g. a burst of
+    # lost packets, moves the median far less than the rate over the whole window
+    parts = max(3, (b - a) // 60)
+    step = (b - a) / parts
+    rate = statistics.median(rate_in(a + k * step, a + (k + 1) * step) for k in range(parts))
     r.sort()
     p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
     return rate, p95, len(r)
 base = window_stats(start - window, start)
 load = window_stats(start, start + window)
-print(f"consensus: before the joins {base[0]:.2f} blocks/s, round p95 {base[1]:.2f} s ({base[2]} rounds); "
+print(f"consensus: before the joins {base[0]:.2f} blocks/s (median minute), round p95 {base[1]:.2f} s ({base[2]} rounds); "
       f"while serving {load[0]:.2f} blocks/s, round p95 {load[1]:.2f} s ({load[2]} rounds)")
-ok = base[2] > 10 and load[2] > 10
+ok = base[2] > 10 and load[2] > 10 and base[0] > 0 and base[1] > 0
 if not ok:
     print("FAIL: too few rounds in a window to compare")
-elif load[0] < 0.9 * base[0]:
-    print(f"FAIL: block rate fell by {100 * (1 - load[0] / base[0]):.0f} % (10 % allowed)")
+    sys.exit(1)
+drop, rise = 100 * (1 - load[0] / base[0]), 100 * (load[1] / base[1] - 1)
+print(f"consensus: block rate {-drop:+.1f} % ({max_drop:g} % fall allowed), round p95 {rise:+.1f} % ({max_rise:g} % rise allowed)")
+if drop > max_drop:
+    print(f"FAIL: block rate fell by {drop:.0f} % ({max_drop:g} % allowed)")
     ok = False
-elif load[1] > 1.2 * base[1]:
-    print(f"FAIL: round time p95 rose by {100 * (load[1] / base[1] - 1):.0f} % (20 % allowed)")
+if rise > max_rise:
+    print(f"FAIL: round time p95 rose by {rise:.0f} % ({max_rise:g} % allowed)")
     ok = False
 sys.exit(0 if ok else 1)
 PY
+fi
+
+if [ "$OFFICIAL_STOP_AT" -gt 0 ]; then
+    [ "$off_done" -eq 2 ] || off_fail="${off_fail:+$off_fail; }the official nodes were never stopped"
+    [ "$off_caught" -gt 0 ] || off_fail="${off_fail:+$off_fail; }the official nodes never reached the community head of their restart"
+    # what the official nodes made of the blocks written without them
+    for i in $OFFICIAL_NODES; do
+        echo "official stop: n$i logged $(grep -ac "Pool Signatures aren't valid" "$WORK/n$i/node.log" || true) invalid pool signatures," \
+            "$(grep -ac 'confirmations are not OK' "$WORK/n$i/node.log" || true) refused confirmations," \
+            "$(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true) bootstraps"
+    done
+    if [ -n "$off_fail" ]; then echo "FAIL: official stop: $off_fail"; exit 1; fi
+fi
+
+if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    reorg_report
+    [ "$part_done" -eq 2 ] || part_fail="${part_fail:+$part_fail; }the partition never ended"
+    if [ "$part_done" -eq 2 ]; then
+        ports=""
+        for i in $COMMUNITY_NODES $OFFICIAL_NODES; do ports="$ports --port $(api_port "$i")"; done
+        (cd "$HERE" && python3 partition.py report --community "$WORK/partition-community.txt" --official "$WORK/partition-official.txt" $ports) \
+            || part_fail="${part_fail:+$part_fail; }the nodes did not all keep the blocks of one side"
+    fi
+    for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
+        echo "partition: n$i logged $(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true) bootstraps," \
+            "$(grep -ac 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log" || true) community tables started or taken"
+    done
+    [ "$RESOLVE_FORK_AFTER" != 1 ] || echo "RESOLVE FORK: cut back to the official chain:$([ -n "$part_resolved" ] && printf ' n%s' $part_resolved || echo ' none'); $part_restart_fail start(s) right after a cut stopped with an error and were repeated"
+    if [ -n "$part_fail" ]; then echo "FAIL: partition: $part_fail"; exit 1; fi
 fi
 
 # official nodes: the same block hashes as n1 (every 100th sequence up to the lowest head)
@@ -2271,7 +2815,8 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     done
     # pruned nodes, and a node that joined from a snapshot, lack the oldest blocks
     partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE" $EXTRA_JOINERS); do echo "$i"; done | sort -u | paste -sd, -)
-    (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
+    (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" --step "$([ "$OFFICIAL_STOP_AT" -gt 0 ] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] && echo 1 || echo 100)" $ports) \
+        || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
 fi
 
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's
@@ -2287,12 +2832,7 @@ fi
 # finished rollback episode). In a normal run the guard must never stop a reorg and no competing block
 # may be refused (a refusal leaves a lagging node waiting for the operator, FORK HELD).
 # DEEP_ROLLBACK_EXPECTED=1 is for a scenario that provokes either on purpose.
-reorgs=$(grep -ah 'rollback episode ended: unwound' "$WORK"/n*/node.log 2>/dev/null | sed -E 's/.*unwound ([0-9]+) .*/\1/' | sort -n || true)
-echo "REORG DEPTHS: $(echo "$reorgs" | grep -c . || true) episode(s), deepest $(echo "$reorgs" | tail -1 | grep . || echo 0) block(s)"
-refused=$({ grep -ah 'is not authenticated by this node.s confidants' "$WORK"/n*/node.log 2>/dev/null || true; } | wc -l)
-echo "UNWINDS REFUSED: $refused competing block(s) not vouched for by the node's confidants"
-held=$(grep -al 'FORK HELD since' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
-[ -z "$held" ] || echo "FORK HELD on: $held"
+[ "$reorg_reported" = 1 ] || reorg_report
 guarded=$(grep -al 'LONGEST-CHAIN GUARD: a competing chain' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
 if [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
     if [ -n "$guarded" ]; then
@@ -2306,6 +2846,15 @@ if [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
         exit 1
     fi
 fi
+
+# the community bootstrap fallback in a network that never lost its official nodes: never used
+if [ "$COMMUNITY_BOOTSTRAP" = config ] && [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$OFFICIAL_PARTITION_AT" -eq 0 ]; then
+    used=$(grep -alE 'COMMUNITY BOOTSTRAP: (starting|taking)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+    [ -z "$used" ] || { grep -ah 'COMMUNITY BOOTSTRAP' "$WORK"/n*/node.log | head -5; echo "FAIL: the community bootstrap acted on $used"; exit 1; }
+    echo "community bootstrap: never used ($(grep -ah 'NODE> Bootstrap on' "$WORK"/n*/node.log | wc -l) regular bootstrap lines on all nodes)"
+fi
+[ "$OFFICIAL_PARTITION_AT" -eq 0 ] || echo "PARTITION RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+[ "$OFFICIAL_STOP_AT" -eq 0 ] || echo "OFFICIAL STOP RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
 
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
 # round, R-x.1 and up, that never gives way to R-(x+1).0): the last three round headers of n1

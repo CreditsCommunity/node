@@ -122,6 +122,147 @@ The official node has it only in its monitor and wallet builds. The cache follow
 standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
 rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
 
+### Community bootstrap fallback (expert option, off by default)
+
+Only the initial confidants (the `init_trusted` list, or special order 2) may restart a stalled
+network with a bootstrap table, and a table with any other key needs the project's signature. If
+all official nodes become unavailable at once, the initial confidants still running may be too few
+(fewer than 4), and the network stays stalled until the official nodes are back.
+
+The `[community_bootstrap]` section of `config.ini` adds a liveness fallback. It is off unless
+`confidants` lists keys:
+
+```ini
+[community_bootstrap]
+; community node keys (base58), comma or space separated; empty or missing: off
+confidants=<key1>,<key2>,...
+; minutes without progress before the fallback may act (1 to 10080, default 30)
+stall_minutes=30
+```
+
+With the list set, and only after `stall_minutes` in which the node saw no new block, no round
+package whose signatures it checked and accepted, and no regular bootstrap table, and while no
+neighbour reports a block two or more above its own (one above only holds it for a further
+`stall_minutes`, since sync would have fetched that block long before):
+
+- a node whose key is an initial confidant or listed may start a bootstrap table of the initial
+  confidants and listed nodes that hold the highest block, as an initial confidant does; the table
+  is signed by its starter, not by the project;
+- a node with the list takes such a table only if it has more than half of the listed keys, each
+  key is an initial confidant or listed, and the starter's signature checks. The round window and
+  the stall check of every unsigned table still apply. A node takes one such table per half
+  `round_elapse_time`; within that time only a larger table whose starter (its lowest key) is not
+  above the current table's starter replaces it, so a listed node cannot displace a running table
+  by padding its own with keys of stopped nodes. The starter repeats its table every
+  `round_elapse_time` with new random bytes after the signature, so that a node whose fallback
+  opens later gets the repeat (the transport drops a message it has seen before);
+- of an even set of nodes the starter drops the last key, as the official code does, unless that
+  would leave the table without more than half of the listed keys (it does drop it when the rest
+  is a regular table of initial confidants);
+- a jump of the clock between two checks (the host suspended and resumed, the clock set) counts
+  as progress: the node watches again for `stall_minutes` before it acts.
+
+In normal operation nothing changes: blocks and round packages keep the fallback closed, a regular
+bootstrap table is handled exactly as before and always replaces a community one, and blocks,
+hashes and validation are unchanged. A regular table, even one signed by the project, is progress
+like a block: if no block follows it for a further `stall_minutes`, a community table may replace it. Official nodes, and community nodes without the list, drop a
+community table (it holds a key that is not an initial confidant and is not signed by the
+project); they then take the blocks written meanwhile through ordinary sync once they are back,
+as the `official-stop-*` scenarios of the robustness workflow check.
+
+**An expert option, not in the set-up.** Every node that should take part needs the same list: it
+only helps when more than half of the listed nodes are running, and mismatched lists weaken that
+majority rule. So `setup.sh`, `setup.ps1` and the Docker environment do not offer it until the
+option has been reviewed and a coordinated list exists (possibly shipped like `known_hosts.txt`);
+edit `config.ini` by hand (in Docker, `~/.credits/config.ini`, which the entrypoint writes only
+when it is missing).
+
+The risk it brings is a partition. If a network partition cuts more than half of the listed nodes
+off from the official nodes for longer than `stall_minutes`, while the official nodes keep
+producing blocks, the listed nodes restart on their own and the two sides write different blocks.
+There is no rule that makes either side yield to the other, and the threshold stays "more than
+half of the list". What happens at reconnection (option A of the bounded-rollback guard, #189: the
+shorter side waits for its operator):
+
+- official nodes follow the longer chain, as for any two chains, and unwind their blocks above the
+  fork; the transactions of those blocks are reverted and must be sent again unless the other
+  side also wrote them;
+- community nodes never follow a longer chain on their own unless its blocks are vouched for by
+  confidants they hold (the bounded-rollback guard, see "Consensus fixes"). The blocks of the other
+  side are not, so each community node on the shorter side keeps its chain and reports **FORK
+  HELD** (on every round line, a detail line once a minute, `fork-held.json` next to the
+  database, an unhealthy Docker healthcheck). Its operator checks the other nodes or the monitor
+  and chooses (docs/quick-start.md, "If your node reports FORK HELD"):
+  - **follow the official chain**: after a partition the block the node refused does not continue
+    any block it holds, so at first it knows only an upper bound of the fork point. While FORK
+    HELD it looks for the last common block itself (#192). Wait until `fork-held.json` shows
+    `"fork_point_status": "exact"`, then stop the node, run it once with `--resolve-fork` (Docker:
+    `resolve-fork`) and start it again: it cuts at that block in one run. If the status is
+    `"located (unverified)"`, check the point against other nodes or the monitor and add
+    `--to-located`; if it stays `"upper bound"` or `"deeper"`, cut at the last common block by hand
+    with `--set-bc-top <sequence>`. The blocks above the fork, and their transactions, are
+    reverted; the quick-start checkpoints above the new top go with them;
+  - **keep the community chain**: create `dismiss-fork` next to the database; the node keeps
+    refusing that branch and no longer reports it.
+
+The fallback's own blocks pass that guard on the community side: a community bootstrap block is
+signed by the confidants of the community table, and a node that took that table holds it as a
+round table it accepted, which is what the guard asks of a bootstrap block. Nothing in this option
+changes what may unwind a node's chain: it does not touch block removal, the rollback bound or the
+fork records. With the option on, the `official-stop-*` scenarios show no refused block and no
+reorganisation on any node.
+
+Measured in the `official-partition` scenarios of the robustness workflow (community side cut off
+for 6 minutes, `stall_minutes=2`, the official nodes run the official build), with the guard:
+
+- the community side restarts by the fallback 120-180 s after its last block; both sides then
+  write blocks (fork at #533-#563);
+- after the cut is lifted the two sides do not look each other up again: every node keeps only
+  the 4 neighbours of its own side, nothing is refused, and both chains go on until the end of the
+  run (`official-partition`);
+- with the community nodes restarted after the reconnection (they dial every host again,
+  `official-partition-restart`), all five report FORK HELD within 20 s and refuse every block of
+  the official chain: the community side is no longer unwound part of the way and left stuck
+  above the fork, as before the guard; it stays on its own chain until its operator decides. In
+  one run the official side had stalled during the cut (3 live initial confidants, fewer than 4),
+  wrote no block of its own, and took the community blocks once the community nodes were
+  restarted: every node then held all 217 community blocks and the same head;
+- with the operator path (`official-partition-restart-resolve`) and the fork locator of #192: the
+  five community nodes held the fork within 20 s and found the exact fork point (#506) 30 s later;
+  one `--resolve-fork` each cut there, every start after it succeeded, and every node then held
+  the official chain: one chain, 275 community blocks and their 63 transactions reverted. Without
+  the locator, `--resolve-fork` cut a single block (the upper bound), FORK HELD came back a block
+  lower, and `--set-bc-top` at the last common block was needed (179-215 blocks reverted); the
+  first start after each such cut stopped once on a quick-start checkpoint above the new top,
+  which #192 removes. The scenario now fails if a cut lands on an upper bound or a start after a
+  cut fails.
+
+A partition with this option on therefore needs operator attention. Keep `stall_minutes` long.
+
+**Known limitations** (accepted; the operators control the list):
+
+- **A hostile lowest listed key.** The starter of a table is its lowest key, and a node takes a new
+  community table once half a `round_elapse_time` has passed since the last one. A listed node with
+  the lowest key that turns hostile can therefore send, every half `round_elapse_time`, a table
+  padded with keys of stopped nodes that cannot decide a round, and keep the community restart
+  from deciding while the stall lasts. It cannot write blocks the others would not sign, and a
+  regular table still replaces its table at once; the remedy is to take its key off the list.
+- **Replay across a chain cut.** A community table is signed over the round and the keys only.
+  After `--set-bc-top` or `--resolve-fork` below the round of a table sent earlier, that table
+  verifies again for the same round on a node whose fallback is open. It changes nothing unless its
+  confidants are themselves running and stalled at that height. Binding the last block hash into
+  the signed bytes would change the format a project-signed table shares; it is left to the
+  BootstrapSignature protocol of the decentralisation plan.
+
+A set at the highest block with listed keys that hold no more than half of the list is no
+community table; the initial confidants in it then make the regular table they would make without
+the list (the official odd rule applies), so a node with the list never holds back a regular
+restart, for example when the official nodes come back while a minority of the listed nodes runs.
+
+**Decentralisation plan.** When `H_activate_decentralization` of BK's plan lands, the fallback is to
+be gated on `lastSeq + 1 < H_activate` (it acts only before the activation height) and later folded
+into the plan's BootstrapSignature protocol.
+
 ## Start-up behaviour
 
 - **A banner names the release.** At start the console and the log show the CREDITS logo with
@@ -370,9 +511,9 @@ consensus rules.
   reconnects. The same holds for a node that lags behind with a divergent last block it never
   replaced (for example, it missed a bootstrap round): when the network's next block is not
   confirmed by the confidants of that block, the node waits for the operator instead of unwinding
-  it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. The opt-in
-  community bootstrap fallback (PR #188, not merged yet) expects the longer chain to win after a
-  partition; with this change that switch is an operator decision too.
+  it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. After a
+  partition with the opt-in community bootstrap fallback, the community side holds the fork in the
+  same way and its operator decides (see "Community bootstrap fallback").
 
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
   with a request that takes exactly as long as the others wait for its stage-3. Depending on a few

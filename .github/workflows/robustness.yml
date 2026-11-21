@@ -392,14 +392,20 @@ jobs:
             contracts: true
           # stress on the confidants that serve (n1, n3, n5, n7): four nodes join at once, the first killed
           # during its fetch and its import; n3 and n9 on a 2 Mbit/s link. The block rate and the round
-          # times while serving must stay within 10 % / 20 % of the same window before the joins
+          # times while serving must stay within 10 % / 20 % of the same window before the joins (the rate
+          # is the median of the one-minute rates)
           - name: snapshot-p2p-stress
             official: 'no'   # four joining nodes: the even ones would be official
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 JOIN_FETCH_RATE=200 JOIN_KILL_DURING_FETCH=1 NET_FAULT=rate NET_FAULT_RATE=2mbit NET_FAULT_NODES=3,9
             fixed: true
+          # 5 % loss on n3 and n9: 20 % / 50 % allowed. The loss reaches the joiner n9 only once it has
+          # joined, so the second window has more lossy traffic than the first, whatever serving costs;
+          # and the first window's round p95 alone varies between identical runs (0.57 s or 0.8-0.93 s).
+          # Measured: a steady fall of 5-16 % (-10 % failed the former 10 % limit); the same logs slowed
+          # by 30 % (or 20 %) give -37 to -40 % (-26 to -31 %), which still fails
           - name: snapshot-p2p-stress-loss
             official: 'no'   # four joining nodes: the even ones would be official
-            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 NET_FAULT=loss NET_FAULT_PCT=5 NET_FAULT_NODES=3,9
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 STRESS_RATE_DROP=20 STRESS_ROUND_RISE=50 TARGET_SEQ=3300 JOIN_EXTRA=3 NET_FAULT=loss NET_FAULT_PCT=5 NET_FAULT_NODES=3,9
             fixed: true
           # with contracts running before and during the joins
           - name: snapshot-p2p-stress-contracts
@@ -496,6 +502,61 @@ jobs:
           # rewards between sets of signers (the takeover of the writer's block); run by name, repeated
           - name: bootstrap-livelock-rewards
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 REWARD_ROUND=100 LOAD_SECONDS=2400 TARGET_SEQ=3000
+            manual: true
+          # if all official nodes become unavailable at once (node_alt_ref=official; run by name): 5
+          # official even nodes with more stake hold the trusted seats, 5 community odd nodes; n1, n2,
+          # n3, n4 and n6 are the genesis initial confidants (official majority: a table that still
+          # names the stopped nodes cannot decide). They are killed in a round they hold the majority of, stay
+          # down 5 minutes and start again. Without extra keys the network must stay stalled until
+          # they are back; with every community key in the community nodes' own trusted.txt the
+          # community nodes must restart it, and the official nodes must then take the same blocks
+          - name: official-stop-stalled
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=none RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          - name: official-stop-trusted
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=trusted RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          # the same with the community bootstrap fallback ([community_bootstrap], stall_minutes=2) in
+          # place of the hand-edited trusted.txt: it must restart the network, and not act before
+          - name: official-stop-config
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_STOP_MINUTES=6 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          # the same with staggered stall_minutes: the starter (the community node with the lowest key)
+          # 2, the others 3. Its first tables reach nodes whose fallback is still closed: the restart
+          # needs a repeat of the table in the same round to get through (not dropped as a p2p duplicate)
+          - name: official-stop-config-staggered
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_STOP_MINUTES=7 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=3 COMMUNITY_STALL_STARTER=2 RESTART_AT=0 LOAD_SECONDS=1500
+            fixed: true
+            manual: true
+          # the community nodes cut off from the RUNNING official nodes for 6 minutes (fallback on,
+          # stall_minutes=2): both sides write blocks; after the reconnection the run reports which
+          # side the nodes kept, how many blocks and transactions the other lost, and needs one chain
+          # (refusals and FORK HELD on the community side are expected: DEEP_ROLLBACK_EXPECTED=1)
+          - name: official-partition
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
+            fixed: true
+            manual: true
+          # the same, the community nodes restarted after the reconnection (they dial every host again)
+          - name: official-partition-restart
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_PARTITION_RESTART=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
+            fixed: true
+            manual: true
+          # the operator path after a partition: the community nodes, restarted after the
+          # reconnection, hold the fork (FORK HELD: the longer chain is not vouched for by their
+          # confidants); each one is stopped and run once with --resolve-fork, then, if the fork
+          # point was only an upper bound and the node holds the fork again lower, with --set-bc-top
+          # at the last common block; every node must end on the official chain
+          - name: official-partition-restart-resolve
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_PARTITION_RESTART=1 RESOLVE_FORK_AFTER=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
+            fixed: true
+            manual: true
+          # the fallback on (stall_minutes=1) in a network whose official nodes keep running, under
+          # packet loss and the restart test: it must never act
+          - name: community-bootstrap-quiet
+            env: COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=1 NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 TARGET_SEQ=1500
             manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
@@ -608,4 +669,8 @@ jobs:
             testnet-run/resources.tsv
             testnet-run/resources-summary.txt
             testnet-run/sampler.log
+            testnet-run/partition-*.txt
+            testnet-run/n*/fork-held.json
+            testnet-run/n*/reorg-episode.json
+          # branch runs (test variants) are kept briefly: Actions storage is shared
           retention-days: ${{ github.ref_name == 'master' && 14 || 3 }}

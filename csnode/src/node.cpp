@@ -1371,6 +1371,68 @@ cs::BootstrapWeight Node::calculateBootStrapWeight(const cs::PublicKeys& confida
 }
 
 
+std::set<cs::PublicKey> Node::communityConfidants() const {
+    const auto& keys = cs::ConfigHolder::instance().config()->getCommunityBootstrapSettings().confidants;
+    return std::set<cs::PublicKey>(keys.begin(), keys.end());
+}
+
+void Node::onCommunityProgress() {
+    std::lock_guard lock(communityMutex_);
+    communityGate_.onProgress(stat_.msSinceStart());
+}
+
+bool Node::isCommunityFallbackOpen() {
+    const auto& settings = cs::ConfigHolder::instance().config()->getCommunityBootstrapSettings();
+    const cs::Sequence lastSeq = blockChain_.getLastSeq();
+    const uint64_t stallMs = uint64_t(settings.stallMinutes) * 60'000ULL;
+    // a jump of the clocks between two looks (host suspended, clock set) is progress: the node then
+    // watches again before it acts on what it saw before. The looks come every round_elapse_time
+    const uint64_t maxGapMs = std::max<uint64_t>(5 * 60'000ULL, 3 * cs::ConfigHolder::instance().config()->roundElapseTime());
+    const uint64_t wallMs = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch()).count());
+    bool stalled = false;
+    uint64_t sinceProgress = 0;
+    {
+        std::lock_guard lock(communityMutex_);
+        const uint64_t now = stat_.msSinceStart();
+        communityGate_.onClock(now, wallMs, maxGapMs);
+        communityGate_.onLastSequence(lastSeq, now);
+        stalled = communityGate_.isStalled(now, stallMs);
+        sinceProgress = communityGate_.msSinceProgress(now);
+    }
+    if (settings.confidants.empty() || !stalled) {
+        return false;
+    }
+    // a neighbour with a later block: this node is behind and syncs, the network is not stalled
+    bool ahead = false;
+    transport_->forEachNeighbour([&ahead, lastSeq, sinceProgress, stallMs](const cs::PublicKey&, cs::Sequence seq, cs::RoundNumber) {
+        if (cs::isNeighbourAhead(seq, lastSeq, sinceProgress, stallMs)) {
+            ahead = true;
+        }
+    });
+    return cs::isCommunityFallbackOpen(true, stalled, ahead);
+}
+
+bool Node::takeCommunityTable(const cs::PublicKeys& table, bool own) {
+    const cs::CommunityWeight weight = cs::communityTableWeight(initialConfidants_, communityConfidants(), table);
+    const uint64_t elapse = cs::ConfigHolder::instance().config()->roundElapseTime();
+    std::lock_guard lock(communityMutex_);
+    const uint64_t now = stat_.msSinceStart();
+    if (table.empty()) {
+        cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "not starting" : "dropping") << " an empty table";
+        return false;
+    }
+    if (!communityGate_.mayTake(weight, table.front(), now, elapse)) {
+        cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "not starting" : "dropping") << " a table of " << table.size()
+                << " keys: another was taken less than half a round_elapse_time ago, and this one is not heavier with a starter key not above its starter's";
+        return false;
+    }
+    communityGate_.onTaken(weight, table.front(), now);
+    cslog() << kLogPrefix_ << "COMMUNITY BOOTSTRAP: " << (own ? "starting" : "taking") << " a table of " << table.size()
+            << " keys after " << communityGate_.msSinceProgress(now) / 1000 << " s without a block, a round or a regular bootstrap";
+    return true;
+}
+
 void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::RoundNumber rNum) {
     cslog() << "NODE> get Boot strap Round Table #" << rNum;
     // a table for a round no honest starter would send to this node changes nothing here
@@ -1414,6 +1476,9 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
     bool signedTable = false;
     const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
 
+    // a table with a key that is not an initial confidant: signed by the project, or, with the
+    // community bootstrap fallback open on this node, a community table signed by its starter
+    bool communityTable = false;
     if (unknown) {
         cs::Signature sig;
         stream >> sig;
@@ -1421,19 +1486,26 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
             cswarning() << "malformed bootstrap round table, ignore";
             return;
         }
-        const size_t signed_buf_len = sizeof(cs::RoundNumber) + signed_subdata_len;
-        cs::Bytes buf;
-        buf.reserve(signed_buf_len);
-        auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
-        std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(buf));
-        ptr = payload.data();
-        std::copy(ptr, ptr + signed_subdata_len, std::back_inserter(buf));
-        if (!cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size())) {
+        // the same bytes as the community starter signs (cs::makeCommunityTable); the stream read
+        // signed_subdata_len bytes of the payload already, so they are there
+        const cs::Bytes buf = cs::bootstrapSignedBytes(rNum, payload.data(), signed_subdata_len);
+        if (cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size())) {
+            currentWeight = cs::kSignedBootstrapWeight;
+            signedTable = true;
+        }
+        else if (cs::isCommunityTable(initialConfidants_, communityConfidants(), confidants)
+                 && cscrypto::verifySignature(sig, confidants.front(), buf.data(), buf.size())) {
+            if (!isCommunityFallbackOpen()) {
+                cslog() << kLogPrefix_ << "community bootstrap table #" << rNum << " from " << KeyToBase58(confidants.front())
+                        << ", but this node has not stalled long enough or a neighbour is ahead, drop";
+                return;
+            }
+            communityTable = true;
+        }
+        else {
             cswarning() << kLogPrefix_ << "failed to test bootstrap signature, drop";
             return;
         }
-        currentWeight = cs::kSignedBootstrapWeight;
-        signedTable = true;
     }
     else if (payload.size() == signed_subdata_len + cscrypto::kSignatureSize) {
         // a table of initial confidants signed through the diag API (Node::bootstrap): the official
@@ -1465,7 +1537,9 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
         }
     }
 
-    if (currentWeight <= bootStrapWeight_) {
+    // a community table is weighed against community tables only (takeCommunityTable): a regular
+    // table always replaces it
+    if (!communityTable && currentWeight <= bootStrapWeight_) {
         cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " with " << confidants.size() << " confidants weighs "
                 << currentWeight << ", not above " << bootStrapWeight_ << ", drop";
         return;
@@ -1475,11 +1549,20 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
         cswarning() << "Bad round table format, ignore";
         return;
     }
+    if (communityTable) {
+        if (!takeCommunityTable(confidants, false)) {
+            return;
+        }
+    }
+    else {
+        onCommunityProgress();
+    }
     subRound_ = 1;
 
     if (!isBootstrapRound_) {
         isBootstrapRound_ = true;
-        cslog() << "NODE> Bootstrap on, table of " << confidants.size() << " confidants, weight " << currentWeight;
+        cslog() << "NODE> Bootstrap on, table of " << confidants.size() << " confidants, "
+                << (communityTable ? "community table" : "weight " + std::to_string(currentWeight));
     }
 
     roundTable.confidants = std::move(confidants);
@@ -2735,7 +2818,13 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
 }
 
 void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
-    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    // while FORK HELD the replies bring the other chain's blocks again and again (see PoolSynchronizer)
+    if (blockChain_.forkHeld()) {
+        csdebug() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    }
+    else {
+        csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
+    }
     // the blocks of this reply come from `sender`: named in the fork record should the node refuse one
     blockChain_.setSyncSource(sender, poolSynchronizer_->announcedSequence(sender));
     struct ClearSource {
@@ -4197,6 +4286,7 @@ void Node::sendRoundTable(cs::RoundPackage& rPackage) {
     csdebug() << "Round " << rPackage.roundTable().round << ", Confidants count " << rPackage.roundTable().confidants.size();
     csdebug() << "Hashes count: " << rPackage.roundTable().hashes.size();
 
+    onCommunityProgress();  // this node's own round package
     performRoundPackage(rPackage, solver_->getPublicKey(), false);
 }
 
@@ -4465,6 +4555,10 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
 
     cs::Signatures poolSignatures;
     cs::PublicKeys confidants;
+    // progress for the community bootstrap fallback: a package whose signatures this node checked
+    // and accepted; one taken unchecked (a bootstrap round, the first rounds, a node lagging behind)
+    // is not, and the blocks it leads to are progress anyway
+    bool signaturesAccepted = false;
 
     if (!isBootstrapRound()) {
         if (rPackage.roundTable().round > 2/* && confirmationList_.size() > 0*/) { //Here we have problems when the trusted have the first block and the others do not!!!
@@ -4488,7 +4582,8 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
                 }
             }
 
-            if (!receivingSignatures(rPackage, confidants) && storedRound == getBlockChain().getLastSeq()) {
+            signaturesAccepted = receivingSignatures(rPackage, confidants);
+            if (!signaturesAccepted && storedRound == getBlockChain().getLastSeq()) {
                 return;
             }
         }
@@ -4502,6 +4597,9 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     currentRoundTableMessage_.round = rPackage.roundTable().round;
     currentRoundTableMessage_.sender = sender;
     currentRoundTableMessage_.message = cs::Bytes(data, data + size);
+    if (signaturesAccepted) {
+        onCommunityProgress();
+    }
     performRoundPackage(rPackage, sender, updateRound);
 }
 
@@ -5701,7 +5799,14 @@ void Node::onRoundTimeElapsed() {
     }
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
-    if (initialConfidants_.find(own_key) == initialConfidants_.end()) {
+    // the community bootstrap fallback, open only after a long stall: the listed keys count as
+    // initial confidants here, and a table with any of them is a community table (see below)
+    const bool community = isCommunityFallbackOpen();
+    const std::set<cs::PublicKey> listed = community ? communityConfidants() : std::set<cs::PublicKey>{};
+    const auto isStarterKey = [this, &listed](const cs::PublicKey& key) {
+        return initialConfidants_.count(key) > 0 || listed.count(key) > 0;
+    };
+    if (!isStarterKey(own_key)) {
         cslog() << "Waiting for next round...";
 
         myLevel_ = Level::Normal;
@@ -5723,28 +5828,38 @@ void Node::onRoundTimeElapsed() {
     const cs::Sequence maxLocalBlock = blockChain_.getLastSeq();
     cs::Sequence maxGlobalBlock = maxLocalBlock;
 
-    auto callback = [&maxGlobalBlock, &actualConfidants, this]
+    auto callback = [&maxGlobalBlock, &actualConfidants, &isStarterKey]
                     (const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber) {
-                        const auto it = initialConfidants_.find(neighbour);
-                        if (it == initialConfidants_.end()) {
+                        if (!isStarterKey(neighbour)) {
                             return;
                         }
                         if (lastSeq > maxGlobalBlock) {
                             maxGlobalBlock = lastSeq;
                             actualConfidants.clear();
-                            actualConfidants.insert(*it);
+                            actualConfidants.insert(neighbour);
                         }
                         else if (lastSeq == maxGlobalBlock) {
-                            actualConfidants.insert(*it);
+                            actualConfidants.insert(neighbour);
                         }
                     };
 
     transport_->forEachNeighbour(std::move(callback));
-    if (actualConfidants.size() % 2 == 0) {
-        auto it = actualConfidants.end();
-        --it;
-        it = actualConfidants.erase(it);
-
+    // an odd table: the last key of an even set goes, unless a community table would lose its
+    // majority of the list with it (cs::dropForOddTable; without the fallback open, always). A set
+    // with listed keys that is not a community table: the initial confidants in it, as without the
+    // list, so that it never holds back a regular restart (cs::bootstrapTableOf)
+    {
+        const auto isOutsideInitial = [this](const cs::PublicKey& key) {
+            return initialConfidants_.count(key) == 0;
+        };
+        const size_t seen = actualConfidants.size();
+        const bool seenListed = std::any_of(actualConfidants.cbegin(), actualConfidants.cend(), isOutsideInitial);
+        actualConfidants = cs::bootstrapTableOf(initialConfidants_, listed, actualConfidants);
+        if (seenListed && std::none_of(actualConfidants.cbegin(), actualConfidants.cend(), isOutsideInitial)) {
+            cslog() << "COMMUNITY BOOTSTRAP: " << seen << " confidants with max sequence " << maxGlobalBlock
+                    << " do not hold more than half of the " << listed.size()
+                    << " listed keys, regular table of the initial confidants among them";
+        }
     }
     initBootstrapRP(actualConfidants);
 
@@ -5760,6 +5875,9 @@ void Node::onRoundTimeElapsed() {
                 << initialConfidants_.size() << ", start lookup...";
 
         transport_->addToNeighbours(initialConfidants_);
+        if (community) {
+            transport_->addToNeighbours(listed);
+        }
     }
 
     if (actualConfidants.size() < Consensus::MinTrustedNodes) {
@@ -5783,28 +5901,51 @@ void Node::onRoundTimeElapsed() {
     // do not increment, only "mark" default round start
     subRound_ = 1;
 
+    // a table with a key that is not an initial confidant: only as a community table (no regular
+    // starter would send it, and only nodes with the fallback open take it)
+    cs::PublicKeys confs(actualConfidants.cbegin(), actualConfidants.cend());
+    const bool communityTable = std::any_of(confs.cbegin(), confs.cend(), [this](const cs::PublicKey& key) {
+        return initialConfidants_.count(key) == 0;
+    });
+    if (communityTable && !cs::isCommunityTable(initialConfidants_, listed, confs)) {
+        // cs::bootstrapTableOf never gives such a set; kept as a guard
+        cslog() << "COMMUNITY BOOTSTRAP: " << confs.size() << " confidants with max sequence " << maxGlobalBlock
+                << " do not hold more than half of the " << listed.size() << " listed keys, wait";
+        return;
+    }
+
     if (*actualConfidants.cbegin() == own_key) {
 
         cslog() << "Starting round...";
 
-        cs::Bytes bin;
-        cs::ODataStream out(bin);
-        out << uint8_t(actualConfidants.size());
+        if (communityTable && !takeCommunityTable(confs, true)) {
+            return;
+        }
 
-        for (const auto& item : actualConfidants) {
-            out << item; 
+        cs::Bytes bin;
+        if (communityTable) {
+            // signed by this node, the starter: the round, the count and the keys, as a table
+            // signed by the project, then random bytes so that its repeat is a new message; its
+            // weight stays out of bootStrapWeight_
+            bin = cs::makeCommunityTable(roundPackageCache_.back().roundTable().round, actualConfidants, solver_->getPrivateKey(),
+                                         std::random_device{}());
         }
-        cs::PublicKeys confs;
-        for (auto it : actualConfidants) {
-            confs.push_back(it);
+        else {
+            cs::ODataStream out(bin);
+            out << uint8_t(actualConfidants.size());
+
+            for (const auto& item : actualConfidants) {
+                out << item; 
+            }
+            cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confs);
+            if (currentWeight > bootStrapWeight_) {
+                bootStrapWeight_ = currentWeight;
+            }
+            // when we try to start rounds several times, we will not send duplicates
+            auto random = std::random_device{}();
+            out << random;
+            onCommunityProgress();
         }
-        cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confs);
-        if (currentWeight > bootStrapWeight_) {
-            bootStrapWeight_ = currentWeight;
-        }
-        // when we try to start rounds several times, we will not send duplicates
-        auto random = std::random_device{}();
-        out << random;
 
         auto& conveyer = cs::Conveyer::instance();
         conveyer.updateRoundTable(roundPackageCache_.back().roundTable().round, roundPackageCache_.back().roundTable());
@@ -5868,6 +6009,7 @@ bool Node::bootstrap(const cs::Bytes& bytes, cs::RoundNumber round) {
     if (currentWeight > bootStrapWeight_) {
         bootStrapWeight_ = currentWeight;
     }
+    onCommunityProgress();
 
     sendBroadcast(MsgTypes::BootstrapTable, roundPackageCache_.back().roundTable().round, bytes);
     if (!isBootstrapRound_) {

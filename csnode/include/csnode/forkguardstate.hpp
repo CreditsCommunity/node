@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -165,5 +166,33 @@ std::string remedy(const ForkRecord& record);
 // the periodic FORK HELD detail line: since when, where the chains diverge, the refused peer and the
 // remedy. peerSide (optional): what the refused peer announces, e.g. "official 4.2.532"
 std::string summary(const ForkRecord& record, const std::string& peerSide = std::string());
+
+// A line for an event that may repeat many times a minute (a node holding a fork refuses every block
+// its peers offer of the other chain, and asks for them again): the first event gets a line at once,
+// later ones are counted and reported with the next line, at most one per `period`. onEvent returns
+// the number of events the line due now reports (this one included), or 0 when no line is due.
+class RepeatedLine {
+public:
+    explicit RepeatedLine(std::chrono::steady_clock::duration period = std::chrono::minutes(1))
+    : period_(period) {}
+
+    uint64_t onEvent(std::chrono::steady_clock::time_point now) {
+        ++pending_;
+        if (logged_ && now - last_ < period_) {
+            return 0;
+        }
+        const uint64_t count = pending_;
+        pending_ = 0;
+        last_ = now;
+        logged_ = true;
+        return count;
+    }
+
+private:
+    std::chrono::steady_clock::duration period_;
+    std::chrono::steady_clock::time_point last_{};
+    bool logged_ = false;
+    uint64_t pending_ = 0;
+};
 
 }  // namespace cs::forkguard

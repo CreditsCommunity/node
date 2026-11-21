@@ -19,6 +19,7 @@
 
 #include <csnode/bootstrapgate.hpp>
 #include <csnode/bootstrapweight.hpp>
+#include <csnode/communitybootstrap.hpp>
 #include <csnode/backwardsync.hpp>
 #include <csnode/blocktakeover.hpp>
 #include <csnode/caches_serialization_manager.hpp>
@@ -454,6 +455,13 @@ public slots:
     void deepBlockValidation(const csdb::Pool& block, bool* shouldStop);
     void sendBlockAlarmSignal(cs::Sequence seq);
     void onRoundTimeElapsed();
+    // the community bootstrap fallback ([community_bootstrap], off by default): see communitybootstrap.hpp
+    std::set<cs::PublicKey> communityConfidants() const;
+    // progress seen (a round package, a regular bootstrap table): the fallback closes again
+    void onCommunityProgress();
+    // the fallback may act now; also notes a new last block as progress
+    bool isCommunityFallbackOpen();
+    bool takeCommunityTable(const cs::PublicKeys& table, bool own);
     void onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber lastRound);
     void onNeighbourRemoved(const cs::PublicKey& neighbour);
 
@@ -714,6 +722,9 @@ private:
 
     std::set<cs::PublicKey> initialConfidants_;
     bool isBootstrapRound_ = false;
+    // guarded: read by the round elapse handler and the processor thread
+    std::mutex communityMutex_;
+    cs::CommunityBootstrapGate communityGate_;
     cs::CachesSerializationManager cachesSerializationManager_;
 
     size_t notInRound_ = 0;

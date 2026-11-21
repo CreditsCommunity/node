@@ -86,7 +86,14 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
               << "\n Last written seq: "  << lastWrittenSequence
               << "\n Cached blocks: "     << cachedBlocksSize
               << "\n Total blocks: "      << totalBlocks;
-    cslog() << "SYNC: Blocks remaining: " << blocksRemaining;
+    // while FORK HELD the node asks for the other chain's blocks again and again and refuses them:
+    // the FORK HELD lines say so, these go to the debug log
+    if (blockChain_->forkHeld()) {
+        csdebug() << "SYNC: Blocks remaining: " << blocksRemaining;
+    }
+    else {
+        cslog() << "SYNC: Blocks remaining: " << blocksRemaining;
+    }
 
     if (blocksRemaining == 0) {
         showSyncronizationProgress(lastWrittenSequence);
@@ -372,9 +379,16 @@ void PoolSynchronizer::sendBlockRequest() {
         else {
             maxRequestedSequence_ = neededSequences.back();
             if (checkSynchroLog(neighbour->first)) {
-                cslog() << "SYNC: requesting for " << neededSequences.size()
-                    << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
-                    << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+                if (blockChain_->forkHeld()) {  // asked again and again while FORK HELD: debug log
+                    csdebug() << "SYNC: requesting for " << neededSequences.size()
+                        << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
+                        << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+                }
+                else {
+                    cslog() << "SYNC: requesting for " << neededSequences.size()
+                        << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
+                        << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+                }
                 emit sendRequest(neighbour->first, neededSequences);
                 pacing_.onRequest(neighbour->first, neededSequences.back(), now);
                 addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
