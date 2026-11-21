@@ -288,6 +288,13 @@ void Node::onForkGuardTick() {
     }
     blockChain_.checkDismissTrigger();
     blockChain_.promotePendingHold(false);
+    blockChain_.checkResolvePreference(static_cast<int64_t>(std::time(nullptr)));
+    if (blockChain_.takeCacheDropRequest()) {
+        // blocks of the branch abandoned with --resolve-fork may wait in the cache above the cut
+        csdebug() << "NODE> dropping the block cache: it may hold blocks of the branch abandoned with --resolve-fork";
+        blockChain_.clearBlockCache();
+    }
+    updatePreferredSyncSources();
     tickForkLocator();
     logForkHeldDetail(blockChain_.forkHeldRecord());
     onPeerStatusTick();
@@ -344,13 +351,56 @@ void Node::onPeerStatusTick() {
     }
 }
 
+namespace {
+bool keyFromBase58(const std::string& text, cs::PublicKey& out) {
+    cs::Bytes key;
+    if (text.empty() || !DecodeBase58(text, key) || key.size() != out.size()) {
+        return false;
+    }
+    std::copy(key.begin(), key.end(), out.begin());
+    return true;
+}
+}  // namespace
+
+// the peers to ask about the competing branch, best first: the neighbours, with what the node knows of
+// each (the version announced in the handshake, the height announced, a refused block it sent)
+std::vector<cs::PublicKey> Node::forkSearchCandidates(const std::vector<cs::PublicKey>& sentRefused, size_t max) {
+    std::map<cs::PublicKey, cs::forkguard::CandidatePeer> peers;
+    transport_->forEachNeighbour([&peers](const cs::PublicKey& key, cs::Sequence lastSeq, cs::RoundNumber) {
+        auto& p = peers[key];
+        p.key = key;
+        p.announced = lastSeq;
+    });
+    for (auto& [key, p] : peers) {
+        p.announced = std::max(p.announced, poolSynchronizer_->announcedSequence(key));
+    }
+    std::vector<cs::PeerData> known;
+    transport_->getKnownPeers(known);
+    for (const auto& k : known) {
+        const auto it = peers.find(k.key);
+        if (it != peers.end()) {
+            it->second.official = cs::peerstatus::classify(static_cast<uint16_t>(k.version), k.minorVersion) ==
+                                  cs::peerstatus::Kind::Official;
+        }
+    }
+    for (const auto& key : sentRefused) {
+        const auto it = peers.find(key);
+        if (it != peers.end()) {
+            it->second.sentRefused = true;
+        }
+    }
+    std::vector<cs::forkguard::CandidatePeer> list;
+    for (const auto& [key, p] : peers) {
+        list.push_back(p);
+    }
+    return cs::forkguard::rankCandidates(list, blockChain_.getLastSeq(), max);
+}
+
 void Node::startForkLocator(const cs::forkguard::ForkRecord& record) {
     cs::PublicKey peer{};
-    cs::Bytes key;
-    if (!DecodeBase58(record.peerKey, key) || key.size() != peer.size()) {
+    if (!keyFromBase58(record.peerKey, peer)) {
         return;
     }
-    std::copy(key.begin(), key.end(), peer.begin());
     if (!forkLocator_) {
         cs::forkguard::ForkLocator::Hooks hooks;
         hooks.ourHash = [this](cs::Sequence seq) {
@@ -375,10 +425,22 @@ void Node::startForkLocator(const cs::forkguard::ForkRecord& record) {
     }
     forkLocatorFor_ = record;
     forkLocatorRetryAt_ = {};
-    forkLocator_->start(peer, record.forkPoint, blockChain_.getFirstStoredSequence(), std::chrono::steady_clock::now());
-    cslog() << "FORK HELD: looking for the last common block with " << record.peerKey << ", from #"
-            << WithDelimiters(record.forkPoint) << " down to #" << WithDelimiters(forkLocator_->floor())
-            << " at most (read-only)";
+    forkLocatorRotationsLogged_ = 0;
+    // the peer of the refused block may sit on this node's own side (it relayed the block): the
+    // peers likely on the competing branch come first, the refused block's peer is always among them
+    auto refused = blockChain_.recentRefusedPeers();
+    refused.push_back(peer);
+    auto candidates = forkSearchCandidates(refused, 5);
+    if (std::find(candidates.begin(), candidates.end(), peer) == candidates.end()) {
+        candidates.push_back(peer);
+    }
+    forkLocator_->start(candidates, record.forkPoint, blockChain_.getFirstStoredSequence(), std::chrono::steady_clock::now());
+    std::string names;
+    for (const auto& c : forkLocator_->candidates()) {
+        names += (names.empty() ? "" : ", ") + EncodeBase58(c.data(), c.data() + c.size());
+    }
+    cslog() << "FORK HELD: looking for the last common block from #" << WithDelimiters(record.forkPoint) << " down to #"
+            << WithDelimiters(forkLocator_->floor()) << " at most (read-only), asking in turn " << names;
 }
 
 // FORK HELD with only an upper bound of the fork point: find the last common block (read-only), and
@@ -407,6 +469,12 @@ void Node::tickForkLocator() {
     switch (forkLocator_->status()) {
     case Status::Searching:
         forkLocator_->tick(now);
+        if (forkLocator_->searching() && forkLocator_->rotations() != forkLocatorRotationsLogged_) {
+            forkLocatorRotationsLogged_ = forkLocator_->rotations();
+            const auto& next = forkLocator_->peer();
+            cslog() << "FORK HELD: fork point search: no answer from the previous peer (" << forkLocator_->why()
+                    << "), asking " << EncodeBase58(next.data(), next.data() + next.size());
+        }
         break;
     case Status::Exact:
     case Status::Deeper: {
@@ -414,10 +482,14 @@ void Node::tickForkLocator() {
         const cs::Sequence point = forkLocator_->forkPoint();
         const std::string hash = forkLocator_->forkPointHash();
         const bool verified = forkLocator_->verified();
-        cslog() << "FORK HELD: fork point search done after " << forkLocator_->requestsSent() << " request(s)"
+        const std::string nextHash = forkLocator_->nextHash();
+        const auto& by = forkLocator_->resultPeer();
+        const std::string byKey = EncodeBase58(by.data(), by.data() + by.size());
+        cslog() << "FORK HELD: fork point search done after " << forkLocator_->requestsSent() << " request(s) to "
+                << (forkLocator_->rotations() + 1) << " peer turn(s), answer from " << byKey
                 << (deeper ? "" : (verified ? ", next block verified" : ", next block NOT verified"));
         forkLocator_->stop();
-        blockChain_.applyLocatedForkPoint(*forkLocatorFor_, point, hash, deeper, forkLocatorFor_->peerKey, verified);
+        blockChain_.applyLocatedForkPoint(*forkLocatorFor_, point, hash, deeper, byKey, verified, nextHash);
         break;
     }
     case Status::Failed:
@@ -434,6 +506,37 @@ void Node::tickForkLocator() {
         startForkLocator(*held);
         break;
     }
+}
+
+void Node::preferResolvedBranch(const cs::forkguard::ResolvePlan& plan, const std::string& chosen, const std::string& peerKey) {
+    cslog() << "--resolve-fork: at the next start the node takes at #" << WithDelimiters(plan.top + 1) << " only the "
+            << "block of the chosen branch " << chosen << (peerKey.empty() ? std::string{} : " (asking " + peerKey + " first)")
+            << (plan.record.ourNextHash.empty() ? std::string{} : " and refuses the abandoned block " + plan.record.ourNextHash)
+            << ", for " << cs::forkguard::kPreferenceSeconds / 60 << " minutes at most";
+    blockChain_.setResolveFork(plan.top, csdb::PoolHash::from_string(plan.hash), chosen, plan.record.ourNextHash, peerKey);
+}
+
+// after --resolve-fork, while the node prefers the chosen block: the sync asks first the peers that
+// have it (the one that sent it, then official-version neighbours and those announcing more blocks)
+void Node::updatePreferredSyncSources() {
+    const auto branch = blockChain_.approvedBranch();
+    if (!branch.has_value() || !branch->preferring() || blockChain_.getLastSeq() >= branch->seq) {
+        if (!poolSynchronizer_->preferredSources().empty()) {
+            poolSynchronizer_->setPreferredSources({});
+        }
+        return;
+    }
+    std::vector<cs::PublicKey> sources;
+    cs::PublicKey chosenPeer{};
+    if (keyFromBase58(branch->peerKey, chosenPeer)) {
+        sources.push_back(chosenPeer);
+    }
+    for (const auto& k : forkSearchCandidates({}, 8)) {
+        if (std::find(sources.begin(), sources.end(), k) == sources.end()) {
+            sources.push_back(k);
+        }
+    }
+    poolSynchronizer_->setPreferredSources(std::move(sources));
 }
 
 std::optional<cs::Sequence> Node::resolveForkTop() {
@@ -465,18 +568,30 @@ std::optional<cs::Sequence> Node::resolveForkTop() {
                     << "block located with " << plan->record.locatedWith << " from the upper bound #"
                     << WithDelimiters(plan->record.upperBound)
                     << (plan->record.locatedVerified ? " (verified)" : " (NOT verified: the operator's choice)");
-        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+        const auto& r = plan->record;
+        if (r.locatedVerified && r.forkPointExact && r.forkPoint == plan->top && !r.locatedNextHash.empty()) {
+            // verified: the same point as without --to-located, and the same preference
+            preferResolvedBranch(*plan, r.locatedNextHash, r.locatedWith);
+        }
+        else {
+            blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+        }
     }
     else if (plan->record.forkPointExact && !plan->record.located && plan->record.competingSeq == plan->top + 1) {
-        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash), plan->record.competingHash);
+        preferResolvedBranch(*plan, plan->record.competingHash, plan->record.peerKey);
     }
     else if (plan->record.forkPointExact) {
-        // located and verified by the node (the last common block): the cut goes there; the competing
-        // block first refused is higher up, so no branch is approved
+        // located and verified by the node (the last common block): the cut goes there, and the
+        // competing branch's first block, verified then, is the one preferred at the height after it
         cslog() << "--resolve-fork: #" << WithDelimiters(plan->top) << " is the last common block, verified, located "
                 << "from the upper bound #" << WithDelimiters(plan->record.upperBound) << "; the node syncs the other "
                 << "chain from there at the next start";
-        blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+        if (!plan->record.locatedNextHash.empty()) {
+            preferResolvedBranch(*plan, plan->record.locatedNextHash, plan->record.locatedWith);
+        }
+        else {
+            blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
+        }
     }
     else {
         cswarning() << "--resolve-fork: the fork point is an upper bound (the other chain diverges at #"

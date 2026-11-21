@@ -509,8 +509,15 @@ private:
     std::unique_ptr<cs::forkguard::ForkLocator> forkLocator_;
     std::optional<cs::forkguard::ForkRecord> forkLocatorFor_;
     std::chrono::steady_clock::time_point forkLocatorRetryAt_{};
+    size_t forkLocatorRotationsLogged_ = 0;
     void tickForkLocator();
     void startForkLocator(const cs::forkguard::ForkRecord& record);
+    // the neighbours to ask about the competing branch, best first (cs::forkguard::rankCandidates)
+    std::vector<cs::PublicKey> forkSearchCandidates(const std::vector<cs::PublicKey>& sentRefused, size_t max);
+    // --resolve-fork: the cut prefers `chosen` at the height after it (resolve-approved.json)
+    void preferResolvedBranch(const cs::forkguard::ResolvePlan& plan, const std::string& chosen, const std::string& peerKey);
+    // the sync asks the peers that have the block chosen with --resolve-fork first
+    void updatePreferredSyncSources();
     // snapshot.json of a restored folder against the digest of the loaded caches (design 6.8);
     // false with exit code 4 on a mismatch
     bool verifyAtStart();

@@ -50,12 +50,50 @@ struct Episode {
 // on the fork point) makes the node give its own block up, never going to or below the fork point.
 // Nothing else bypasses the usual checks. The approval ends once the node stores a block at that
 // height and goes on, or a competing block that passes the usual checks is offered there.
+//
+// The branch the operator chose is also preferred, once, until the node is past that height: while
+// the preference lasts (untilUnix, kPreferenceSeconds after the cut) the node stores at forkPoint + 1
+// only that block, refuses any other one there (e.g. the abandoned branch, which neighbours that still
+// hold it would otherwise sync back on top of the cut) and asks the peers that have the chosen block
+// first. If the chosen block does not arrive in time, the preference ends with a loud log line, but
+// the abandoned block itself (abandonedHash, our block at forkPoint + 1 before the cut) stays refused
+// there until the operator acts again (a new cut replaces the file). It only refuses blocks: it never
+// lets a block through any check it would otherwise fail.
 inline constexpr const char* kApprovedFile = "resolve-approved.json";
+inline constexpr int64_t kPreferenceSeconds = 30 * 60;
 struct ApprovedBranch {
     cs::Sequence forkPoint = 0;
     cs::Sequence seq = 0;   // forkPoint + 1
-    std::string hash;       // the recorded competing block
+    std::string hash;       // the recorded competing block (the chosen one)
+    std::string abandonedHash;  // our block at seq before the cut (empty: not known)
+    std::string peerKey;        // base58: a peer that had the chosen block (empty: not known)
+    int64_t untilUnix = 0;      // the preference lasts until then (0: no preference, approval only)
+    bool expired = false;       // the preference timed out: only abandonedHash is still refused
+
+    // the preference for the chosen block is on (until expireIfDue turns it off)
+    bool preferring() const {
+        return untilUnix != 0 && !expired;
+    }
+    // the preference times out at untilUnix: true (once) when it just did
+    bool expireIfDue(int64_t nowUnix) {
+        if (!preferring() || nowUnix < untilUnix) {
+            return false;
+        }
+        expired = true;
+        return true;
+    }
 };
+// what the node does with a block at a height the approved branch covers
+enum class BranchVerdict {
+    None,     // not concerned: the usual checks decide
+    Chosen,   // the chosen block itself (it still passes the usual checks)
+    Refuse    // another block at seq while preferring, or the abandoned block
+};
+// a block `hash` at `seq`
+BranchVerdict judgeBlock(const ApprovedBranch& branch, cs::Sequence seq, const std::string& hash);
+// a block at seq + 1 (built on `previous`): refused when it is not built on the chosen block while
+// preferring, or built on the abandoned block
+BranchVerdict judgeChild(const ApprovedBranch& branch, cs::Sequence seq, const std::string& previous);
 bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& branch);
 std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt = nullptr);
 void clearApprovedBranch(const std::string& dir);
@@ -86,8 +124,13 @@ struct ForkRecord {
     //   only with --to-located.
     // - deeper: the peer's block at deeperThan, the lowest one searched, already differs from ours; a
     //   hint as well (a peer can claim it), forkPoint stays the upper bound
+    // locatedNextHash: the peer's verified block right after the located point (the competing
+    // branch's first block, the one --resolve-fork then prefers); ourNextHash: our block right after the
+    // fork point when the record was written or the point located (the branch a cut abandons)
     bool located = false;
     bool locatedVerified = false;
+    std::string locatedNextHash;
+    std::string ourNextHash;
     cs::Sequence locatedPoint = 0;
     std::string locatedHash;
     bool deeper = false;

@@ -175,6 +175,17 @@ bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& b) {
     tree.put("fork_point", b.forkPoint);
     tree.put("block", b.seq);
     tree.put("hash", b.hash);
+    if (!b.abandonedHash.empty()) {
+        tree.put("abandoned_hash", b.abandonedHash);
+    }
+    if (!b.peerKey.empty()) {
+        tree.put("peer_key", b.peerKey);
+    }
+    if (b.untilUnix != 0) {
+        tree.put("prefer_until", utcTime(b.untilUnix));
+        tree.put("prefer_until_unix", b.untilUnix);
+        tree.put("expired", b.expired);
+    }
     return writeTree(dir, kApprovedFile, tree);
 }
 
@@ -188,7 +199,11 @@ std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* c
         b.forkPoint = tree->get<cs::Sequence>("fork_point");
         b.seq = tree->get<cs::Sequence>("block");
         b.hash = tree->get<std::string>("hash");
-        if (b.hash.empty() || b.seq != b.forkPoint + 1) {
+        b.abandonedHash = tree->get<std::string>("abandoned_hash", "");
+        b.peerKey = tree->get<std::string>("peer_key", "");
+        b.untilUnix = tree->get<int64_t>("prefer_until_unix", 0);
+        b.expired = tree->get<bool>("expired", false);
+        if (b.hash.empty() || b.seq != b.forkPoint + 1 || b.abandonedHash == b.hash || b.untilUnix < 0) {
             if (corrupt) {
                 *corrupt = true;
             }
@@ -202,6 +217,32 @@ std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* c
         }
         return std::nullopt;
     }
+}
+
+BranchVerdict judgeBlock(const ApprovedBranch& b, cs::Sequence seq, const std::string& hash) {
+    if (seq != b.seq || hash.empty()) {
+        return BranchVerdict::None;
+    }
+    if (hash == b.hash) {
+        return BranchVerdict::Chosen;
+    }
+    if (b.preferring() || (!b.abandonedHash.empty() && hash == b.abandonedHash)) {
+        return BranchVerdict::Refuse;
+    }
+    return BranchVerdict::None;
+}
+
+BranchVerdict judgeChild(const ApprovedBranch& b, cs::Sequence seq, const std::string& previous) {
+    if (seq != b.seq + 1 || previous.empty()) {
+        return BranchVerdict::None;
+    }
+    if (previous == b.hash) {
+        return BranchVerdict::Chosen;
+    }
+    if (b.preferring() || (!b.abandonedHash.empty() && previous == b.abandonedHash)) {
+        return BranchVerdict::Refuse;
+    }
+    return BranchVerdict::None;
 }
 
 void clearApprovedBranch(const std::string& dir) {
@@ -255,6 +296,9 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
         tree.put("fork_point_upper_bound", r.upperBound);
         tree.put("fork_point_located_with", r.locatedWith);
         tree.put("located_verified", r.locatedVerified);
+        if (!r.locatedNextHash.empty()) {
+            tree.put("located_next_hash", r.locatedNextHash);
+        }
         if (!r.locatedHash.empty()) {
             tree.put("located_point", r.locatedPoint);
             tree.put("located_hash", r.locatedHash);
@@ -262,6 +306,9 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
         if (r.deeper) {
             tree.put("fork_point_below", r.deeperThan);
         }
+    }
+    if (!r.ourNextHash.empty()) {
+        tree.put("our_next_hash", r.ourNextHash);
     }
     tree.put("competing_block", r.competingSeq);
     tree.put("competing_hash", r.competingHash);
@@ -306,6 +353,8 @@ std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt) 
         r.locatedVerified = r.located && tree->get<bool>("located_verified", false);
         r.locatedPoint = tree->get<cs::Sequence>("located_point", 0);
         r.locatedHash = tree->get<std::string>("located_hash", "");
+        r.locatedNextHash = tree->get<std::string>("located_next_hash", "");
+        r.ourNextHash = tree->get<std::string>("our_next_hash", "");
         if (const auto below = tree->get_optional<cs::Sequence>("fork_point_below")) {
             r.deeper = r.located && !r.locatedVerified;
             r.deeperThan = *below;

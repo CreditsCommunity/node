@@ -33,6 +33,14 @@ public:
     // the last sequence this neighbour announced above ours, 0 if none
     cs::Sequence announcedSequence(const cs::PublicKey& key) const;
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
+    // peers asked first for the next blocks when they are neighbours, best first (empty: a random
+    // neighbour, as usual). Set by the node after --resolve-fork: the peers that have the chosen block
+    void setPreferredSources(std::vector<cs::PublicKey> sources) {
+        preferredSources_ = std::move(sources);
+    }
+    const std::vector<cs::PublicKey>& preferredSources() const {
+        return preferredSources_;
+    }
     void getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg);
 
     static const size_t kFreeBlocksTimeoutMs = 10000;
@@ -77,6 +85,8 @@ private:
 
     void synchroFinished();
     size_t nextIndex(size_t index) const;
+    // the neighbour to ask first: the first preferred source that is a neighbour, else a random one
+    std::unordered_map<PublicKey, Sequence>::iterator firstNeighbour();
 
     BlockChain* blockChain_;
 
@@ -85,6 +95,7 @@ private:
 
     Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;
+    std::vector<cs::PublicKey> preferredSources_;
 
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     SyncroPacing pacing_;
