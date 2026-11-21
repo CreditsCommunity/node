@@ -8,6 +8,7 @@ struct cmdline {
     static constexpr const char* argDumpKeys = "dumpkeys";
     static constexpr const char* argSetBCTop = "set-bc-top";
     static constexpr const char* argResolveFork = "resolve-fork";
+    static constexpr const char* argToLocated = "to-located";
     static constexpr const char* argBalChange = "bal-change";
 #ifdef _WIN32
     static constexpr const char* argInstall   = "install";

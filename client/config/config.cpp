@@ -137,6 +137,7 @@ const std::string ARG_NAME_ENCRYPT_KEY_FILE = "encryptkey";
 const std::string ARG_NAME_RECREATE_INDEX = "recreate-index";
 const std::string ARG_NAME_NEW_BC_TOP = "set-bc-top";
 const std::string ARG_NAME_RESOLVE_FORK = "resolve-fork";
+const std::string ARG_NAME_TO_LOCATED = "to-located";
 const std::string ARG_NAME_BAL_CHANGE = "bal-change";
 const std::string ARG_NAME_DISABLE_AUTO_SHUTDOWN = "disable-auto-shutdown";
 
@@ -282,6 +283,7 @@ Config Config::read(po::variables_map& vm, bool atStart) {
 
     if (atStart) {
         result.resolveFork_ = vm.count(ARG_NAME_RESOLVE_FORK) > 0;
+        result.resolveToLocated_ = vm.count(ARG_NAME_TO_LOCATED) > 0;
         if (vm.count(ARG_NAME_NEW_BC_TOP)) {
             result.newBlockchainTop_ = true;
             result.newBlockchainTopSeq_ =

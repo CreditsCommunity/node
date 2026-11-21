@@ -2,6 +2,19 @@
 # Healthy while the last written block advances: fails when it has not changed for 10 minutes.
 # Unhealthy while the node reports FORK HELD (fork-held.json with "held": "true"): it refused a
 # competing chain and waits for the operator.
+# Prints the latest PEERS summary and the official-nodes state from peer-status.json (information only:
+# official nodes gone never makes the container unhealthy).
+peers=/data/peer-status.json
+if [ -f "$peers" ]; then
+    sed -nE 's/.*"summary": "([^"]*)".*/\1/p' "$peers" | head -1
+    if grep -q '"official_gone": "true"' "$peers"; then
+        why=$(sed -nE 's/.*"official_gone_reason": "([^"]*)".*/\1/p' "$peers" | head -1)
+        echo "OFFICIAL NODES GONE: $why; community nodes keep the network going (information, not a fault)"
+    fi
+    if grep -q '"community_only": "true"' "$peers"; then
+        echo "TRUSTED SEATS COMMUNITY-ONLY: no official node among the trusted of the last rounds"
+    fi
+fi
 fork=/data/fork-held.json
 if [ -f "$fork" ] && grep -q '"held": "true"' "$fork"; then
     at=$(sed -nE 's/.*"fork_point": "([0-9]+)".*/\1/p' "$fork")

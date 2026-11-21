@@ -15,6 +15,9 @@
 
 #include "memorydb.hpp"
 
+#include <csnode/forkguardstate.hpp>
+#include <filesystem>
+
 // The asynchronous block writer of csdb::Storage (used with RocksDB), on an in-memory database whose
 // put_batch can be held or made to fail.
 namespace {
@@ -418,4 +421,120 @@ TEST(StorageWriter, ResolveForkTruncatesExactlyAtTheRecordedForkPoint) {
     EXPECT_EQ(storage.size(), 7u);
     EXPECT_EQ(storage.last_hash(), own[6].hash());
     storage.close();
+}
+
+// A storage that does not start at block 0 (pruned, or a backfill in progress) cannot slow-start: a
+// cut with no quick-start checkpoint left at or below the new top is refused and removes nothing
+// (TruncateNoCheckpoint); with one it goes ahead; a storage from block 0 is cut either way.
+TEST(StorageWriter, PrunedCutBelowEveryCheckpointIsRefused) {
+    const auto own = chain(10);
+    const auto make = [&](bool pruned) {
+        auto db = std::make_shared<MemoryDb>();
+        csdb::Storage storage;
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        EXPECT_TRUE(storage.open(opt));
+        for (const auto& p : own) EXPECT_TRUE(storage.pool_save(p));
+        EXPECT_TRUE(storage.flush());
+        storage.close();
+        if (pruned) {
+            for (cs::Sequence s = 0; s < 3; ++s) EXPECT_TRUE(db->remove(own[s].hash().to_binary()));
+        }
+        return db;
+    };
+    const auto cut = [&](const std::shared_ptr<MemoryDb>& db, bool checkpointBelow) {
+        csdb::Storage storage;
+        storage.set_truncate_needs_checkpoint(checkpointBelow);
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = 5;
+        const bool ok = storage.open(opt);
+        const auto error = storage.last_error();
+        const auto last = storage.truncated_last();
+        storage.close();
+        return std::make_tuple(ok, error, last);
+    };
+    {
+        auto db = make(true);
+        const auto [ok, error, last] = cut(db, false);
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(error, csdb::Storage::TruncateNoCheckpoint);
+        EXPECT_EQ(db->stored(), 7u);  // nothing removed
+        (void)last;
+    }
+    {
+        auto db = make(true);
+        const auto [ok, error, last] = cut(db, true);
+        EXPECT_TRUE(ok);
+        EXPECT_EQ(last, 9u);
+        EXPECT_EQ(db->stored(), 3u);  // #3..#5
+        (void)error;
+    }
+    {
+        auto db = make(false);
+        const auto [ok, error, last] = cut(db, false);
+        EXPECT_TRUE(ok);
+        EXPECT_EQ(last, 9u);
+        EXPECT_EQ(db->stored(), 6u);
+        (void)error;
+    }
+}
+
+// --resolve-fork --to-located: the plan is the located (unverified) point and its hash; when the block
+// stored there is no longer that one, the cut is refused (TruncateMismatch) and nothing is removed
+TEST(StorageWriter, ToLocatedCutChecksTheLocatedBlock) {
+    const auto own = chain(10);
+    auto db = std::make_shared<MemoryDb>();
+    {
+        csdb::Storage storage;
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        ASSERT_TRUE(storage.open(opt));
+        for (const auto& p : own) ASSERT_TRUE(storage.pool_save(p));
+        ASSERT_TRUE(storage.flush());
+        storage.close();
+    }
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("csnode-tolocated-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    cs::forkguard::ForkRecord r;
+    r.reason = "authority";
+    r.ourHead = 9;
+    r.forkPoint = 8;
+    r.forkPointHash = own[8].hash().to_string();
+    r.located = true;
+    r.upperBound = 8;
+    r.locatedPoint = 4;
+    r.locatedHash = own[3].hash().to_string();  // not the block stored at #4 (it changed since)
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.string(), r));
+    std::string error;
+    const auto plan = cs::forkguard::planResolve(dir.string(), &error, true);
+    ASSERT_TRUE(plan.has_value()) << error;
+    EXPECT_EQ(plan->top, 4u);
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(csdb::PoolHash::from_string(plan->hash));
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = plan->top;
+        EXPECT_FALSE(storage.open(opt));
+        EXPECT_EQ(storage.last_error(), csdb::Storage::TruncateMismatch);
+        EXPECT_EQ(db->stored(), 10u);
+    }
+    // the block that is stored there: cut
+    r.locatedHash = own[4].hash().to_string();
+    ASSERT_TRUE(cs::forkguard::saveForkRecord(dir.string(), r));
+    const auto good = cs::forkguard::planResolve(dir.string(), &error, true);
+    ASSERT_TRUE(good.has_value()) << error;
+    {
+        csdb::Storage storage;
+        storage.set_truncate_check(csdb::PoolHash::from_string(good->hash));
+        csdb::Storage::OpenOptions opt;
+        opt.db = db;
+        opt.newBlockchainTop = good->top;
+        EXPECT_TRUE(storage.open(opt));
+        storage.close();
+    }
+    EXPECT_EQ(db->stored(), 5u);
+    std::filesystem::remove_all(dir);
 }

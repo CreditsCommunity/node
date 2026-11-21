@@ -220,6 +220,10 @@ private:
     static const size_t cacheSize = 50;
     // set_truncate_check(): the hash the block at the new blockchain top must have
     PoolHash truncate_expected_hash;
+    // set_truncate_needs_checkpoint(): false refuses a cut of a storage that does not start at block 0
+    bool truncate_checkpoint_below = true;
+    // the last block stored before the last cut
+    cs::Sequence truncated_last = 0;
 
     // the cache keeps one pool per sequence and per hash: a pool saved at a sequence whose previous
     // pool was removed (a chain reorganisation) replaces the cached one, instead of being refused by
@@ -483,6 +487,14 @@ void Storage::set_truncate_check(const PoolHash& expectedTopHash) {
     d->truncate_expected_hash = expectedTopHash;
 }
 
+void Storage::set_truncate_needs_checkpoint(bool checkpointAtOrBelowTop) {
+    d->truncate_checkpoint_below = checkpointAtOrBelowTop;
+}
+
+cs::Sequence Storage::truncated_last() const {
+    return d->truncated_last;
+}
+
 Storage::Error Storage::last_error() const {
     return last_error_map(d.get()).last_error_;
 }
@@ -573,6 +585,7 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
         }
         auto seqToRemove = static_cast<uint32_t>(opt.newBlockchainTop + 1);
         auto seqLast = seqToRemove;
+        uint32_t seqFirst = 0;
         {
             Database::IteratorPtr it = d->db->new_iterator();
             it->seek_to_last();
@@ -582,7 +595,21 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
                     seqLast = key;
                 }
             }
+            it->seek_to_first();
+            if (it->is_valid()) {
+                seqFirst = it->key();
+            }
         }
+        const bool checkpointBelow = d->truncate_checkpoint_below;
+        d->truncate_checkpoint_below = true;
+        if (!checkpointBelow && seqFirst > 0 && seqLast >= seqToRemove) {
+            d->set_last_error(TruncateNoCheckpoint,
+                              "the storage starts at block %u (pruned, or older blocks not fetched yet) and no quick-start "
+                              "checkpoint is left at or below block %llu: after the cut the node could not start; nothing removed",
+                              seqFirst, static_cast<unsigned long long>(opt.newBlockchainTop));
+            return false;
+        }
+        d->truncated_last = seqLast >= seqToRemove ? seqLast : 0;
 
         auto blocksCount = (seqLast >= seqToRemove) ? (seqLast - seqToRemove + 1) : 0;
         if(seqToRemove <= seqLast) {

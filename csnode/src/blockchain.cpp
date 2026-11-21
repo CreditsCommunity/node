@@ -247,6 +247,11 @@ bool BlockChain::init(
         storage_.set_truncate_check(resolveForkHash_);
     }
     truncationRefused_ = false;
+    truncationNoCheckpoint_ = false;
+    if (newBlockchainTop != cs::kWrongSequence && serializationManPtr != nullptr) {
+        // a storage that does not start at block 0 can start after the cut only from a checkpoint
+        storage_.set_truncate_needs_checkpoint(serializationManPtr->hasCheckpointAtOrBelow(newBlockchainTop));
+    }
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
                        storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
                        static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
@@ -254,7 +259,8 @@ bool BlockChain::init(
                        storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         truncationRefused_ = storage_.last_error() == csdb::Storage::TruncateMismatch;
-        if (truncationRefused_) {
+        truncationNoCheckpoint_ = storage_.last_error() == csdb::Storage::TruncateNoCheckpoint;
+        if (truncationRefused_ || truncationNoCheckpoint_) {
             cserror() << kLogPrefix << storage_.last_error_message();
         }
         checkpointAheadOfBlocks_ = successfulQuickStart && storage_.last_error() == csdb::Storage::StartAfterLastBlock;
@@ -273,6 +279,7 @@ bool BlockChain::init(
 
     if (newBlockchainTop != cs::kWrongSequence) {
         if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
+        dropStateAboveTop(newBlockchainTop, serializationManPtr);
         // the operator truncated: the rollback episode and FORK HELD end here
         const std::string dir = cs::forkguard::stateDirFor(path);
         cs::forkguard::clearForkRecord(dir);
@@ -355,6 +362,26 @@ bool BlockChain::init(
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
     return true;
+}
+
+// The chain was cut at `top` at start-up (--set-bc-top, --resolve-fork): the storage no longer has
+// the blocks above it, so neither may what describes them. The block hashes databases forget them
+// (else a checkpoint above the top would still look "on this chain"), and every quick-start
+// checkpoint above the top goes (the shutdown checkpoint qs/0 was saved at the old head: the next
+// start would load it and then stop, its blocks being gone). The next start quick-starts from the
+// highest checkpoint at or below the top, or slow-starts.
+void BlockChain::dropStateAboveTop(cs::Sequence top, cs::CachesSerializationManager* serializationManPtr) {
+    size_t hashes = 0;
+    if (blockHashes_) {
+        hashes = blockHashes_->removeAbove(top, storage_.truncated_last());
+        blockHashes_->flush();
+    }
+    size_t checkpoints = 0;
+    if (serializationManPtr != nullptr) {
+        checkpoints = serializationManPtr->dropAbove(top);
+    }
+    cslog() << kLogPrefix << "chain cut at #" << WithDelimiters(top) << ": " << hashes << " block hash(es) and "
+            << checkpoints << " quick-start checkpoint(s) above it removed";
 }
 
 bool BlockChain::isGood() const {
@@ -1104,6 +1131,64 @@ bool BlockChain::promotePendingHold(bool roundStarted) {
     return true;
 }
 
+bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located,
+                                       const std::string& hash, bool deeper, const std::string& peerKey, bool verified) {
+    // our block at the located point must still be the one the search compared (read before the lock:
+    // the hash lookups take the storage lock)
+    if (!deeper && (hash.empty() || located > lastSequence_.load() || getHashBySequence(located).to_string() != hash)) {
+        cswarning() << kLogPrefix << "fork point search: block #" << WithDelimiters(located)
+                    << " changed since the search compared it, the record is left as it was";
+        return false;
+    }
+    cs::forkguard::ForkRecord r;
+    {
+        std::lock_guard l(guardMutex_);
+        if (!forkRecord_.has_value() || !forkRecord_->held || forkRecord_->located ||
+            forkRecord_->sinceUnix != expected.sinceUnix || forkRecord_->forkPoint != expected.forkPoint ||
+            forkRecord_->competingHash != expected.competingHash) {
+            return false;  // another record (or none) by now: the answer is for a fork no longer held
+        }
+        forkRecord_->located = true;
+        forkRecord_->upperBound = forkRecord_->forkPoint;
+        forkRecord_->locatedWith = peerKey;
+        if (deeper) {
+            forkRecord_->deeper = true;
+            forkRecord_->deeperThan = located;
+        }
+        else {
+            forkRecord_->locatedPoint = located;
+            forkRecord_->locatedHash = hash;
+            forkRecord_->locatedVerified = verified;
+            if (verified) {
+                // the other branch provably continues from our block there: that is the fork point
+                forkRecord_->forkPoint = located;
+                forkRecord_->forkPointHash = hash;
+                forkRecord_->forkPointExact = true;
+            }
+        }
+        r = *forkRecord_;
+    }
+    cs::forkguard::saveForkRecord(guardStateDir_, r);
+    if (deeper) {
+        cserror() << kLogPrefix << "fork point search: a peer's block already differs from ours at #" << WithDelimiters(located)
+                  << ", " << (r.upperBound - located) << " blocks below the upper bound #" << WithDelimiters(r.upperBound)
+                  << " (not verified): the fork may be deeper; --resolve-fork still cuts at the upper bound";
+    }
+    else if (verified) {
+        cswarning() << kLogPrefix << "fork point search: the last common block is #" << WithDelimiters(located) << " ("
+                    << hash << "), verified, located from the upper bound #" << WithDelimiters(r.upperBound)
+                    << "; --resolve-fork now cuts there";
+    }
+    else {
+        cswarning() << kLogPrefix << "fork point search: a peer's blocks place the last common block at #"
+                    << WithDelimiters(located) << ", but its next block could not be verified against our confidants: "
+                    << "a hint only. --resolve-fork cuts at the upper bound #" << WithDelimiters(r.upperBound)
+                    << "; --resolve-fork --to-located at #" << WithDelimiters(located);
+    }
+    cserror() << kLogPrefix << cs::forkguard::summary(r);
+    return true;
+}
+
 bool BlockChain::dismissFork() {
     cs::forkguard::ForkRecord r;
     {
@@ -1325,12 +1410,33 @@ bool BlockChain::deepRollbackApproved() const {
 // unwind. Bootstrap blocks carry no such confirmations and fail here; they go through
 // isBootstrapAuthenticatedLocally() instead.
 bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
+    return confirmedByConfidants(competing, getLastBlock().confidants());
+}
+
+bool BlockChain::verifiesAfterOurBlock(const csdb::Pool& block) const {
+    if (!block.is_valid() || block.sequence() < 2) {
+        return false;
+    }
+    const csdb::Pool parent = loadBlock(block.sequence() - 1);
+    if (!parent.is_valid() || block.previous_hash() != parent.hash()) {
+        return false;
+    }
+    std::string reason;
+    if (!cs::BlockVerifier::verifySignatures(block, reason)) {
+        csdebug() << kLogPrefix << "block #" << block.sequence() << " signatures: " << reason;
+        return false;
+    }
+    // a bootstrap block is refused here: it carries no confirmations to check
+    return confirmedByConfidants(block, parent.confidants());
+}
+
+bool BlockChain::confirmedByConfidants(const csdb::Pool& competing, const std::vector<cs::PublicKey>& trustedConfidants) const {
     // Strict pre-checks for the unwind decision only; BlockVerifier::verifyConfirmations keeps the
     // exceptions it has for normal block validation (sequence < 2, one-entry masks), which must not be
     // enough to make this node unwind its own chain.
     const auto fail = [&competing](const char* why) {
         csdebug() << kLogPrefix << "competing block #" << competing.sequence()
-                  << " not confirmed by our last block's confidants: " << why;
+                  << " not confirmed by our confidants: " << why;
         return false;
     };
     if (!competing.is_valid() || competing.sequence() < 2) {
@@ -1340,13 +1446,12 @@ bool BlockChain::hasTrustedConfirmations(const csdb::Pool& competing) const {
     if (BlockChain::isBootstrap(competing)) {
         return fail("bootstrap block carries no confirmations");
     }
-    const auto trustedConfidants = getLastBlock().confidants();
     if (competing.numberConfirmations() == 0 || competing.roundConfirmations().empty()) {
         return fail("no round confirmations");
     }
     const auto confMask = cs::Utils::bitsToMask(competing.numberConfirmations(), competing.roundConfirmationMask());
     if (confMask.size() <= 1 || confMask.size() != trustedConfidants.size()) {
-        return fail("confirmation mask does not match our last block's confidants");
+        return fail("confirmation mask does not match our confidants");
     }
     const size_t confirming = NodeUtils::realTrustedValue(confMask);
     if (competing.roundConfirmations().size() != confirming) {

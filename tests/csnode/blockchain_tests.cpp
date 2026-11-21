@@ -1017,6 +1017,40 @@ TEST(BlockChain, IntegrityRepairIsNotBoundedByTheGuard) {
     chain.test_resetRollbackEpisode();
 }
 
+// The fork point search takes a located point as the fork point only if the peer's block right after
+// it verifies as a synced block would after our block there: built on it, signed by its confidants,
+// confirmed by a majority of our block's confidants. A bootstrap block (no confirmations), a block
+// confirmed by others, or one built on another block stays unverified
+TEST(BlockChain, LocatedForkPointNeedsAVerifiedNextBlock) {
+    auto& chain = freshGuardChain();
+    const auto ours = guardKeys(3);
+    const auto theirs = guardKeys(3);
+    const auto strangers = guardKeys(3);
+    const auto forkBlock = guardBlock(80, ours);
+    chain.test_setLastBlock(forkBlock);  // our block at the located point
+
+    const auto verified = guardBlock(81, theirs, &ours, 0b111, false, false, forkBlock.hash());
+    EXPECT_TRUE(chain.verifiesAfterOurBlock(verified));
+    const auto majority = guardBlock(81, theirs, &ours, 0b011, false, false, forkBlock.hash());
+    EXPECT_TRUE(chain.verifiesAfterOurBlock(majority));
+
+    const auto bootstrap = guardBlock(81, theirs, nullptr, 0, true, false, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(bootstrap));
+    const auto bootstrapConfirmed = guardBlock(81, theirs, &ours, 0b111, true, false, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(bootstrapConfirmed));
+    const auto byStrangers = guardBlock(81, theirs, &strangers, 0b111, false, false, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(byStrangers));
+    const auto minority = guardBlock(81, theirs, &ours, 0b001, false, false, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(minority));
+    const auto badSignature = guardBlock(81, theirs, &ours, 0b111, false, true, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(badSignature));
+    const auto elsewhere = guardBlock(81, theirs, &ours, 0b111, false, false, someHash('e'));
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(elsewhere));
+    const auto noParent = guardBlock(90, theirs, &ours, 0b111, false, false, forkBlock.hash());
+    EXPECT_FALSE(chain.verifiesAfterOurBlock(noParent));  // we store no block at #89
+    chain.test_resetRollbackEpisode();
+}
+
 // --resolve-fork approves only the recorded block: it alone (that very hash, built on the fork point)
 // may replace a block the node stored again right after the fork point; a forged block pointing at it,
 // or any other unauthenticated offer, is refused and does not cancel the approval; nothing is ever
