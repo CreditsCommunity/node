@@ -29,6 +29,14 @@ namespace cs::forkguard {
 // that --resolve-fork follows only on the operator's explicit request (--to-located). The cut still
 // checks that our stored block at the point is the recorded one.
 //
+// The peers asked: a short list of candidates, best first (the node puts first the peers likely to be on
+// the competing branch: official-version peers, peers that announce a height above ours, peers that
+// sent a refused block). The peer that relayed the refused block may well be on our own side (it then
+// answers with our own blocks, which locates nothing): after a timeout, a useless or inconsistent
+// answer, or a hint that is not verified, the search starts again with the next candidate, within the
+// same rate limits; a verified answer ends it at once. When every candidate is spent, the search ends
+// with the best hint it got (a located point not verified, else "deeper"), or fails.
+//
 // One request at a time, at most one per Settings::minInterval (the peer refuses a second request
 // within 5 s of its reply as a duplicate). Single-threaded: the node calls it from its processor
 // thread. The network and our chain are reached only through Hooks.
@@ -50,6 +58,8 @@ public:
         // times the floor may be raised because the peer does not store the lowest height asked for
         // (a pruned peer) before giving up
         size_t maxFloorRaises = 16;
+        // candidates asked at most (the first ones of the list given to start)
+        size_t maxCandidates = 6;
     };
 
     struct Hooks {
@@ -86,6 +96,8 @@ public:
     // shared); the search goes down to `floor` at most (raised to upper - maxDepth, and to block 1:
     // the genesis block is shared by definition and never asked for)
     void start(const cs::PublicKey& peer, cs::Sequence upper, cs::Sequence floor, Clock::time_point now);
+    // the same with several candidate peers, best first (duplicates dropped, at most maxCandidates)
+    void start(const std::vector<cs::PublicKey>& candidates, cs::Sequence upper, cs::Sequence floor, Clock::time_point now);
     void stop();
 
     // sends the next request when one is due, or gives up after Settings::maxAttempts
@@ -116,8 +128,20 @@ public:
     bool searching() const {
         return status_ == Status::Searching;
     }
+    // the candidate asked now
     const cs::PublicKey& peer() const {
         return peer_;
+    }
+    // the candidate whose answer gave the result (Exact or Deeper)
+    const cs::PublicKey& resultPeer() const {
+        return resultPeer_;
+    }
+    const std::vector<cs::PublicKey>& candidates() const {
+        return candidates_;
+    }
+    // times the search went on with another candidate
+    size_t rotations() const {
+        return rotations_;
     }
     cs::Sequence upper() const {
         return upper_;
@@ -134,6 +158,11 @@ public:
     bool verified() const {
         return verified_;
     }
+    // Exact: the hash of the peer's block right after the fork point (the competing branch's first
+    // block; verified() says whether it verified against our confidants)
+    const std::string& nextHash() const {
+        return nextHash_;
+    }
     const std::string& why() const {
         return why_;
     }
@@ -148,11 +177,37 @@ private:
     bool matches(cs::Sequence seq) const;
     void fail(const std::string& why);
     void evaluate();
+    // the search with the current candidate starts over (another candidate, another chain)
+    void resetPeerSearch();
+    // a timeout, a useless reply, a refusal: tried again (the same peer while it is the only one left)
+    void transientFailure(const std::string& why);
+    // the current candidate can tell nothing more (an inconsistent answer, a hint): the next one
+    void peerDone(const std::string& why);
+    // the next candidate not spent, or the end of the search
+    void rotate(const std::string& why);
+    // every candidate is spent: the best hint, or Failed
+    void finish(const std::string& why);
+
+    struct Hint {
+        Status status = Status::Deeper;
+        cs::Sequence forkPoint = 0;
+        std::string forkPointHash;
+        std::string nextHash;
+        cs::PublicKey peer{};
+    };
 
     Hooks hooks_;
     Settings settings_;
     Status status_ = Status::Idle;
     cs::PublicKey peer_{};
+    std::vector<cs::PublicKey> candidates_;
+    std::vector<size_t> failures_;  // per candidate: failed attempts
+    std::vector<bool> spent_;       // per candidate: asked to the end, or too many failures
+    size_t current_ = 0;
+    size_t rotations_ = 0;
+    std::optional<Hint> hint_;
+    cs::PublicKey resultPeer_{};
+    cs::Sequence initialFloor_ = 0;
     cs::Sequence upper_ = 0;
     cs::Sequence floor_ = 0;
     // highest height known to match (none yet: floor_ not confirmed) and lowest known to differ
@@ -169,9 +224,23 @@ private:
     size_t requests_ = 0;
     cs::Sequence forkPoint_ = 0;
     std::string forkPointHash_;
+    std::string nextHash_;
     bool verified_ = false;
     std::string why_;
 };
+
+// a peer the node could ask about the competing branch
+struct CandidatePeer {
+    cs::PublicKey key{};
+    cs::Sequence announced = 0;   // the height it announced (0: not known)
+    bool official = false;        // announces the official version (handshake minor 0)
+    bool sentRefused = false;     // sent us a refused block of the competing branch
+    bool neighbour = true;        // a neighbour now (only neighbours can be asked)
+};
+// the candidates for the search, best first, at most `max`: neighbours only; first those on the
+// competing branch as far as the node can tell (an official-version peer, a height announced above
+// ours + 1), then those that sent a refused block; ties by the higher announced height
+std::vector<cs::PublicKey> rankCandidates(const std::vector<CandidatePeer>& peers, cs::Sequence ourHead, size_t max);
 
 // the depth the search covers below the upper bound for a max_auto_rollback setting: 20 times it,
 // between 1000 and 10000 blocks; 2000 when max_auto_rollback is 0 (no depth bound)

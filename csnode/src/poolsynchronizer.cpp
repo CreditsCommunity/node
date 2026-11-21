@@ -118,7 +118,7 @@ void PoolSynchronizer::syncLastPool() {
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
     }
-    cs::PublicKey target = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1))->first;
+    cs::PublicKey target = firstNeighbour()->first;
     emit sendRequest(target, PoolsRequestedSequences{blockChain_->getLastSeq() + 1});
 }
 
@@ -353,7 +353,7 @@ void PoolSynchronizer::sendBlockRequest() {
     maxRequestedSequence_ = blockChain_->getLastSeq();
 
     auto requiredBlocks = blockChain_->getRequiredBlocks();
-    auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
+    auto neighbour = firstNeighbour();
     auto end = neighbour;
     updateSynchroLog();
     do {
@@ -386,6 +386,16 @@ void PoolSynchronizer::sendBlockRequest() {
             neighbour = neighbours_.begin();
         }
     } while (neighbour != end);
+}
+
+std::unordered_map<PublicKey, Sequence>::iterator PoolSynchronizer::firstNeighbour() {
+    for (const auto& key : preferredSources_) {
+        const auto it = neighbours_.find(key);
+        if (it != neighbours_.end() && it->second > blockChain_->getLastSeq()) {
+            return it;
+        }
+    }
+    return std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
 }
 
 std::vector<Sequence> PoolSynchronizer::getNeededSequences(
