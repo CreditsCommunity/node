@@ -42,7 +42,14 @@ public:
         Clock::duration minInterval = std::chrono::seconds(6);
         Clock::duration replyTimeout = std::chrono::seconds(20);
         size_t maxAttempts = 8;                // requests in a row without a usable reply before giving up
-        size_t maxDuplicates = 50;             // requests in a row refused as duplicates before giving up
+        // requests in a row refused as duplicates before giving up. The peer refuses a request as a
+        // duplicate while it is answering another request of this node (its forward sync asks the same
+        // peer again and again while FORK HELD), so each such refusal costs a minInterval: a busy peer can
+        // stretch the search to a few minutes
+        size_t maxDuplicates = 50;
+        // times the floor may be raised because the peer does not store the lowest height asked for
+        // (a pruned peer) before giving up
+        size_t maxFloorRaises = 16;
     };
 
     struct Hooks {
@@ -84,15 +91,24 @@ public:
     // sends the next request when one is due, or gives up after Settings::maxAttempts
     void tick(Clock::time_point now);
 
-    // a request of this search to `sender` waits for its reply, and every block of the reply is one
-    // of the heights it asked for: the reply is for the search
+    // a request of this search to `sender` waits for its reply, and the reply holds no more blocks than
+    // were asked for, each of a different height asked for: the reply is for the search
     bool expects(const cs::PublicKey& sender, const std::vector<cs::Sequence>& replySeqs) const;
+    // the heights the request waiting for its reply asked for (0: none waits)
+    size_t inFlightCount() const {
+        return inFlight_.size();
+    }
     // the reply to the request in flight (blocks not asked for are ignored)
     void onReply(const cs::PublicKey& sender, const std::vector<PeerBlock>& blocks, Clock::time_point now);
-    // the peer said it will not answer the request in flight: no such blocks (a failed attempt), or a
-    // duplicate request (it answered another request of this node a moment ago, e.g. of the forward
-    // sync: tried again, up to Settings::maxDuplicates times in a row)
-    void onRefused(const cs::PublicKey& sender, Clock::time_point now, bool duplicate = false);
+    // the peer said it will not answer the request in flight:
+    // - NoSuchBlocks: it does not store the lowest height asked for (a pruned peer). While no match is
+    //   known the floor goes up past it (to the next height asked for), at most maxFloorRaises times;
+    //   otherwise a failed attempt.
+    // - Duplicate: it answered another request of this node a moment ago (e.g. of the forward sync):
+    //   tried again, up to maxDuplicates times in a row.
+    // - Other (an incorrect request): a failed attempt.
+    enum class Refusal { NoSuchBlocks, Duplicate, Other };
+    void onRefused(const cs::PublicKey& sender, Clock::time_point now, Refusal why = Refusal::Other);
 
     Status status() const {
         return status_;
@@ -149,6 +165,7 @@ private:
     bool everSent_ = false;
     size_t attempts_ = 0;
     size_t duplicates_ = 0;
+    size_t floorRaises_ = 0;
     size_t requests_ = 0;
     cs::Sequence forkPoint_ = 0;
     std::string forkPointHash_;

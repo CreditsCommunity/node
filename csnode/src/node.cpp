@@ -438,6 +438,17 @@ Node::ChainInit Node::initChain() {
                 initialConfidants_,
                 newTop)
         ) {
+            if (blockChain_.truncationNoCheckpoint()) {
+                // nothing was removed: a pruned node (or one still fetching its older blocks) cannot
+                // slow-start, so it needs a quick-start checkpoint at or below the new top
+                cserror() << (initConfig->resolveFork() ? "--resolve-fork" : "--set-bc-top") << ": this node's database "
+                          << "does not start at block 0 (pruned, or its older blocks are not fetched yet) and no "
+                          << "quick-start checkpoint (qs/) is left at or below block #" << WithDelimiters(newTop)
+                          << ": after the cut it could not start. Nothing removed. Cut at a block at or above the oldest "
+                          << "checkpoint, or start again from a snapshot.";
+                exitCode_ = 3;
+                return ChainInit::Failed;
+            }
             if (blockChain_.truncationRefused()) {
                 // nothing was removed: the database is as it was, the quick-start data stays
                 cserror() << "--resolve-fork: the block at the recorded fork point is not the recorded one (the "
@@ -2556,7 +2567,11 @@ void Node::getSyncroMessage(const uint8_t* data, const size_t size, const cs::Pu
     }
     if (forkLocator_ && (msg == cs::SyncroMessage::NoSuchBlocks || msg == cs::SyncroMessage::DuplicatedRequest ||
                          msg == cs::SyncroMessage::IncorrectRequest)) {
-        forkLocator_->onRefused(sender, std::chrono::steady_clock::now(), msg == cs::SyncroMessage::DuplicatedRequest);
+        using Refusal = cs::forkguard::ForkLocator::Refusal;
+        forkLocator_->onRefused(sender, std::chrono::steady_clock::now(),
+                                msg == cs::SyncroMessage::DuplicatedRequest ? Refusal::Duplicate
+                                : msg == cs::SyncroMessage::NoSuchBlocks    ? Refusal::NoSuchBlocks
+                                                                            : Refusal::Other);
     }
     poolSynchronizer_->getSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
 }
@@ -2774,7 +2789,9 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
     }
 
     // the reply to the fork point search (FORK HELD): read for the hashes only, never stored
-    if (isForkSearch) {
+    // (expects(): no more blocks than asked for, each of a different height asked for, so every block
+    // is checked once at most)
+    if (isForkSearch && poolsBlock.size() <= forkLocator_->inFlightCount()) {
         std::vector<cs::Sequence> seqs;
         seqs.reserve(poolsBlock.size());
         for (const auto& b : poolsBlock) {
@@ -2784,18 +2801,26 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
             std::vector<cs::forkguard::ForkLocator::PeerBlock> blocks;
             blocks.reserve(poolsBlock.size());
             for (const auto& b : poolsBlock) {
-                // a block built on ours is also checked as a synced block after it (signatures, and
-                // confirmations by the confidants of our block): only such a block makes the located
-                // point the fork point
-                const bool child = b.sequence() > 0 && b.sequence() <= blockChain_.getLastSeq() + 1 &&
-                                   b.previous_hash() == blockChain_.getHashBySequence(b.sequence() - 1);
-                blocks.push_back({b.sequence(), b.hash().to_string(), b.previous_hash().to_string(),
+                // a block built on ours but not ours is also checked as a synced block after it
+                // (signatures, and confirmations by the confidants of our block): only such a block
+                // makes the located point the fork point
+                const cs::Sequence seq = b.sequence();
+                const csdb::PoolHash hash = b.hash();
+                const bool child = seq > 0 && seq <= blockChain_.getLastSeq() + 1 &&
+                                   b.previous_hash() == blockChain_.getHashBySequence(seq - 1) &&
+                                   (seq > blockChain_.getLastSeq() || hash != blockChain_.getHashBySequence(seq));
+                blocks.push_back({seq, hash.to_string(), b.previous_hash().to_string(),
                                   child && blockChain_.verifiesAfterOurBlock(b)});
             }
             forkLocator_->onReply(sender, blocks, std::chrono::steady_clock::now());
             tickForkLocator();
             return;
         }
+    }
+    // a reply from the searched peer that is not for the search, while nothing else waits for one
+    if (isForkSearch && !isSyncOn && !isBlockchainUncertain && !isBackfill) {
+        csdebug() << "NODE> Get block reply> not the reply the fork point search waits for, dropped";
+        return;
     }
 
     // The "necessary block" request is disabled (sendNecessaryBlockRequest sends nothing), so no reply

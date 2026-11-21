@@ -354,6 +354,11 @@ public:
     bool truncationRefused() const {
         return truncationRefused_;
     }
+    // init() refused to truncate: the storage does not start at block 0 and no quick-start checkpoint
+    // is left at or below the requested top, so the node could not start after the cut
+    bool truncationNoCheckpoint() const {
+        return truncationNoCheckpoint_;
+    }
 
 #ifdef TESTING
     // test-only accessors for the longest-chain guard
@@ -770,6 +775,7 @@ private:
     cs::Sequence resolveForkSeq_ = cs::kWrongSequence;
     csdb::PoolHash resolveForkHash_;
     bool truncationRefused_ = false;
+    bool truncationNoCheckpoint_ = false;
     // starts the episode at the current head if none is running (persisting its reference)
     void beginRollbackEpisode();
     // the chain grew: ends the episode once the head is above its reference

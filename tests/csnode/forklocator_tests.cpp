@@ -343,18 +343,69 @@ TEST(ForkLocator, NoPeer) {
         loc.start(key(7), 930, 0, h.now);
         for (size_t i = 0; i < h.settings.maxAttempts + 1; ++i) {
             loc.tick(h.now);
-            loc.onRefused(key(7), h.now, true);
+            loc.onRefused(key(7), h.now, Locator::Refusal::Duplicate);
             h.now += 7s;
         }
         EXPECT_TRUE(loc.searching());
         for (int i = 0; i < 200 && loc.searching(); ++i) {
             loc.tick(h.now);
-            loc.onRefused(key(7), h.now, true);
+            loc.onRefused(key(7), h.now, Locator::Refusal::Duplicate);
             h.now += 7s;
         }
         EXPECT_EQ(loc.status(), Status::Failed);
         EXPECT_NE(loc.why().find("duplicates"), std::string::npos) << loc.why();
     }
+}
+
+// a reply with more blocks than asked for, or one height twice, is not for the search (each block is
+// checked once at most)
+TEST(ForkLocator, DuplicatedBlocksReplyIsDropped) {
+    Harness h;
+    h.chains = {533, 931, 1500};
+    auto& loc = h.make();
+    loc.start(key(7), 930, 0, h.now);
+    loc.tick(h.now);
+    ASSERT_EQ(h.requests.size(), 1u);
+    const auto asked = h.requests.back();
+    EXPECT_EQ(loc.inFlightCount(), asked.size());
+    EXPECT_TRUE(loc.expects(key(7), asked));
+    EXPECT_FALSE(loc.expects(key(7), {asked[0], asked[0]}));
+    auto tooMany = asked;
+    tooMany.push_back(asked.back());
+    EXPECT_FALSE(loc.expects(key(7), tooMany));
+    EXPECT_TRUE(loc.expects(key(7), {asked[1], asked[0]}));  // any order
+}
+
+// a pruned peer does not store the lowest height asked for: the floor goes up past it instead of
+// counting a failed attempt, a limited number of times
+TEST(ForkLocator, PrunedPeerRaisesTheFloor) {
+    Harness h;
+    h.chains = {533, 931, 1500};
+    auto& loc = h.make();
+    loc.start(key(7), 930, 0, h.now);
+    loc.tick(h.now);
+    const auto first = h.requests.back();
+    loc.onRefused(key(7), h.now, Locator::Refusal::NoSuchBlocks);
+    EXPECT_TRUE(loc.searching());
+    EXPECT_EQ(loc.floor(), first[1]);
+    // then the peer answers: the search ends exactly, above the raised floor
+    h.requests.clear();  // the refused request is not answered
+    EXPECT_EQ(h.run(), Status::Exact);
+    EXPECT_EQ(loc.forkPoint(), 533u);
+
+    // a peer that never has the blocks: given up after maxFloorRaises
+    Harness p;
+    p.chains = {533, 931, 1500};
+    p.settings.maxFloorRaises = 3;
+    auto& none = p.make();
+    none.start(key(7), 930, 0, p.now);
+    for (int i = 0; i < 50 && none.searching(); ++i) {
+        none.tick(p.now);
+        none.onRefused(key(7), p.now, Locator::Refusal::NoSuchBlocks);
+        p.now += 7s;
+    }
+    EXPECT_EQ(none.status(), Status::Failed);
+    EXPECT_NE(none.why().find("does not store"), std::string::npos) << none.why();
 }
 
 // one request at a time, at most one per minInterval
@@ -659,8 +710,8 @@ void writeHead(const std::filesystem::path& dir, cs::Sequence seq) {
 }
 }  // namespace
 
-// after a cut at 950: every checkpoint above it goes (the shutdown checkpoint qs/0 at the old head
-// first), with its .prev backup; those at or below it stay, and so do quarantined ones
+// after a cut at 950: every checkpoint above it is set aside as <name>.bad (the shutdown checkpoint
+// qs/0 at the old head first), with its .prev backup; those at or below it stay
 TEST(ForkLocator, ChainCutDropsCheckpointsAboveTheTop) {
     TempFolder qs("qs");
     writeHead(qs.path / "0", 980);
@@ -672,13 +723,22 @@ TEST(ForkLocator, ChainCutDropsCheckpointsAboveTheTop) {
     std::filesystem::create_directories(qs.path / "2000");
     std::ofstream(qs.path / "notes.txt") << "not a checkpoint";
 
+    EXPECT_TRUE(cs::hasCheckpointAtOrBelow(qs.path, 950));
+    EXPECT_FALSE(cs::hasCheckpointAtOrBelow(qs.path, 400));  // 500 and 900 continue above it
     EXPECT_EQ(cs::dropCheckpointsAbove(qs.path, 950), 4u);
     for (const char* gone : {"0", "960", "960.prev", "2000"}) {
         EXPECT_FALSE(std::filesystem::exists(qs.path / gone)) << gone;
     }
-    for (const char* kept : {"900", "500", "0.bad", "notes.txt"}) {
+    // set aside, not deleted (an older 0.bad is replaced)
+    for (const char* aside : {"0.bad", "960.bad", "960.prev.bad", "2000.bad"}) {
+        EXPECT_TRUE(std::filesystem::exists(qs.path / aside)) << aside;
+    }
+    EXPECT_EQ(cs::readCheckpointHead(qs.path / "0.bad")->sequence, 980u);
+    for (const char* kept : {"900", "500", "notes.txt"}) {
         EXPECT_TRUE(std::filesystem::exists(qs.path / kept)) << kept;
     }
+    // set-aside checkpoints never count: a cut at 400 would leave a pruned node no checkpoint
+    EXPECT_FALSE(cs::hasCheckpointAtOrBelow(qs.path, 400));
     // a cut above every checkpoint removes nothing; a missing folder is no error
     EXPECT_EQ(cs::dropCheckpointsAbove(qs.path, 5000), 0u);
     EXPECT_EQ(cs::dropCheckpointsAbove(qs.path / "none", 10), 0u);

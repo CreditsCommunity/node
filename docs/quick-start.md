@@ -479,6 +479,9 @@ majority of the confidants of this node's block there. After a minute or two, on
 
 - **Verified.** The detail line says `Fork point: block #M (...), the last common block, verified`
   and `fork-held.json` has `"fork_point_status": "exact"`. `--resolve-fork` cuts there in one run.
+  A verified point proves that a branch of the other chain forks there, but the branch the node
+  refused might fork higher up. Cutting there may then remove more good blocks than needed. The
+  cost is only a resync of those blocks.
 - **Not verified** (for example, the peer's next block is a bootstrap block, which carries no
   confirmations to check). The line says `a peer's blocks place the last common block at #M, NOT
   verified` (`"fork_point_status": "located (unverified)"`). `--resolve-fork` still cuts at the
@@ -494,9 +497,13 @@ block and whether it is verified, where it cuts and how many blocks that removes
 detail line shows the search result. Run before, it cuts at the upper bound; if the other chain
 forks lower, the node reports FORK HELD again with a lower fork point.
 
-After a cut (`--resolve-fork` or `--set-bc-top`) the node also removes the quick-start checkpoints
-above the new last block, so the next start uses an older checkpoint or reads the chain from the
-start, and does not stop on a checkpoint that no longer matches the blocks on disk.
+After a cut (`--resolve-fork` or `--set-bc-top`) the node also sets aside the quick-start
+checkpoints above the new last block, as `qs/<n>.bad`. The next start then uses an older checkpoint
+or reads the chain from the start, and does not stop on a checkpoint that no longer matches the
+blocks on disk. A pruned node, or one still fetching its older blocks, cannot read the chain from
+the start. On such a node the cut is refused, and nothing is removed, when no checkpoint is left at
+or below the new last block. Cut at or above the oldest checkpoint in `qs/` instead, or start again
+from a snapshot.
 
 **Last resort.** `allow_deep_rollback=true` in `[params]` of `config.ini` (or the
 `CS_ALLOW_DEEP_ROLLBACK` environment variable) lets the node follow any competing chain without the

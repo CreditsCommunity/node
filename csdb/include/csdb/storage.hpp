@@ -83,6 +83,10 @@ public:
         StartAfterLastBlock = 7,
         // --resolve-fork: the block at the requested top is not the one recorded (set_truncate_check)
         TruncateMismatch = 8,
+        // --set-bc-top / --resolve-fork on a storage that does not start at block 0 (pruned, or a
+        // backfill in progress) with no quick-start checkpoint left at or below the new top: after the
+        // cut the node could neither quick-start nor slow-start (set_truncate_needs_checkpoint)
+        TruncateNoCheckpoint = 9,
         UnknownError = 255,
     };
 
@@ -158,6 +162,12 @@ public:
     // at that top has this hash; otherwise it removes nothing and fails with TruncateMismatch. An
     // empty hash (the default) checks nothing. Used by --resolve-fork.
     void set_truncate_check(const PoolHash& expectedTopHash);
+    // The next open() with a new blockchain top refuses the cut (TruncateNoCheckpoint, nothing removed)
+    // when no quick-start checkpoint remains at or below that top (checkpointAtOrBelowTop false) and the
+    // storage does not start at block 0. true (the default) checks nothing.
+    void set_truncate_needs_checkpoint(bool checkpointAtOrBelowTop);
+    // after an open() that cut the chain: the last block stored before the cut (0: nothing was cut)
+    cs::Sequence truncated_last() const;
 
     // dbBackend: "berkeleydb" (default), "rocksdb", or "lmdb" in <path>/lmdb, whose removed blocks
     // LMDB reuses the space of (pruned storage)

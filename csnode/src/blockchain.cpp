@@ -247,6 +247,11 @@ bool BlockChain::init(
         storage_.set_truncate_check(resolveForkHash_);
     }
     truncationRefused_ = false;
+    truncationNoCheckpoint_ = false;
+    if (newBlockchainTop != cs::kWrongSequence && serializationManPtr != nullptr) {
+        // a storage that does not start at block 0 can start after the cut only from a checkpoint
+        storage_.set_truncate_needs_checkpoint(serializationManPtr->hasCheckpointAtOrBelow(newBlockchainTop));
+    }
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
                        storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
                        static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
@@ -254,7 +259,8 @@ bool BlockChain::init(
                        storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         truncationRefused_ = storage_.last_error() == csdb::Storage::TruncateMismatch;
-        if (truncationRefused_) {
+        truncationNoCheckpoint_ = storage_.last_error() == csdb::Storage::TruncateNoCheckpoint;
+        if (truncationRefused_ || truncationNoCheckpoint_) {
             cserror() << kLogPrefix << storage_.last_error_message();
         }
         checkpointAheadOfBlocks_ = successfulQuickStart && storage_.last_error() == csdb::Storage::StartAfterLastBlock;
@@ -367,9 +373,7 @@ bool BlockChain::init(
 void BlockChain::dropStateAboveTop(cs::Sequence top, cs::CachesSerializationManager* serializationManPtr) {
     size_t hashes = 0;
     if (blockHashes_) {
-        for (cs::Sequence seq = top + 1; blockHashes_->remove(seq); ++seq) {
-            ++hashes;
-        }
+        hashes = blockHashes_->removeAbove(top, storage_.truncated_last());
         blockHashes_->flush();
     }
     size_t checkpoints = 0;
