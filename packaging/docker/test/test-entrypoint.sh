@@ -308,6 +308,11 @@ rm -f "$d/stub-args"
 out=$(fork_run "$d" resolve-fork) || { echo "$out"; fail "resolve-fork"; }
 grep -q -- '--resolve-fork' "$d/stub-args" && grep -q -- '--config-file config.ini' "$d/stub-args" || fail "resolve-fork arguments: $(cat "$d/stub-args")"
 rm -f "$d/stub-args"
+out=$(fork_run "$d" resolve-fork to-located) || { echo "$out"; fail "resolve-fork to-located"; }
+grep -q -- '--resolve-fork --to-located' "$d/stub-args" || fail "resolve-fork to-located arguments: $(cat "$d/stub-args")"
+set +e; out=$(fork_run "$d" resolve-fork 123); rc=$?; set -e
+[ "$rc" = 2 ] && grep -q 'resolve-fork takes no argument but to-located' <<<"$out" || { echo "$out"; fail "resolve-fork with a stray argument: exit $rc"; }
+rm -f "$d/stub-args"
 out=$(fork_run "$d" set-bc-top 1234) || { echo "$out"; fail "set-bc-top"; }
 grep -q -- '--set-bc-top 1234' "$d/stub-args" || fail "set-bc-top arguments: $(cat "$d/stub-args")"
 set +e; out=$(fork_run "$d" set-bc-top); rc=$?; set -e
@@ -336,6 +341,6 @@ grep -q 'PEERS: 6 neighbours (0 official, 6 community)' <<<"$out" && grep -q 'OF
 printf '{\n    "held": "true",\n    "since": "2026-11-19 10:00:00 UTC",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
 set +e; out=$(health "$d"); rc=$?; set -e
 [ "$rc" = 1 ] && grep -q 'FORK HELD since' <<<"$out" && grep -q 'PEERS:' <<<"$out" || { echo "$out"; fail "healthcheck with a fork held and peer status: exit $rc"; }
-pass "resolve-fork, set-bc-top and dismiss-fork; the healthcheck reports FORK HELD and the peer status"
+pass "resolve-fork (also to-located), set-bc-top and dismiss-fork; the healthcheck reports FORK HELD and the peer status"
 
 echo "PASS: entrypoint"

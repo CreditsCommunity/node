@@ -249,6 +249,20 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
     tree.put("fork_point", r.forkPoint);
     tree.put("fork_point_hash", r.forkPointHash);
     tree.put("fork_point_exact", r.forkPointExact);
+    tree.put("fork_point_status", r.forkPointStatus());
+    if (r.located) {
+        tree.put("fork_point_located", true);
+        tree.put("fork_point_upper_bound", r.upperBound);
+        tree.put("fork_point_located_with", r.locatedWith);
+        tree.put("located_verified", r.locatedVerified);
+        if (!r.locatedHash.empty()) {
+            tree.put("located_point", r.locatedPoint);
+            tree.put("located_hash", r.locatedHash);
+        }
+        if (r.deeper) {
+            tree.put("fork_point_below", r.deeperThan);
+        }
+    }
     tree.put("competing_block", r.competingSeq);
     tree.put("competing_hash", r.competingHash);
     tree.put("peer_key", r.peerKey);
@@ -286,6 +300,16 @@ std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt) 
         r.forkPoint = tree->get<cs::Sequence>("fork_point");
         r.forkPointHash = tree->get<std::string>("fork_point_hash", "");
         r.forkPointExact = tree->get<bool>("fork_point_exact", false);
+        r.located = tree->get<bool>("fork_point_located", false);
+        r.upperBound = tree->get<cs::Sequence>("fork_point_upper_bound", 0);
+        r.locatedWith = tree->get<std::string>("fork_point_located_with", "");
+        r.locatedVerified = r.located && tree->get<bool>("located_verified", false);
+        r.locatedPoint = tree->get<cs::Sequence>("located_point", 0);
+        r.locatedHash = tree->get<std::string>("located_hash", "");
+        if (const auto below = tree->get_optional<cs::Sequence>("fork_point_below")) {
+            r.deeper = r.located && !r.locatedVerified;
+            r.deeperThan = *below;
+        }
         r.competingSeq = tree->get<cs::Sequence>("competing_block", 0);
         r.competingHash = tree->get<std::string>("competing_hash", "");
         r.peerKey = tree->get<std::string>("peer_key", "");
@@ -319,7 +343,7 @@ void clearAll(const std::string& dir) {
     removeFile(dir, kApprovedFile);
 }
 
-std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error) {
+std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error, bool toLocated) {
     bool corrupt = false;
     const auto record = loadForkRecord(dir, &corrupt);
     if (corrupt) {
@@ -345,6 +369,17 @@ std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* erro
         }
         return std::nullopt;
     }
+    if (toLocated) {
+        if (!record->located || record->deeper || record->locatedHash.empty()) {
+            if (error) {
+                *error = "--to-located: the node has located no last common block (fork point status: " +
+                         record->forkPointStatus() + "): nothing removed. Run --resolve-fork without it to cut at "
+                         "the recorded fork point, or --set-bc-top <sequence>";
+            }
+            return std::nullopt;
+        }
+        return ResolvePlan{record->locatedPoint, record->locatedHash, *record, true};
+    }
     if (record->forkPointHash.empty()) {
         if (error) {
             *error = "the fork record has no hash for block #" + std::to_string(record->forkPoint) +
@@ -352,7 +387,29 @@ std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* erro
         }
         return std::nullopt;
     }
-    return ResolvePlan{record->forkPoint, record->forkPointHash, *record};
+    return ResolvePlan{record->forkPoint, record->forkPointHash, *record, false};
+}
+
+std::string resolveOverview(const ResolvePlan& plan) {
+    const auto& r = plan.record;
+    std::ostringstream os;
+    os << "our head #" << r.ourHead << "; fork point #" << r.forkPoint << " (" << r.forkPointStatus() << ")";
+    if (r.located) {
+        os << ", upper bound #" << r.upperBound;
+        if (r.deeper) {
+            os << ", a peer's block differs already at #" << r.deeperThan << " (not verified)";
+        }
+        else if (!r.locatedHash.empty()) {
+            os << ", located #" << r.locatedPoint << (r.locatedVerified ? " (verified)" : " (NOT verified)");
+        }
+    }
+    else {
+        os << ", not located";
+    }
+    const cs::Sequence removed = r.ourHead > plan.top ? r.ourHead - plan.top : 0;
+    os << ". Cutting at #" << plan.top << (plan.toLocated ? " (--to-located)" : "") << ": " << removed
+       << " block(s) removed";
+    return os.str();
 }
 
 std::string utcTime(int64_t unixSeconds) {
@@ -396,6 +453,18 @@ std::string summary(const ForkRecord& r, const std::string& peerSide) {
     os << ". Fork point: block #" << r.forkPoint << (r.forkPointExact ? "" : " or lower");
     if (!r.forkPointHash.empty()) {
         os << " (" << r.forkPointHash << ")";
+    }
+    if (r.located && r.locatedVerified) {
+        os << ", the last common block, verified (located from #" << r.upperBound << ")";
+    }
+    else if (r.located && r.deeper) {
+        os << "; a peer's block differs already at #" << r.deeperThan << " (not verified): the fork may be deeper, "
+           << "find the last common block with other nodes";
+    }
+    else if (r.located && !r.locatedHash.empty()) {
+        os << "; a peer's blocks place the last common block at #" << r.locatedPoint
+           << ", NOT verified: --resolve-fork cuts at #" << r.forkPoint << ", --resolve-fork --to-located at #"
+           << r.locatedPoint;
     }
     os << "; our head #" << r.ourHead;
     if (r.competingSeq != 0) {

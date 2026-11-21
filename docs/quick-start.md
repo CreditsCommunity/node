@@ -481,10 +481,46 @@ fork point with other nodes: the [monitor](https://monitor.credits.com), the
 `--resolve-fork` refuses, and removes nothing, when there is no fork record or when the block at
 the recorded fork point is no longer the recorded one. To cut the chain at a block of your choice
 instead, use `--set-bc-top <sequence>` (the last block to keep) with the node stopped; Docker:
-`docker compose run --rm node set-bc-top <sequence>`. If the detail line says
-`Fork point: block #N or lower`, the node knows only an upper bound: should the other chain fork
-lower, the node reports FORK HELD again with a lower fork point. Then find the last common block
-with the monitor or other nodes and cut there with `--set-bc-top`.
+`docker compose run --rm node set-bc-top <sequence>`.
+
+**The fork point.** `--resolve-fork` now finds the last common block itself; the manual
+`--set-bc-top` remains. When the node first refuses, it may know only an upper bound of the fork
+point (`Fork point: block #N or lower`), for example after a long partition. While FORK HELD it
+then asks the peer of the refused block for a few of its blocks below that bound, compares their
+hashes with its own and narrows down to the last block both chains share. This only reads: nothing
+is stored, removed or approved. The search covers 20 times `max_auto_rollback` blocks (2,000 by
+default, between 1,000 and 10,000). A peer could answer wrongly, so the node takes the point it
+finds as the fork point only when it can verify the peer's next block as it would verify a synced
+block: built on this node's block at that point, signed by its confidants and confirmed by a
+majority of the confidants of this node's block there. After a minute or two, one of these:
+
+- **Verified.** The detail line says `Fork point: block #M (...), the last common block, verified`
+  and `fork-held.json` has `"fork_point_status": "exact"`. `--resolve-fork` cuts there in one run.
+  A verified point proves that a branch of the other chain forks there, but the branch the node
+  refused might fork higher up. Cutting there may then remove more good blocks than needed. The
+  cost is only a resync of those blocks.
+- **Not verified** (for example, the peer's next block is a bootstrap block, which carries no
+  confirmations to check). The line says `a peer's blocks place the last common block at #M, NOT
+  verified` (`"fork_point_status": "located (unverified)"`). `--resolve-fork` still cuts at the
+  upper bound N. Once you have checked block M with other nodes or the monitor, cut there with
+  `--resolve-fork --to-located` (Docker: `docker compose run --rm node resolve-fork to-located`), or
+  with `--set-bc-top M`.
+- **Deeper.** The peer's block already differs at the lowest block searched (`"fork_point_status":
+  "deeper"`). `--resolve-fork` cuts at the upper bound. Find the last common block with the monitor or
+  other nodes and cut there with `--set-bc-top`.
+
+Before it removes anything, `--resolve-fork` prints the node's head, the upper bound, the located
+block and whether it is verified, where it cuts and how many blocks that removes. Run it after the
+detail line shows the search result. Run before, it cuts at the upper bound; if the other chain
+forks lower, the node reports FORK HELD again with a lower fork point.
+
+After a cut (`--resolve-fork` or `--set-bc-top`) the node also sets aside the quick-start
+checkpoints above the new last block, as `qs/<n>.bad`. The next start then uses an older checkpoint
+or reads the chain from the start, and does not stop on a checkpoint that no longer matches the
+blocks on disk. A pruned node, or one still fetching its older blocks, cannot read the chain from
+the start. On such a node the cut is refused, and nothing is removed, when no checkpoint is left at
+or below the new last block. Cut at or above the oldest checkpoint in `qs/` instead, or start again
+from a snapshot.
 
 **Last resort.** `allow_deep_rollback=true` in `[params]` of `config.ini` (or the
 `CS_ALLOW_DEEP_ROLLBACK` environment variable) lets the node follow any competing chain without the
