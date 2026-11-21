@@ -34,6 +34,10 @@ public:
 
     bool remove(cs::Sequence);
     bool remove(const csdb::PoolHash& hash);
+    // after a cut at `top`: removes the entries of every block above it, through `last` (the last
+    // block stored before the cut; gaps included) and on up to the first missing sequence after it.
+    // Returns the number of blocks removed
+    size_t removeAbove(cs::Sequence top, cs::Sequence last);
 
     // The first failure of either database is reported once and leaves the file blockhashes.rebuild
     // in the caches folder: the next start rebuilds both databases from the stored blocks.

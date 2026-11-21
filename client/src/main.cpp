@@ -57,6 +57,7 @@ int main(int argc, char* argv[]) {
         (cmdline::argSeed, "enter with seed instead of keys")
         (cmdline::argSetBCTop, po::value<uint64_t>(), "all blocks in blockchain with higher sequence will be removed")
         (cmdline::argResolveFork, "a node that reports FORK HELD: remove the blocks above the fork point recorded in fork-held.json (only if the block there is still the recorded one), then exit; at the next start the node follows the other chain. Check with other nodes first (the node must be stopped)")
+        (cmdline::argToLocated, "with --resolve-fork: cut at the last common block the node located with a peer (fork-held.json, \"located_point\") even though it could not verify it, instead of the recorded fork point")
         (cmdline::argBalChange, po::value<std::string>(), "prints all changes in account balance in log file")
         ("disable-auto-shutdown", "node will be prohibited to shutdown in case of fatal errors")
         ("version", "show node version")

@@ -182,8 +182,9 @@
 #        network restarted, as after a power cut; the nodes must agree again
 #        CHECKPOINT_AHEAD_AT (default 0 = off): at that sequence node CHECKPOINT_AHEAD_NODE (default 3,
 #        a checkpoint a minute, 3 kept) is killed, started once offline with --set-bc-top a few blocks
-#        before its second newest checkpoint, and killed again: its two newest checkpoints are then
-#        ahead of the blocks on disk. It is restarted on every exit, at most 5 times: it must set
+#        before its second newest checkpoint, and killed again. The cut must have removed its two
+#        newest checkpoints; they are put back, as from a backup, and are then ahead of the blocks
+#        on disk. It is restarted on every exit, at most 5 times: it must set
 #        those checkpoints aside, quick-start from the older one and end with the same state digests
 #        APPLY_FAIL_AT (default 0 = off, a CREDITS_TESTNET build): at that sequence node
 #        APPLY_FAIL_NODE (default 3) is told to fail applying a block 20 blocks later to its caches
@@ -2043,6 +2044,8 @@ PY
                 section == "[host_input]" && /^port=/ { print "port=" port; next }
                 { print }' "$ca_dir/config.ini" > "$ca_dir/config-offline.ini"
             ca_before=$(grep -ac 'Changing consensus settings to' "$ca_dir/node.log" || true)
+            rm -rf "$ca_dir/qs-keep"; mkdir -p "$ca_dir/qs-keep"
+            for c in $ca_cps; do cp -a "$ca_dir/qs/$c" "$ca_dir/qs-keep/$c"; done
             (cd "$ca_dir" && exec "$BIN" --db-path db --config-file config-offline.ini --set-bc-top "$ca_top" </dev/null >> stdout.log 2>&1) &
             ca_pid=$!
             ca_t0=$(date +%s)
@@ -2050,7 +2053,17 @@ PY
                 || ! kill -0 "$ca_pid" 2>/dev/null || [ $(( $(date +%s) - ca_t0 )) -ge 120 ]; do sleep 1; done
             kill -KILL "$ca_pid" 2>/dev/null || true; wait "$ca_pid" 2>/dev/null || true
             pkill -KILL -f "cs.testnet.node=n$ca " 2>/dev/null || true
-            echo "checkpoint-ahead test: n$ca cut to block $ca_top, its checkpoints $(tr '\n' ' ' <<<"$ca_cps")are ahead of it"
+            # the cut removes the checkpoints above the new top itself; put them back (as a restored
+            # backup of qs/ would), so that the start must set them aside
+            for c in $ca_cps; do
+                if [ -d "$ca_dir/qs/$c" ]; then
+                    echo "FAIL: n$ca: --set-bc-top $ca_top left the checkpoint qs/$c above the new top"
+                    exit 1
+                fi
+                cp -a "$ca_dir/qs-keep/$c" "$ca_dir/qs/$c"
+            done
+            rm -rf "$ca_dir/qs-keep"
+            echo "checkpoint-ahead test: n$ca cut to block $ca_top, which removed its checkpoints $(tr '\n' ' ' <<<"$ca_cps")above it; put back, they are ahead of it"
             ca_lines=$(wc -l < "$ca_dir/node.log")
             ca_restarts=0
             start_node "$ca"
