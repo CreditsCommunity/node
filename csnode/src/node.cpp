@@ -289,11 +289,9 @@ void Node::onForkGuardTick() {
     blockChain_.checkDismissTrigger();
     blockChain_.promotePendingHold(false);
     blockChain_.checkResolvePreference(static_cast<int64_t>(std::time(nullptr)));
-    if (blockChain_.takeCacheDropRequest()) {
-        // blocks of the branch abandoned with --resolve-fork may wait in the cache above the cut
-        csdebug() << "NODE> dropping the block cache: it may hold blocks of the branch abandoned with --resolve-fork";
-        blockChain_.clearBlockCache();
-    }
+    // blocks of the branch abandoned with --resolve-fork may wait in the cache above the cut: only
+    // those go (once per preference)
+    blockChain_.dropAbandonedFromCache();
     updatePreferredSyncSources();
     tickForkLocator();
     logForkHeldDetail(blockChain_.forkHeldRecord());

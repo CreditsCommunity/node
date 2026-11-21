@@ -403,11 +403,15 @@ void PoolSynchronizer::sendBlockRequest() {
 }
 
 std::unordered_map<PublicKey, Sequence>::iterator PoolSynchronizer::firstNeighbour() {
-    for (const auto& key : preferredSources_) {
-        const auto it = neighbours_.find(key);
-        if (it != neighbours_.end() && it->second > blockChain_->getLastSeq()) {
-            return it;
-        }
+    const auto last = blockChain_->getLastSeq();
+    const auto chosen = preferredSources_.pick(
+        [this, last](const PublicKey& key) {
+            const auto it = neighbours_.find(key);
+            return it != neighbours_.end() && it->second > last;
+        },
+        last, PreferredSources::Clock::now(), [](size_t n) { return getRandomIndex(n - 1); });
+    if (chosen.has_value()) {
+        return neighbours_.find(*chosen);
     }
     return std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
 }

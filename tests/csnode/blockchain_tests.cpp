@@ -1201,18 +1201,39 @@ TEST(BlockChain, ResolveForkPrefersTheChosenBranch) {
         chain.setGuardStateDir(dir.str());
         ASSERT_TRUE(chain.approvedBranch().has_value());
         EXPECT_TRUE(chain.approvedBranch()->preferring());
-        (void)chain.takeCacheDropRequest();
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        // a block nobody vouches for, refused there: anyone can send it, so it asks for no cache drop
+        auto forged = guardBlock(61, strangers, &strangers, 0b111, false, false, forkBlock.hash(), "forged");
+        EXPECT_FALSE(chain.storeBlock(forged, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
         for (const auto* b : {&abandoned, &third}) {
             auto offered = *b;
             EXPECT_FALSE(chain.storeBlock(offered, cs::PoolStoreType::Synced));
             EXPECT_EQ(chain.getLastSeq(), 60u);
             EXPECT_EQ(chain.getLastHash(), forkBlock.hash());
         }
-        EXPECT_TRUE(chain.takeCacheDropRequest());
+        EXPECT_TRUE(chain.abandonedCacheDropPending());  // the abandoned block itself
         auto child = guardBlock(62, ours, &ours, 0b111, false, false, abandoned.hash());
         const auto cached = chain.getCachedBlocksSize();
         EXPECT_FALSE(chain.storeBlock(child, cs::PoolStoreType::Synced));
         EXPECT_EQ(chain.getCachedBlocksSize(), cached);
+        // the cache: a block built on that refused child (abandoned branch) goes, an unrelated one stays
+        auto grandchild = guardBlock(63, ours, &ours, 0b111, false, false, child.hash(), "grandchild");
+        auto unrelatedCached = guardBlock(64, theirs, &theirs, 0b111, false, false, someHash('k'), "kept");
+        EXPECT_TRUE(chain.storeBlock(grandchild, cs::PoolStoreType::Synced));
+        EXPECT_TRUE(chain.storeBlock(unrelatedCached, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 2);
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 1u);
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        // once per preference: another abandoned offer asks for no second drop
+        auto again = abandoned;
+        EXPECT_FALSE(chain.storeBlock(again, cs::PoolStoreType::Synced));
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 0u);
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        chain.clearBlockCache();
         EXPECT_FALSE(chain.forkHeld());
         EXPECT_FALSE(chain.forkHoldPending());  // refused by the preference, no fork to report
         EXPECT_TRUE(chain.approvedBranch().has_value());
@@ -1232,7 +1253,20 @@ TEST(BlockChain, ResolveForkPrefersTheChosenBranch) {
         chain.test_onHeadAdvanced();
         EXPECT_FALSE(chain.approvedBranch().has_value());
         EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
-        EXPECT_TRUE(chain.takeCacheDropRequest());
+    }
+    // the chosen block stored before any drop: one drop then, of the abandoned descendants only
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        chain.test_setLastBlock(chosen);
+        chain.test_onHeadAdvanced();
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_TRUE(chain.abandonedCacheDropPending());
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 0u);  // nothing of that branch cached
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
     }
     // a restart keeps the preference (the file), and its deadline
     {
