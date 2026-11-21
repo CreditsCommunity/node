@@ -1084,6 +1084,7 @@ void BlockChain::holdFork(cs::forkguard::ForkRecord r) {
     {
         std::lock_guard l(guardMutex_);
         forkRecord_ = r;
+        refusedLine_ = cs::forkguard::RepeatedLine{};  // a new episode: its first refusal gets a line at once
     }
     cs::forkguard::saveForkRecord(guardStateDir_, r);
 

@@ -74,7 +74,7 @@
 #        times of n1 in that many seconds before the joins and after they started are compared; the
 #        rate of a window is the median of its one-minute rates, so one slow minute does not decide.
 #        The run fails when the rate falls by more than STRESS_RATE_DROP % (default 10) or the 95th
-#        percentile of the round time rises by more than STRESS_P95_RISE % (default 20)
+#        percentile of the round time rises by more than STRESS_ROUND_RISE % (default 20)
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate, partition,
 #        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
@@ -429,7 +429,7 @@ alt_node() { [ -n "$BIN_ALT" ] && [ $(( $1 % 2 )) -eq 0 ] && ! { [ "${JOIN_COMMU
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
 STRESS_RATE_DROP=${STRESS_RATE_DROP:-10}
-STRESS_P95_RISE=${STRESS_P95_RISE:-20}
+STRESS_ROUND_RISE=${STRESS_ROUND_RISE:-20}
 BACKFILL_RATE=${BACKFILL_RATE:-}
 BACKFILL_BATCH=${BACKFILL_BATCH:-}
 BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
@@ -908,6 +908,7 @@ net_fault_off() {
 # the p2p ports (a node sends its datagrams from its own port), TCP by the sender's cgroup
 partition_on() {
     local i j
+    partition_off  # a chain left by an earlier cut: -N would fail, and its rules would stay
     sudo iptables -N CSPART
     sudo iptables -I OUTPUT 1 -o lo -j CSPART
     for i in $COMMUNITY_NODES; do
@@ -2722,7 +2723,7 @@ done
 # the consensus while the snapshots are served: n1's block rate and round times in the same number of
 # seconds before the joins and after they started
 if [ "$STRESS_WINDOW" -gt 0 ] && [ -n "${join_started:-}" ]; then
-    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" "$STRESS_RATE_DROP" "$STRESS_P95_RISE" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
+    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" "$STRESS_RATE_DROP" "$STRESS_ROUND_RISE" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
 import re, sys, datetime, statistics
 log, start, window = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 max_drop, max_rise = float(sys.argv[4]), float(sys.argv[5])

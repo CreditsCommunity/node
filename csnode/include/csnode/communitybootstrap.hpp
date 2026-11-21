@@ -1,7 +1,9 @@
 #ifndef COMMUNITYBOOTSTRAP_HPP
 #define COMMUNITYBOOTSTRAP_HPP
 
+#include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <cstdint>
 #include <set>
 #include <vector>
@@ -104,7 +106,8 @@ inline bool isCommunityTable(const std::set<PublicKey>& initial, const std::set<
 
 // The starter of an even set drops its last key (the official rule, for an odd table). Not when that
 // would leave a community table without more than half of the list: with a list of 6 and 4 of its
-// nodes left, the 3 kept would never be enough
+// nodes left, the 3 kept would never be enough. A community table whose last key is its only one
+// outside the initial confidants drops it: the rest is a regular table, as the official rule gives
 inline bool dropForOddTable(const std::set<PublicKey>& initial, const std::set<PublicKey>& community,
                             const std::vector<PublicKey>& table) {
     if (table.empty() || table.size() % 2 != 0) {
@@ -113,7 +116,39 @@ inline bool dropForOddTable(const std::set<PublicKey>& initial, const std::set<P
     if (!isCommunityTable(initial, community, table)) {
         return true;
     }
-    return isCommunityTable(initial, community, std::vector<PublicKey>(table.begin(), table.end() - 1));
+    const std::vector<PublicKey> rest(table.begin(), table.end() - 1);
+    return isCommunityTable(initial, community, rest)
+           || std::none_of(rest.cbegin(), rest.cend(), [&initial](const PublicKey& key) { return initial.count(key) == 0; });
+}
+
+// The table a starter sends from the keys at the highest sequence it sees (its own included), after
+// the odd rule. A set with a listed key outside the initial confidants that is not a community table
+// (not more than half of the list) cannot start anything as it is; it must not hold back the
+// regular restart either, which the initial confidants among it would make without the list: the
+// table is then theirs, under the official odd rule, and a node outside them waits as before
+inline std::set<PublicKey> bootstrapTableOf(const std::set<PublicKey>& initial, const std::set<PublicKey>& community,
+                                            const std::set<PublicKey>& seen) {
+    const auto oddTable = [&initial](const std::set<PublicKey>& listed, std::set<PublicKey> keys) {
+        if (dropForOddTable(initial, listed, std::vector<PublicKey>(keys.cbegin(), keys.cend()))) {
+            keys.erase(std::prev(keys.end()));
+        }
+        return keys;
+    };
+    std::set<PublicKey> table = oddTable(community, seen);
+    const std::vector<PublicKey> asSent(table.cbegin(), table.cend());
+    const bool outsideInitial = std::any_of(asSent.cbegin(), asSent.cend(), [&initial](const PublicKey& key) {
+        return initial.count(key) == 0;
+    });
+    if (!outsideInitial || isCommunityTable(initial, community, asSent)) {
+        return table;
+    }
+    std::set<PublicKey> regular;
+    for (const auto& key : seen) {
+        if (initial.count(key) > 0) {
+            regular.insert(key);
+        }
+    }
+    return oddTable({}, regular);
 }
 
 // A neighbour ahead of this node: it syncs from it, the network is not stalled. Two blocks ahead
