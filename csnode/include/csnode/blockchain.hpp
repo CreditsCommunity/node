@@ -347,10 +347,15 @@ public:
     // the preference for the approved branch times out at its deadline (wall clock, UTC seconds): logged,
     // the abandoned block stays refused until the operator acts again. Processor thread
     void checkResolvePreference(int64_t nowUnix);
-    // the preference refused a block or the chosen block was stored: blocks of the abandoned branch may
-    // sit in the block cache, to be dropped by the caller (outside storeBlock). True once per request
-    bool takeCacheDropRequest() {
-        return cacheDropRequested_.exchange(false);
+    // Blocks of the branch abandoned with --resolve-fork may sit in the block cache above the cut. A drop
+    // is requested only by a refused block that is of that branch (the abandoned block itself, or one
+    // built on a block of it) or that verifies after our block, and by the chosen block once stored; it
+    // removes only the cached blocks that descend from the abandoned branch, never the rest of the
+    // cache, and runs at most once per preference. Called by the node outside storeBlock (processor
+    // thread); returns the blocks removed
+    size_t dropAbandonedFromCache();
+    bool abandonedCacheDropPending() const {
+        return cacheDropPending_;
     }
     // the peers that sent the most recent refused competing blocks (most recent first, a few at most)
     std::vector<cs::PublicKey> recentRefusedPeers() const;
@@ -383,7 +388,7 @@ public:
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
     void test_resetRollbackEpisode() {
-        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); deepOverrideSpent_ = false; pendingHold_.reset();
+        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); resetAbandonedLine(); deepOverrideSpent_ = false; pendingHold_.reset();
         std::lock_guard l(guardMutex_); forkRecord_.reset();
     }
     // make `block` the node's last block (the deferred one), as getLastBlock() returns it
@@ -771,10 +776,19 @@ private:
     std::string resolveAbandonedHash_;
     std::string resolvePeerKey_;
     // a block refused by the preference for the approved branch (logged once, then once a minute)
-    bool refuseForApprovedBranch(const csdb::Pool& pool, const char* what);
+    // ofAbandoned: the block is of the abandoned branch (its hash, or its parent, is one of
+    // abandonedLine_); authenticated: it verifies after our block. Only these request a cache drop
+    bool refuseForApprovedBranch(const csdb::Pool& pool, const char* what, bool ofAbandoned, bool authenticated);
     std::chrono::steady_clock::time_point lastBranchRefusalLog_{};
     size_t branchRefusals_ = 0;
-    std::atomic<bool> cacheDropRequested_{false};
+    // the abandoned block and the refused blocks seen built on it (bounded), for the cache drop
+    std::vector<std::string> abandonedLine_;
+    bool inAbandonedLine(const std::string& hash) const;
+    void addToAbandonedLine(const std::string& hash);
+    void requestAbandonedCacheDrop();
+    void resetAbandonedLine();
+    std::atomic<bool> cacheDropPending_{false};
+    bool cacheDropDone_ = false;  // once per preference
     std::vector<cs::PublicKey> refusedPeers_;  // guarded by guardMutex_
     // the approved branch is settled: the node is past its block, or another block took that height
     void checkApprovedBranch();

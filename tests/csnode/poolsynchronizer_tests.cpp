@@ -66,3 +66,52 @@ TEST(PoolSynchronizer, DISABLED_TestNeighbours) {
         synchronizer->onPingReceived(sequence, key);
     }
 }
+
+// after --resolve-fork the sync asks a preferred source first, but a random one of them; a source that
+// brings no block within the timeout is demoted; with every source demoted (or none usable) the usual
+// random choice applies, so a peer claiming a version or a height cannot hold the sync
+TEST(PreferredSources, ShuffledDemotedAndFallBack) {
+    using namespace std::chrono_literals;
+    auto key = [](uint8_t b) {
+        cs::PublicKey k{};
+        k.fill(b);
+        return k;
+    };
+    cs::PreferredSources pref(20s);
+    const std::function<bool(const cs::PublicKey&)> all = [](const cs::PublicKey&) { return true; };
+    const std::function<size_t(size_t)> r0 = [](size_t) { return size_t{0}; };
+    const std::function<size_t(size_t)> r1 = [](size_t) { return size_t{1}; };
+    const std::function<size_t(size_t)> r2 = [](size_t) { return size_t{2}; };
+    auto t = cs::PreferredSources::Clock::time_point{} + 1h;
+    EXPECT_FALSE(pref.pick(all, 100, t, r0).has_value());  // none set
+
+    pref.set({key(1), key(2), key(3), key(4)});
+    EXPECT_EQ(pref.sources().size(), cs::PreferredSources::kMax);  // a few at most
+    // random among the usable ones (not always the first)
+    EXPECT_EQ(*pref.pick(all, 100, t, r2), key(3));
+    EXPECT_EQ(*pref.pick(all, 100, t, r1), key(2));
+    // unusable (not a neighbour, nothing above ours): skipped
+    const std::function<bool(const cs::PublicKey&)> not2 = [&](const cs::PublicKey& k) { return k != key(2); };
+    EXPECT_EQ(*pref.pick(not2, 100, t, r0), key(1));
+    // progress keeps a source
+    t += 15s;
+    EXPECT_EQ(*pref.pick(all, 101, t, r0), key(1));
+    t += 15s;
+    EXPECT_EQ(*pref.pick(all, 102, t, r0), key(1));
+    EXPECT_FALSE(pref.demoted(key(1)));
+    // no block within the timeout: demoted, another source
+    t += 21s;
+    EXPECT_EQ(*pref.pick(all, 102, t, r0), key(2));
+    EXPECT_TRUE(pref.demoted(key(1)));
+    t += 21s;
+    EXPECT_EQ(*pref.pick(all, 102, t, r0), key(3));
+    t += 21s;
+    // every source demoted: the usual random choice
+    EXPECT_FALSE(pref.pick(all, 102, t, r0).has_value());
+    // the same list again keeps the demotions; an empty list ends the preference
+    pref.set({key(1), key(2), key(3)});
+    EXPECT_FALSE(pref.pick(all, 102, t, r0).has_value());
+    pref.set({});
+    pref.set({key(1)});
+    EXPECT_EQ(*pref.pick(all, 102, t, r0), key(1));
+}

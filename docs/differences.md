@@ -345,7 +345,10 @@ consensus rules.
   block there: signatures, and round confirmations by a majority of that block's confidants. That
   verified block is then the branch the cut chooses: until the node is past it, it stores at that
   height only that block and refuses any other (neighbours still on the abandoned branch would
-  sync it back on top of the cut), asking first the peers that have it; after 30 minutes without it
+  sync it back on top of the cut), asking first, in random order, a few peers that likely have it
+  (a peer that brings no block within 20 s is dropped from them, and with none left the usual random
+  choice applies, so a peer cannot hold the sync by what it claims); blocks of the abandoned branch
+  waiting in the block cache are dropped once (only those that descend from it); after 30 minutes without it
   (logged as an error) only the abandoned block stays refused there, until the operator cuts again.
   The same one-shot preference applies to the recorded competing block of an exact fork point. It
   only refuses blocks (kept in `resolve-approved.json`).

@@ -1387,6 +1387,7 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
                   << "approved; removing it";
         cs::forkguard::clearApprovedBranch(dir);
     }
+    resetAbandonedLine();
     if (approvedBranch_.has_value()) {
         cslog() << kLogPrefix << "branch approved with --resolve-fork: block #" << WithDelimiters(approvedBranch_->seq)
                 << " (" << approvedBranch_->hash << ") after the fork point #" << WithDelimiters(approvedBranch_->forkPoint);
@@ -1427,8 +1428,72 @@ void BlockChain::checkResolvePreference(int64_t nowUnix) {
               << "the monitor, then run --resolve-fork or --set-bc-top <sequence> again";
 }
 
-bool BlockChain::refuseForApprovedBranch(const csdb::Pool& pool, const char* what) {
-    cacheDropRequested_ = true;
+bool BlockChain::inAbandonedLine(const std::string& hash) const {
+    return !hash.empty() && std::find(abandonedLine_.begin(), abandonedLine_.end(), hash) != abandonedLine_.end();
+}
+
+void BlockChain::addToAbandonedLine(const std::string& hash) {
+    if (hash.empty() || inAbandonedLine(hash) || abandonedLine_.size() >= 256) {
+        return;
+    }
+    abandonedLine_.push_back(hash);
+}
+
+void BlockChain::requestAbandonedCacheDrop() {
+    if (!cacheDropDone_ && !abandonedLine_.empty()) {
+        cacheDropPending_ = true;
+    }
+}
+
+void BlockChain::resetAbandonedLine() {
+    abandonedLine_.clear();
+    cacheDropPending_ = false;
+    cacheDropDone_ = false;
+    if (approvedBranch_.has_value()) {
+        addToAbandonedLine(approvedBranch_->abandonedHash);
+    }
+}
+
+size_t BlockChain::dropAbandonedFromCache() {
+    if (!cacheDropPending_.exchange(false) || cacheDropDone_) {
+        return 0;
+    }
+    cacheDropDone_ = true;
+    size_t removed = 0;
+    cs::Lock lock(cachedBlocksMutex_);
+    if (cachedBlocks_->isEmpty()) {
+        return 0;
+    }
+    // ascending: a block built on one of the line joins it, so its own children go too
+    const cs::Sequence from = cachedBlocks_->minSequence();
+    const cs::Sequence to = cachedBlocks_->maxSequence();
+    for (cs::Sequence seq = from; seq <= to && seq >= from; ++seq) {
+        if (!cachedBlocks_->contains(seq)) {
+            continue;
+        }
+        const auto data = cachedBlocks_->value(seq);
+        if (!data.has_value() || !inAbandonedLine(data->pool.previous_hash().to_string())) {
+            continue;
+        }
+        addToAbandonedLine(data->pool.hash().to_string());
+        cachedBlocks_->remove(seq);
+        ++removed;
+    }
+    if (removed > 0) {
+        cslog() << kLogPrefix << "dropped " << removed << " cached block(s) of the branch abandoned with --resolve-fork";
+    }
+    return removed;
+}
+
+bool BlockChain::refuseForApprovedBranch(const csdb::Pool& pool, const char* what, bool ofAbandoned, bool authenticated) {
+    // only a block of the abandoned branch (it can then name blocks of that branch in the cache) or one
+    // that verifies after our block asks for the cache drop; anyone can send any other block
+    if (ofAbandoned) {
+        addToAbandonedLine(pool.hash().to_string());
+    }
+    if (ofAbandoned || authenticated) {
+        requestAbandonedCacheDrop();
+    }
     ++branchRefusals_;
     const auto now = std::chrono::steady_clock::now();
     if (lastBranchRefusalLog_ == std::chrono::steady_clock::time_point{} || now - lastBranchRefusalLog_ >= std::chrono::minutes(1)) {
@@ -1461,7 +1526,7 @@ void BlockChain::checkApprovedBranch() {
         return;
     }
     if (getHashBySequence(approvedBranch_->seq).to_string() == approvedBranch_->hash) {
-        cacheDropRequested_ = true;  // blocks of the abandoned branch the cache may still hold
+        requestAbandonedCacheDrop();  // blocks of the abandoned branch the cache may still hold
         dropApprovedBranch("the node follows it");
     }
     else if (tip > approvedBranch_->seq) {
@@ -3152,7 +3217,9 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
         // once the preference timed out, anything but the abandoned block). Refusing only.
         if (approvedBranch_.has_value() &&
             cs::forkguard::judgeBlock(*approvedBranch_, poolSequence, pool.hash().to_string()) == cs::forkguard::BranchVerdict::Refuse) {
-            return refuseForApprovedBranch(pool, "block");
+            const std::string hash = pool.hash().to_string();
+            return refuseForApprovedBranch(pool, "block", hash == approvedBranch_->abandonedHash || inAbandonedLine(hash),
+                                           verifiesAfterOurBlock(pool));
         }
 
         setTransactionsFees(pool, type);
@@ -3203,7 +3270,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
     // a block right after the one chosen with --resolve-fork that is not built on it: not cached
     if (approvedBranch_.has_value() &&
         cs::forkguard::judgeChild(*approvedBranch_, poolSequence, pool.previous_hash().to_string()) == cs::forkguard::BranchVerdict::Refuse) {
-        return refuseForApprovedBranch(pool, "block (for the cache)");
+        return refuseForApprovedBranch(pool, "block (for the cache)", inAbandonedLine(pool.previous_hash().to_string()), false);
     }
 
     cs::Lock lock(cachedBlocksMutex_);
