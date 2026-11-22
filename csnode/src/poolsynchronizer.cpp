@@ -118,7 +118,7 @@ void PoolSynchronizer::syncLastPool() {
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
     }
-    cs::PublicKey target = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1))->first;
+    cs::PublicKey target = firstNeighbour()->first;
     emit sendRequest(target, PoolsRequestedSequences{blockChain_->getLastSeq() + 1});
 }
 
@@ -168,7 +168,9 @@ void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::Publ
     pacing_.onReply(sender, cs::Utils::currentTimestamp());
     //std::thread sThread(&PoolSynchronizer::manageSyncBlocks, this, std::move(poolsBlock));;
     //sThread.detach();
+    const auto before = blockChain_->getLastSeq();
     manageSyncBlocks(std::move(poolsBlock));
+    preferredSources_.onReply(sender, blockChain_->getLastSeq() > before);
 }
 
 bool PoolSynchronizer::isSyncroStarted() const {
@@ -353,7 +355,7 @@ void PoolSynchronizer::sendBlockRequest() {
     maxRequestedSequence_ = blockChain_->getLastSeq();
 
     auto requiredBlocks = blockChain_->getRequiredBlocks();
-    auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
+    auto neighbour = firstNeighbour();
     auto end = neighbour;
     updateSynchroLog();
     do {
@@ -386,6 +388,20 @@ void PoolSynchronizer::sendBlockRequest() {
             neighbour = neighbours_.begin();
         }
     } while (neighbour != end);
+}
+
+std::unordered_map<PublicKey, Sequence>::iterator PoolSynchronizer::firstNeighbour() {
+    const auto last = blockChain_->getLastSeq();
+    const auto chosen = preferredSources_.pick(
+        [this, last](const PublicKey& key) {
+            const auto it = neighbours_.find(key);
+            return it != neighbours_.end() && it->second > last;
+        },
+        last, PreferredSources::Clock::now(), [](size_t n) { return getRandomIndex(n - 1); });
+    if (chosen.has_value()) {
+        return neighbours_.find(*chosen);
+    }
+    return std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
 }
 
 std::vector<Sequence> PoolSynchronizer::getNeededSequences(

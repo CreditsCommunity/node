@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 
 #include <cstdio>
@@ -13,6 +14,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+
+#include <base58.h>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -175,10 +178,30 @@ bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& b) {
     tree.put("fork_point", b.forkPoint);
     tree.put("block", b.seq);
     tree.put("hash", b.hash);
+    if (!b.abandonedHash.empty()) {
+        tree.put("abandoned_hash", b.abandonedHash);
+    }
+    if (!b.abandonedConfidants.empty()) {
+        ptree keys;
+        for (const auto& k : b.abandonedConfidants) {
+            ptree item;
+            item.put("", EncodeBase58(k.data(), k.data() + k.size()));
+            keys.push_back(std::make_pair("", item));
+        }
+        tree.add_child("abandoned_confidants", keys);
+    }
+    if (!b.peerKey.empty()) {
+        tree.put("peer_key", b.peerKey);
+    }
+    if (b.untilUnix != 0) {
+        tree.put("prefer_until", utcTime(b.untilUnix));
+        tree.put("prefer_until_unix", b.untilUnix);
+        tree.put("expired", b.expired);
+    }
     return writeTree(dir, kApprovedFile, tree);
 }
 
-std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt) {
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt, int64_t nowUnix) {
     const auto tree = readTree(dir, kApprovedFile, corrupt);
     if (!tree) {
         return std::nullopt;
@@ -188,7 +211,28 @@ std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* c
         b.forkPoint = tree->get<cs::Sequence>("fork_point");
         b.seq = tree->get<cs::Sequence>("block");
         b.hash = tree->get<std::string>("hash");
-        if (b.hash.empty() || b.seq != b.forkPoint + 1) {
+        b.abandonedHash = tree->get<std::string>("abandoned_hash", "");
+        b.peerKey = tree->get<std::string>("peer_key", "");
+        b.untilUnix = tree->get<int64_t>("prefer_until_unix", 0);
+        b.expired = tree->get<bool>("expired", false);
+        if (const auto keys = tree->get_child_optional("abandoned_confidants")) {
+            for (const auto& item : *keys) {
+                cs::Bytes key;
+                cs::PublicKey k{};
+                if (!DecodeBase58(item.second.get_value<std::string>(), key) || key.size() != k.size()) {
+                    throw std::runtime_error("bad key");
+                }
+                std::copy(key.begin(), key.end(), k.begin());
+                b.abandonedConfidants.push_back(k);
+            }
+        }
+        // a deadline this node would not have written: no further than the preference lasts
+        const int64_t now = nowUnix != 0 ? nowUnix : static_cast<int64_t>(std::time(nullptr));
+        if (b.untilUnix > now + kPreferenceSeconds) {
+            b.untilUnix = now + kPreferenceSeconds;
+        }
+        if (b.hash.empty() || b.seq != b.forkPoint + 1 || b.abandonedHash == b.hash || b.untilUnix < 0 ||
+            (b.untilUnix == 0 && (!b.abandonedHash.empty() || b.expired || !b.abandonedConfidants.empty()))) {
             if (corrupt) {
                 *corrupt = true;
             }
@@ -202,6 +246,32 @@ std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* c
         }
         return std::nullopt;
     }
+}
+
+BranchVerdict judgeBlock(const ApprovedBranch& b, cs::Sequence seq, const std::string& hash) {
+    if (seq != b.seq || hash.empty()) {
+        return BranchVerdict::None;
+    }
+    if (hash == b.hash) {
+        return BranchVerdict::Chosen;
+    }
+    if (b.preferring() || (!b.abandonedHash.empty() && hash == b.abandonedHash)) {
+        return BranchVerdict::Refuse;
+    }
+    return BranchVerdict::None;
+}
+
+BranchVerdict judgeChild(const ApprovedBranch& b, cs::Sequence seq, const std::string& previous) {
+    if (seq != b.seq + 1 || previous.empty()) {
+        return BranchVerdict::None;
+    }
+    if (previous == b.hash) {
+        return BranchVerdict::Chosen;
+    }
+    if (b.preferring() || (!b.abandonedHash.empty() && previous == b.abandonedHash)) {
+        return BranchVerdict::Refuse;
+    }
+    return BranchVerdict::None;
 }
 
 void clearApprovedBranch(const std::string& dir) {
@@ -255,6 +325,9 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
         tree.put("fork_point_upper_bound", r.upperBound);
         tree.put("fork_point_located_with", r.locatedWith);
         tree.put("located_verified", r.locatedVerified);
+        if (!r.locatedNextHash.empty()) {
+            tree.put("located_next_hash", r.locatedNextHash);
+        }
         if (!r.locatedHash.empty()) {
             tree.put("located_point", r.locatedPoint);
             tree.put("located_hash", r.locatedHash);
@@ -262,6 +335,9 @@ bool saveForkRecord(const std::string& dir, const ForkRecord& r) {
         if (r.deeper) {
             tree.put("fork_point_below", r.deeperThan);
         }
+    }
+    if (!r.ourNextHash.empty()) {
+        tree.put("our_next_hash", r.ourNextHash);
     }
     tree.put("competing_block", r.competingSeq);
     tree.put("competing_hash", r.competingHash);
@@ -306,6 +382,8 @@ std::optional<ForkRecord> loadForkRecord(const std::string& dir, bool* corrupt) 
         r.locatedVerified = r.located && tree->get<bool>("located_verified", false);
         r.locatedPoint = tree->get<cs::Sequence>("located_point", 0);
         r.locatedHash = tree->get<std::string>("located_hash", "");
+        r.locatedNextHash = tree->get<std::string>("located_next_hash", "");
+        r.ourNextHash = tree->get<std::string>("our_next_hash", "");
         if (const auto below = tree->get_optional<cs::Sequence>("fork_point_below")) {
             r.deeper = r.located && !r.locatedVerified;
             r.deeperThan = *below;
@@ -388,6 +466,27 @@ std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* erro
         return std::nullopt;
     }
     return ResolvePlan{record->forkPoint, record->forkPointHash, *record, false};
+}
+
+std::optional<PreferredBranch> preferenceFor(const ResolvePlan& plan) {
+    const auto& r = plan.record;
+    if (plan.toLocated) {
+        // the operator's choice of the located point: preferred only when it is the verified one
+        if (r.locatedVerified && r.forkPointExact && r.forkPoint == plan.top && !r.locatedNextHash.empty()) {
+            return PreferredBranch{r.locatedNextHash, r.locatedWith};
+        }
+        return std::nullopt;
+    }
+    if (!r.forkPointExact) {
+        return std::nullopt;  // an upper bound
+    }
+    if (!r.located && r.competingSeq == plan.top + 1 && !r.competingHash.empty()) {
+        return PreferredBranch{r.competingHash, r.peerKey};  // the refused block names the fork point
+    }
+    if (r.located && r.locatedVerified && !r.locatedNextHash.empty()) {
+        return PreferredBranch{r.locatedNextHash, r.locatedWith};
+    }
+    return std::nullopt;
 }
 
 std::string resolveOverview(const ResolvePlan& plan) {

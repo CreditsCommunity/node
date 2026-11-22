@@ -118,6 +118,15 @@ void cs::PoolCache::clear() {
     }
 }
 
+std::vector<cs::Sequence> cs::PoolCache::keys() const {
+    std::vector<cs::Sequence> out;
+    out.reserve(sequences_.size());
+    for (const auto& [seq, type] : sequences_) {
+        out.push_back(seq);
+    }
+    return out;
+}
+
 std::vector<cs::PoolCache::Interval> cs::PoolCache::ranges() const {
     std::vector<Interval> intervals;
 

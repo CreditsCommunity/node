@@ -1,6 +1,7 @@
 #include <base58.h>
 #include <chrono>
 #include <cstdlib>
+#include <algorithm>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -290,7 +291,32 @@ bool BlockChain::init(
             // the one approved branch. Normally the node simply syncs it forward from the fork point;
             // the approval only lets that very branch replace a block stored above the fork point
             // again before it arrives. Nothing else is relaxed.
-            cs::forkguard::saveApprovedBranch(dir, {newBlockchainTop, newBlockchainTop + 1, resolveCompetingHash_});
+            // It is also preferred once: until the node is past it, no other block is stored at that
+            // height (neighbours still on the abandoned branch would sync it back on top of the cut).
+            cs::forkguard::ApprovedBranch branch;
+            branch.forkPoint = newBlockchainTop;
+            branch.seq = newBlockchainTop + 1;
+            branch.hash = resolveCompetingHash_;
+            // the abandoned block as the chain held it right above the cut (its confidants vouch for its
+            // children); the record's hash only when the chain had nothing there
+            const auto& nextBinary = storage_.truncated_next();
+            if (!nextBinary.empty()) {
+                const csdb::Pool next = csdb::Pool::from_binary(cs::Bytes(nextBinary));
+                if (next.is_valid() && next.sequence() == newBlockchainTop + 1) {
+                    branch.abandonedHash = next.hash().to_string();
+                    branch.abandonedConfidants = next.confidants();
+                }
+            }
+            if (branch.abandonedHash.empty()) {
+                branch.abandonedHash = resolveAbandonedHash_;
+            }
+            if (branch.abandonedHash == resolveCompetingHash_) {
+                branch.abandonedHash.clear();
+                branch.abandonedConfidants.clear();
+            }
+            branch.peerKey = resolvePeerKey_;
+            branch.untilUnix = static_cast<int64_t>(std::time(nullptr)) + cs::forkguard::kPreferenceSeconds;
+            cs::forkguard::saveApprovedBranch(dir, branch);
         }
         return true;
     }
@@ -1021,6 +1047,8 @@ cs::forkguard::ForkRecord BlockChain::buildForkRecord(const char* reason) {
     }
     r.forkPoint = (candidateExcluded && candidate > 0) ? candidate - 1 : candidate;
     r.forkPointHash = getHashBySequence(r.forkPoint).to_string();
+    // our block right after the fork point: the branch a cut there abandons
+    r.ourNextHash = r.forkPoint + 1 <= tip ? getHashBySequence(r.forkPoint + 1).to_string() : std::string{};
     r.peerKey.clear();
     r.peerAddress.clear();
     r.peerHeight = 0;
@@ -1063,6 +1091,15 @@ bool BlockChain::recordForkHeld(const char* reason) {
                 cs::forkguard::saveForkRecord(guardStateDir_, *forkRecord_);
             }
             return false;
+        }
+        if (syncSource_.has_value()) {
+            // the peers that sent refused blocks: candidates for the fork point search
+            const auto& key = syncSource_->first;
+            refusedPeers_.erase(std::remove(refusedPeers_.begin(), refusedPeers_.end(), key), refusedPeers_.end());
+            refusedPeers_.insert(refusedPeers_.begin(), key);
+            if (refusedPeers_.size() > 4) {
+                refusedPeers_.resize(4);
+            }
         }
         if (forkRecord_.has_value() && forkRecord_->held) {
             return true; // one record per episode: the first refusal
@@ -1131,7 +1168,8 @@ bool BlockChain::promotePendingHold(bool roundStarted) {
 }
 
 bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located,
-                                       const std::string& hash, bool deeper, const std::string& peerKey, bool verified) {
+                                       const std::string& hash, bool deeper, const std::string& peerKey, bool verified,
+                                       const std::string& nextHash) {
     // our block at the located point must still be the one the search compared (read before the lock:
     // the hash lookups take the storage lock)
     if (!deeper && (hash.empty() || located > lastSequence_.load() || getHashBySequence(located).to_string() != hash)) {
@@ -1139,6 +1177,9 @@ bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected
                     << " changed since the search compared it, the record is left as it was";
         return false;
     }
+    // our block right after the located point: the branch a cut there abandons
+    const std::string ourNext = (!deeper && located + 1 <= lastSequence_.load()) ? getHashBySequence(located + 1).to_string()
+                                                                                 : std::string{};
     cs::forkguard::ForkRecord r;
     {
         std::lock_guard l(guardMutex_);
@@ -1158,6 +1199,9 @@ bool BlockChain::applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected
             forkRecord_->locatedPoint = located;
             forkRecord_->locatedHash = hash;
             forkRecord_->locatedVerified = verified;
+            forkRecord_->ourNextHash = ourNext;
+            // the competing branch's first block, as verified: the block --resolve-fork then prefers
+            forkRecord_->locatedNextHash = verified ? nextHash : std::string{};
             if (verified) {
                 // the other branch provably continues from our block there: that is the fork point
                 forkRecord_->forkPoint = located;
@@ -1279,10 +1323,18 @@ void BlockChain::setPeerAddressResolver(std::function<std::string(const cs::Publ
     peerAddressResolver_ = std::move(resolver);
 }
 
-void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash) {
+std::vector<cs::PublicKey> BlockChain::recentRefusedPeers() const {
+    std::lock_guard l(guardMutex_);
+    return refusedPeers_;
+}
+
+void BlockChain::setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash,
+                                const std::string& abandonedHash, const std::string& peerKey) {
     resolveForkSeq_ = seq;
     resolveForkHash_ = hash;
     resolveCompetingHash_ = competingHash;
+    resolveAbandonedHash_ = abandonedHash;
+    resolvePeerKey_ = peerKey;
 }
 
 void BlockChain::setGuardStateDir(const std::string& dir) {
@@ -1351,13 +1403,144 @@ void BlockChain::setGuardStateDir(const std::string& dir) {
                   << "approved; removing it";
         cs::forkguard::clearApprovedBranch(dir);
     }
+    resetAbandonedLine();
     if (approvedBranch_.has_value()) {
         cslog() << kLogPrefix << "branch approved with --resolve-fork: block #" << WithDelimiters(approvedBranch_->seq)
                 << " (" << approvedBranch_->hash << ") after the fork point #" << WithDelimiters(approvedBranch_->forkPoint);
+        if (approvedBranch_->preferring()) {
+            cswarning() << kLogPrefix << "until the node is past block #" << WithDelimiters(approvedBranch_->seq)
+                        << " it stores there only that block (the branch chosen with --resolve-fork), until "
+                        << cs::forkguard::utcTime(approvedBranch_->untilUnix) << " at most"
+                        << (approvedBranch_->peerKey.empty() ? std::string{} : ", asking " + approvedBranch_->peerKey + " first");
+        }
+        else if (!approvedBranch_->abandonedHash.empty()) {
+            cswarning() << kLogPrefix << "the block chosen with --resolve-fork was not received in time; the abandoned block "
+                        << approvedBranch_->abandonedHash << " stays refused at #" << WithDelimiters(approvedBranch_->seq)
+                        << " until the operator acts again (--resolve-fork or --set-bc-top)";
+        }
         checkApprovedBranch();
     }
     // a dismiss-fork file left while the node was stopped
     checkDismissTrigger();
+}
+
+void BlockChain::checkResolvePreference(int64_t nowUnix) {
+    if (!approvedBranch_.has_value() || !approvedBranch_->expireIfDue(nowUnix)) {
+        return;
+    }
+    if (approvedBranch_->abandonedHash.empty()) {
+        cserror() << kLogPrefix << "the block #" << WithDelimiters(approvedBranch_->seq) << " (" << approvedBranch_->hash
+                  << ") chosen with --resolve-fork was not received within " << cs::forkguard::kPreferenceSeconds / 60
+                  << " minutes; the preference ends (no abandoned block is known to keep refusing). Check the chain "
+                  << "with other nodes or the monitor";
+        dropApprovedBranch("the preference timed out");
+        return;
+    }
+    cs::forkguard::saveApprovedBranch(guardStateDir_, *approvedBranch_);
+    resetAbandonedLine();
+    cserror() << kLogPrefix << "the block #" << WithDelimiters(approvedBranch_->seq) << " (" << approvedBranch_->hash
+              << ") chosen with --resolve-fork was not received within " << cs::forkguard::kPreferenceSeconds / 60
+              << " minutes: the preference for it ends, but the abandoned block " << approvedBranch_->abandonedHash
+              << " stays refused at that height until the operator acts again. Check the chain with other nodes or "
+              << "the monitor, then run --resolve-fork or --set-bc-top <sequence> again";
+}
+
+const BlockChain::AbandonedLink* BlockChain::abandonedLink(const std::string& hash) const {
+    if (hash.empty()) {
+        return nullptr;
+    }
+    for (const auto& link : abandonedLine_) {
+        if (link.hash == hash) {
+            return &link;
+        }
+    }
+    return nullptr;
+}
+
+bool BlockChain::inAbandonedLine(const std::string& hash) const {
+    return abandonedLink(hash) != nullptr;
+}
+
+void BlockChain::learnAbandonedBlock(const csdb::Pool& block) {
+    // the abandoned block itself, recognised by its hash: its confidants vouch for its children
+    if (!abandonedLine_.empty() && abandonedLine_.front().confidants.empty() &&
+        block.hash().to_string() == abandonedLine_.front().hash) {
+        abandonedLine_.front().confidants = block.confidants();
+    }
+}
+
+void BlockChain::extendAbandonedLine(const csdb::Pool& block) {
+    // a block joins the line only if its round confirmations are signed by a majority of its parent's
+    // confidants, the parent being in the line with known confidants: as the chain itself is linked, so
+    // anyone can name a hash of the line, but nobody can fill the list without those confidants
+    const auto* parent = abandonedLink(block.previous_hash().to_string());
+    const std::string hash = block.hash().to_string();
+    if (parent == nullptr || parent->confidants.empty() || abandonedLine_.size() >= kMaxAbandonedLine ||
+        inAbandonedLine(hash) || !confirmedByConfidants(block, parent->confidants)) {
+        return;
+    }
+    std::string reason;
+    if (!cs::BlockVerifier::verifySignatures(block, reason)) {
+        return;  // and signed by the confidants it names, as a synced block
+    }
+    abandonedLine_.push_back({hash, block.confidants()});
+}
+
+void BlockChain::resetAbandonedLine() {
+    // only while the preference lasts: once it ends the node takes blocks as it did before
+    abandonedLine_.clear();
+    cacheDropPending_ = false;
+    if (approvedBranch_.has_value() && approvedBranch_->preferring() && !approvedBranch_->abandonedHash.empty()) {
+        abandonedLine_.push_back({approvedBranch_->abandonedHash, approvedBranch_->abandonedConfidants});
+        cacheDropPending_ = true;  // the cleanup at the start of the preference
+    }
+}
+
+size_t BlockChain::dropAbandonedFromCache() {
+    if (!cacheDropPending_.exchange(false)) {
+        return 0;
+    }
+    size_t removed = 0;
+    cs::Lock lock(cachedBlocksMutex_);
+    if (cachedBlocks_->isEmpty()) {
+        return 0;
+    }
+    // ascending: a block built on one of the line goes, and joins the line if its parent's confidants
+    // confirmed it, so that its own children go too
+    for (const cs::Sequence seq : cachedBlocks_->keys()) {
+        const auto data = cachedBlocks_->value(seq);
+        if (!data.has_value() || !inAbandonedLine(data->pool.previous_hash().to_string())) {
+            continue;
+        }
+        extendAbandonedLine(data->pool);
+        cachedBlocks_->remove(seq);
+        ++removed;
+    }
+    if (removed > 0) {
+        cslog() << kLogPrefix << "dropped " << removed << " cached block(s) of the branch abandoned with --resolve-fork";
+    }
+    return removed;
+}
+
+void BlockChain::logBranchRefusal(const csdb::Pool& pool, const char* what) {
+    ++branchRefusals_;
+    const auto now = std::chrono::steady_clock::now();
+    if (lastBranchRefusalLog_ == std::chrono::steady_clock::time_point{} || now - lastBranchRefusalLog_ >= std::chrono::minutes(1)) {
+        lastBranchRefusalLog_ = now;
+        std::string why = "it continues the branch abandoned with --resolve-fork";
+        if (approvedBranch_.has_value()) {
+            why = "after --resolve-fork the node takes at #" + std::to_string(approvedBranch_->seq) + " only the chosen block " +
+                  approvedBranch_->hash +
+                  (approvedBranch_->preferring() ? "" : " (preference timed out: the abandoned block stays refused)");
+        }
+        cswarning() << kLogPrefix << what << " #" << WithDelimiters(pool.sequence()) << " (" << pool.hash().to_string()
+                    << ") refused: " << why << "; " << branchRefusals_ << " refused so far";
+    }
+}
+
+bool BlockChain::refuseForApprovedBranch(const csdb::Pool& pool, const char* what) {
+    logBranchRefusal(pool, what);
+    return false;
 }
 
 void BlockChain::dropApprovedBranch(const char* why) {
@@ -1367,6 +1550,7 @@ void BlockChain::dropApprovedBranch(const char* why) {
     cslog() << kLogPrefix << "branch approved with --resolve-fork (block #" << WithDelimiters(approvedBranch_->seq)
             << "): " << why << "; the approval ends";
     approvedBranch_.reset();
+    resetAbandonedLine();
     cs::forkguard::clearApprovedBranch(guardStateDir_);
 }
 
@@ -3065,6 +3249,14 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
             return false;
         }
 
+        // after --resolve-fork: at the height right after the fork point only the chosen block (or,
+        // once the preference timed out, anything but the abandoned block). Refusing only.
+        if (approvedBranch_.has_value() &&
+            cs::forkguard::judgeBlock(*approvedBranch_, poolSequence, pool.hash().to_string()) == cs::forkguard::BranchVerdict::Refuse) {
+            learnAbandonedBlock(pool);
+            return refuseForApprovedBranch(pool, "block");
+        }
+
         setTransactionsFees(pool, type);
         if (type == cs::PoolStoreType::Created) {
             if (!addNewWalletsToPool(pool)) {
@@ -3108,6 +3300,18 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
         }
 
         return false;
+    }
+
+    // never cached: a block built on the branch abandoned with --resolve-fork (also once the chosen
+    // block is stored), and, while preferring, a block right after the chosen one not built on it
+    if (inAbandonedLine(pool.previous_hash().to_string())) {
+        extendAbandonedLine(pool);
+        logBranchRefusal(pool, "block (for the cache)");
+        return false;
+    }
+    if (approvedBranch_.has_value() &&
+        cs::forkguard::judgeChild(*approvedBranch_, poolSequence, pool.previous_hash().to_string()) == cs::forkguard::BranchVerdict::Refuse) {
+        return refuseForApprovedBranch(pool, "block (for the cache)");
     }
 
     cs::Lock lock(cachedBlocksMutex_);

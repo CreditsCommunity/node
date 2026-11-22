@@ -332,14 +332,28 @@ consensus rules.
   other block meets the usual checks, and an unauthenticated offer changes nothing. The approval
   ends once the node goes on past that height, or a competing block that passes the usual checks
   is offered there. When the fork point is
-  only an upper bound, the node looks for the last common block itself while FORK HELD: it asks the
-  peer of the refused block for some of its blocks at or below the bound (the usual block request, a
-  few heights per request, one request every few seconds at most) and compares their hashes with its
-  own. The search is read-only (nothing stored, unwound or approved) and bounded to 20 times
+  only an upper bound, the node looks for the last common block itself while FORK HELD: it asks a
+  peer for some of its blocks at or below the bound (the usual block request, a few heights per
+  request, one request every few seconds at most) and compares their hashes with its own. The peers
+  asked are a short list of neighbours, in turn: those that announce the official version or more
+  blocks than the node first, then those that sent a refused block (the peer of the refused block
+  may sit on the node's own side, having only relayed it); the next one after a timeout, a useless
+  answer or a point that does not verify. The search is read-only (nothing stored, unwound or approved) and bounded to 20 times
   `max_auto_rollback` blocks (1,000 to 10,000; 2,000 when it is 0). The point it finds becomes the
   fork point (`"fork_point_status": "exact"` in `fork-held.json`, and `--resolve-fork` cuts there
   in one run) only if the peer's next block verifies as a synced block would after the node's own
-  block there: signatures, and round confirmations by a majority of that block's confidants.
+  block there: signatures, and round confirmations by a majority of that block's confidants. That
+  verified block is then the branch the cut chooses: until the node is past it, it stores at that
+  height only that block and refuses any other (neighbours still on the abandoned branch would
+  sync it back on top of the cut), asking first, in random order, a few peers that likely have it
+  (a peer that brings no block within 20 s, or answers without one, is dropped from them; with none left the usual random
+  choice applies, so a peer cannot hold the sync by what it claims); blocks of the abandoned branch
+  are not cached while the preference lasts (a block built on the abandoned block, or on a block of
+  that branch confirmed by its parent's confidants), and those cached before it began are dropped
+  once at its start, nothing else; once the preference ends this is forgotten; after 30 minutes without it
+  (logged as an error) only the abandoned block stays refused there, until the operator cuts again.
+  The same one-shot preference applies to the recorded competing block of an exact fork point. It
+  only refuses blocks (kept in `resolve-approved.json`).
   Otherwise (a bootstrap block, or a peer that answers wrongly) the point is only a hint
   (`"located (unverified)"`, or `"deeper"` beyond the bound). `--resolve-fork` then still cuts at the
   upper bound, and cuts at the hint only with `--to-located`; it prints the bound, the located point,

@@ -168,6 +168,9 @@ public:
     void set_truncate_needs_checkpoint(bool checkpointAtOrBelowTop);
     // after an open() that cut the chain: the last block stored before the cut (0: nothing was cut)
     cs::Sequence truncated_last() const;
+    // after an open() that cut the chain: the block right above the new top as it was stored before the
+    // cut (empty: none), for --resolve-fork to remember the branch it abandons
+    const cs::Bytes& truncated_next() const;
 
     // dbBackend: "berkeleydb" (default), "rocksdb", or "lmdb" in <path>/lmdb, whose removed blocks
     // LMDB reuses the space of (pruned storage)

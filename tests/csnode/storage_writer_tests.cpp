@@ -407,6 +407,11 @@ TEST(StorageWriter, ResolveForkTruncatesExactlyAtTheRecordedForkPoint) {
         opt.db = db;
         opt.newBlockchainTop = 6;
         ASSERT_TRUE(storage.open(opt));
+        // the block right above the cut, as it was stored (for the branch --resolve-fork abandons)
+        ASSERT_FALSE(storage.truncated_next().empty());
+        const auto next = csdb::Pool::from_binary(cs::Bytes(storage.truncated_next()));
+        EXPECT_EQ(next.sequence(), 7u);
+        EXPECT_EQ(next.hash(), own[7].hash());
         storage.close();
     }
     EXPECT_EQ(db->stored(), 7u);

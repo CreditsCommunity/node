@@ -8,7 +8,9 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -497,6 +499,230 @@ TEST(ForkLocator, LyingPeerReportingADeeperPointIsNotVerified) {
     EXPECT_FALSE(boot.verified());
 }
 
+namespace {
+// several candidate peers, each answering (or not) by its own rule; the request goes to the peer the
+// locator names, the reply comes back from it
+struct MultiHarness {
+    Chains chains;
+    Locator::Settings settings;
+    std::map<uint8_t, std::function<std::optional<std::vector<Locator::PeerBlock>>(const std::vector<cs::Sequence>&)>> peers;
+    std::vector<std::pair<uint8_t, std::vector<cs::Sequence>>> requests;
+    std::optional<Locator> locator;
+    Locator::Clock::time_point now = Locator::Clock::time_point{} + 1h;
+
+    Locator& make() {
+        Locator::Hooks hooks;
+        hooks.ourHash = [this](cs::Sequence s) { return chains.ours(s); };
+        hooks.sendRequest = [this](const cs::PublicKey& to, const std::vector<cs::Sequence>& seqs) {
+            requests.emplace_back(to[0], seqs);
+            return true;
+        };
+        locator.emplace(std::move(hooks), settings);
+        return *locator;
+    }
+    // a peer on the competing branch (the honest one)
+    std::vector<Locator::PeerBlock> competing(const std::vector<cs::Sequence>& seqs) const {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            if (s <= chains.peerHead) {
+                out.push_back(chains.peerBlock(s));
+            }
+        }
+        return out;
+    }
+    // a peer on our own side: our blocks
+    std::vector<Locator::PeerBlock> sameSide(const std::vector<cs::Sequence>& seqs) const {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            if (s <= chains.ourHead) {
+                out.push_back({s, chains.ours(s), s == 0 ? std::string{} : chains.ours(s - 1), false});
+            }
+        }
+        return out;
+    }
+    Status run() {
+        size_t answered = 0;
+        for (int i = 0; i < 400 && locator->searching(); ++i) {
+            locator->tick(now);
+            if (requests.size() > answered) {
+                answered = requests.size();
+                const auto& [who, seqs] = requests.back();
+                const auto it = peers.find(who);
+                if (it != peers.end()) {
+                    if (auto blocks = it->second(seqs)) {
+                        locator->onReply(key(who), *blocks, now);
+                    }
+                }
+            }
+            now += 7s;
+        }
+        return locator->status();
+    }
+    std::set<uint8_t> asked() const {
+        std::set<uint8_t> out;
+        for (const auto& r : requests) {
+            out.insert(r.first);
+        }
+        return out;
+    }
+};
+}  // namespace
+
+// the peer of the refused block sits on our own side (it relayed the block): its answers locate
+// nothing, and the search goes on with the next candidate, which finds the point
+TEST(ForkLocator, RotatesAfterAUselessPeer) {
+    MultiHarness h;
+    h.chains = {533, 931, 1500};
+    h.peers[3] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(h.sameSide(seqs)); };
+    h.peers[8] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(h.competing(seqs)); };
+    auto& loc = h.make();
+    loc.start(std::vector<cs::PublicKey>{key(3), key(8)}, 930, 0, h.now);
+    EXPECT_EQ(h.run(), Status::Exact);
+    EXPECT_EQ(loc.forkPoint(), 533u);
+    EXPECT_TRUE(loc.verified());
+    EXPECT_EQ(loc.resultPeer(), key(8));
+    EXPECT_EQ(loc.nextHash(), "P534");
+    EXPECT_EQ(loc.rotations(), 1u);
+    EXPECT_EQ(h.asked(), (std::set<uint8_t>{3, 8}));
+    // one request at a time, never closer than minInterval, whoever is asked
+    for (size_t i = 0; i < h.requests.size(); ++i) {
+        EXPECT_LE(h.requests[i].second.size(), h.settings.probesPerRequest);
+    }
+
+    // a peer that never answers, then one that answers nothing usable: each costs one attempt, then
+    // the next candidate
+    MultiHarness t;
+    t.chains = {533, 931, 1500};
+    t.peers[4] = [](const std::vector<cs::Sequence>&) { return std::optional<std::vector<Locator::PeerBlock>>{}; };
+    t.peers[5] = [](const std::vector<cs::Sequence>&) { return std::optional(std::vector<Locator::PeerBlock>{}); };
+    t.peers[8] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(t.competing(seqs)); };
+    auto& rot = t.make();
+    rot.start(std::vector<cs::PublicKey>{key(4), key(5), key(8)}, 930, 0, t.now);
+    EXPECT_EQ(t.run(), Status::Exact);
+    EXPECT_EQ(rot.forkPoint(), 533u);
+    EXPECT_EQ(rot.resultPeer(), key(8));
+    EXPECT_EQ(rot.rotations(), 2u);
+    ASSERT_GE(t.requests.size(), 3u);
+    EXPECT_EQ(t.requests[0].first, 4);
+    EXPECT_EQ(t.requests[1].first, 5);
+    EXPECT_EQ(t.requests[2].first, 8);
+
+    // every candidate useless: fails after each one was asked, and a late reply of an earlier
+    // candidate is not taken
+    MultiHarness f;
+    f.chains = {533, 931, 1500};
+    f.peers[3] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(f.sameSide(seqs)); };
+    f.peers[6] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(f.sameSide(seqs)); };
+    auto& none = f.make();
+    none.start(std::vector<cs::PublicKey>{key(3), key(6), key(3)}, 930, 0, f.now);
+    EXPECT_EQ(none.candidates().size(), 2u);  // duplicates dropped
+    EXPECT_EQ(f.run(), Status::Failed);
+    EXPECT_EQ(f.asked(), (std::set<uint8_t>{3, 6}));
+
+    MultiHarness l;
+    l.chains = {533, 931, 1500};
+    auto& late = l.make();
+    late.start(std::vector<cs::PublicKey>{key(4), key(8)}, 930, 0, l.now);
+    late.tick(l.now);
+    ASSERT_EQ(l.requests.size(), 1u);
+    const auto first = l.requests.back().second;
+    late.tick(l.now + 21s);  // no reply: the next candidate
+    EXPECT_EQ(late.peer(), key(8));
+    std::vector<cs::Sequence> got;
+    for (const auto& b : l.competing(first)) {
+        got.push_back(b.seq);
+    }
+    EXPECT_FALSE(late.expects(key(4), got));
+    late.onReply(key(4), l.competing(first), l.now + 22s);
+    EXPECT_TRUE(late.searching());
+}
+
+// a point is exact only when the peer's next block verifies: an unverified answer is kept as a hint
+// while another candidate is asked; a verified answer wins; with no verified answer, the hint
+TEST(ForkLocator, ExactOnlyWhenVerifiedAcrossCandidates) {
+    MultiHarness h;
+    h.chains = {533, 931, 1500};
+    Chains fake = h.chains;
+    fake.fork = 300;
+    const auto liar = [&](const std::vector<cs::Sequence>& seqs) {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            auto b = fake.peerBlock(s);
+            b.verified = false;
+            out.push_back(b);
+        }
+        return std::optional(out);
+    };
+    h.peers[2] = liar;
+    h.peers[8] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(h.competing(seqs)); };
+    auto& loc = h.make();
+    loc.start(std::vector<cs::PublicKey>{key(2), key(8)}, 930, 0, h.now);
+    EXPECT_EQ(h.run(), Status::Exact);
+    EXPECT_TRUE(loc.verified());
+    EXPECT_EQ(loc.forkPoint(), 533u);
+    EXPECT_EQ(loc.resultPeer(), key(8));
+
+    // a hostile candidate claiming an unverified fork point ABOVE the true one, then an honest one: the
+    // verified answer wins, the hostile hint is dropped
+    MultiHarness up;
+    up.chains = {533, 931, 1500};
+    Chains higher = up.chains;
+    higher.fork = 700;
+    up.peers[2] = [&](const std::vector<cs::Sequence>& seqs) {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            // ours up to 700 (it claims to share them), its own blocks above, never verifiable
+            Locator::PeerBlock b{s, s <= 700 ? up.chains.ours(s) : higher.theirs(s),
+                                 s == 0 ? std::string{} : (s - 1 <= 700 ? up.chains.ours(s - 1) : higher.theirs(s - 1)), false};
+            out.push_back(b);
+        }
+        return std::optional(out);
+    };
+    up.peers[8] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(up.competing(seqs)); };
+    auto& hostile = up.make();
+    hostile.start(std::vector<cs::PublicKey>{key(2), key(8)}, 930, 0, up.now);
+    EXPECT_EQ(up.run(), Status::Exact);
+    EXPECT_TRUE(hostile.verified());
+    EXPECT_EQ(hostile.forkPoint(), 533u);
+    EXPECT_EQ(hostile.resultPeer(), key(8));
+    EXPECT_EQ(hostile.nextHash(), "P534");
+
+    // only unverified answers: the hint, not verified (the node keeps it a hint)
+    MultiHarness u;
+    u.chains = {533, 931, 1500};
+    u.peers[2] = liar;
+    u.peers[3] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(u.sameSide(seqs)); };
+    auto& hint = u.make();
+    hint.start(std::vector<cs::PublicKey>{key(2), key(3)}, 930, 0, u.now);
+    EXPECT_EQ(u.run(), Status::Exact);
+    EXPECT_FALSE(hint.verified());
+    EXPECT_EQ(hint.forkPoint(), 300u);
+    EXPECT_EQ(hint.resultPeer(), key(2));
+    EXPECT_EQ(u.asked(), (std::set<uint8_t>{2, 3}));
+}
+
+// the candidates: neighbours only; first the peers likely on the competing branch (official version,
+// a height above ours), then those that sent a refused block
+TEST(ForkLocator, PrefersPeersOnTheCompetingBranch) {
+    using cs::forkguard::CandidatePeer;
+    std::vector<CandidatePeer> peers;
+    peers.push_back({key(3), 637, false, true, true});    // community, relayed the refused block
+    peers.push_back({key(7), 637, false, false, true});   // community, same height
+    peers.push_back({key(2), 1480, true, false, true});   // official, far ahead
+    peers.push_back({key(4), 1490, true, false, true});   // official, further ahead
+    peers.push_back({key(9), 900, false, false, true});   // community peer announcing more blocks
+    peers.push_back({key(6), 2000, true, true, false});   // not a neighbour
+    const auto ranked = cs::forkguard::rankCandidates(peers, 637, 5);
+    ASSERT_EQ(ranked.size(), 5u);
+    EXPECT_EQ(ranked[0], key(4));
+    EXPECT_EQ(ranked[1], key(2));
+    EXPECT_EQ(ranked[2], key(9));
+    EXPECT_EQ(ranked[3], key(3));
+    EXPECT_EQ(ranked[4], key(7));
+    EXPECT_EQ(cs::forkguard::rankCandidates(peers, 637, 2).size(), 2u);
+    EXPECT_TRUE(cs::forkguard::rankCandidates({}, 637, 5).empty());
+}
+
 // the record of a located fork point and what --resolve-fork does with it: a verified point is the
 // fork point and the cut goes there; an unverified one is a hint, the cut stays at the upper bound
 // unless the operator asks for it (--to-located); "deeper" is a hint as well
@@ -649,7 +875,7 @@ TEST(ForkLocator, BlockChainTakesTheAnswer) {
         EXPECT_FALSE(chain.applyLocatedForkPoint(h.held, 4800, "00", false, "peer", true));
         EXPECT_FALSE(chain.forkHeldRecord()->located);
 
-        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", true));
+        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", true, "NEXT"));
         const auto located = chain.forkHeldRecord();
         ASSERT_TRUE(located.has_value());
         EXPECT_TRUE(located->held);
@@ -660,6 +886,8 @@ TEST(ForkLocator, BlockChainTakesTheAnswer) {
         EXPECT_EQ(located->forkPointHash, h.hash);
         EXPECT_EQ(located->upperBound, h.held.forkPoint);
         EXPECT_EQ(located->competingSeq, h.held.competingSeq);  // the refused block stays the one refused
+        EXPECT_EQ(located->locatedNextHash, "NEXT");             // the block --resolve-fork will prefer
+        EXPECT_EQ(cs::forkguard::loadForkRecord(h.dir.str())->locatedNextHash, "NEXT");
         EXPECT_EQ(chain.getLastSeq(), 4800u);                    // nothing unwound
         EXPECT_FALSE(chain.approvedBranch().has_value());       // nothing approved
         const auto plan = cs::forkguard::planResolve(h.dir.str(), nullptr);
@@ -672,7 +900,7 @@ TEST(ForkLocator, BlockChainTakesTheAnswer) {
         // not verified (a lying peer's deeper point, a bootstrap block after it): a hint only
         HeldChain h;
         auto& chain = h.chain;
-        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", false));
+        EXPECT_TRUE(chain.applyLocatedForkPoint(h.held, 4800, h.hash, false, "peer", false, "NEXT"));
         const auto hint = chain.forkHeldRecord();
         ASSERT_TRUE(hint.has_value());
         EXPECT_TRUE(hint->located);
@@ -680,6 +908,7 @@ TEST(ForkLocator, BlockChainTakesTheAnswer) {
         EXPECT_FALSE(hint->forkPointExact);
         EXPECT_EQ(hint->forkPoint, h.held.forkPoint);  // still the upper bound
         EXPECT_EQ(hint->locatedPoint, 4800u);
+        EXPECT_TRUE(hint->locatedNextHash.empty());  // nothing to prefer from an unverified answer
         std::string error;
         // no deeper cut without confirmation: the recorded upper bound, or nothing (this test chain
         // has no hash for it)

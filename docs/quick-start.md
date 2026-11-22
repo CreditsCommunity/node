@@ -486,8 +486,12 @@ instead, use `--set-bc-top <sequence>` (the last block to keep) with the node st
 **The fork point.** `--resolve-fork` now finds the last common block itself; the manual
 `--set-bc-top` remains. When the node first refuses, it may know only an upper bound of the fork
 point (`Fork point: block #N or lower`), for example after a long partition. While FORK HELD it
-then asks the peer of the refused block for a few of its blocks below that bound, compares their
-hashes with its own and narrows down to the last block both chains share. This only reads: nothing
+then asks a peer for a few of its blocks below that bound, compares their hashes with its own and
+narrows down to the last block both chains share. The peer that delivered the refused block may be on
+this node's own side (it only relayed it), so the node asks a short list of neighbours in turn: first
+those that announce the official version or more blocks than this node, then those that sent a
+refused block. It moves on to the next one when a peer does not answer, answers nothing useful, or
+gives a point it cannot verify. This only reads: nothing
 is stored, removed or approved. The search covers 20 times `max_auto_rollback` blocks (2,000 by
 default, between 1,000 and 10,000). A peer could answer wrongly, so the node takes the point it
 finds as the fork point only when it can verify the peer's next block as it would verify a synced
@@ -496,6 +500,16 @@ majority of the confidants of this node's block there. After a minute or two, on
 
 - **Verified.** The detail line says `Fork point: block #M (...), the last common block, verified`
   and `fork-held.json` has `"fork_point_status": "exact"`. `--resolve-fork` cuts there in one run.
+  The node also remembers the other chain's block right after M, the one it verified. After the
+  cut it takes only that block at M+1, and asks the peers that have it first. Neighbours still on
+  the branch you abandoned would otherwise sync it straight back on top of the cut. Any other block
+  at M+1 is refused (`after --resolve-fork the node takes at #M+1 only the chosen block`). This
+  ends once the chosen block is stored. If it does not arrive within 30 minutes, the node logs it
+  as an error and stops waiting for it, but keeps refusing the block of the abandoned branch at
+  M+1 until you cut again. The preference is kept in `resolve-approved.json` across restarts. It
+  never lets a block through a check it would otherwise fail. On a trusted node this also covers
+  its own block: if the node takes part in a round at M+1 right after the cut, it does not store the
+  block that round produces unless it is the chosen one. It syncs the chosen block instead.
   A verified point proves that a branch of the other chain forks there, but the branch the node
   refused might fork higher up. Cutting there may then remove more good blocks than needed. The
   cost is only a resync of those blocks.

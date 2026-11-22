@@ -335,11 +335,33 @@ public:
     // --resolve-fork: init() truncates to `seq` only if the stored block there has `hash`, then clears
     // the fork record. When the record's fork point was exact, it also records the competing block
     // right after it (`competingHash` at seq + 1) as the one approved branch (resolve-approved.json).
-    void setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash = std::string{});
+    // The approval is also a one-shot preference (see cs::forkguard::ApprovedBranch): until the node is
+    // past seq + 1, only that block is stored there; `abandonedHash` (our block at seq + 1 before the cut)
+    // stays refused there after the preference times out; `peerKey` had the chosen block.
+    void setResolveFork(cs::Sequence seq, const csdb::PoolHash& hash, const std::string& competingHash = std::string{},
+                        const std::string& abandonedHash = std::string{}, const std::string& peerKey = std::string{});
     // the branch approved with --resolve-fork, while it is pending
     std::optional<cs::forkguard::ApprovedBranch> approvedBranch() const {
         return approvedBranch_;
     }
+    // the preference for the approved branch times out at its deadline (wall clock, UTC seconds): logged,
+    // the abandoned block stays refused until the operator acts again. Processor thread
+    void checkResolvePreference(int64_t nowUnix);
+    // The branch abandoned with --resolve-fork (abandonedLine_: the abandoned block, and the blocks seen
+    // built on it confirmed by their parent's confidants, a bounded list): while the preference lasts, a
+    // block built on one of them is never cached; once it ends (chosen block stored, timeout, approval
+    // ended) the line is forgotten. Blocks of that branch cached before the preference
+    // began (e.g. before a restart) are dropped once at its start: only those, never the rest of the
+    // cache. Called by the node outside storeBlock (processor thread); returns the blocks removed
+    size_t dropAbandonedFromCache();
+    size_t abandonedLineSize() const {
+        return abandonedLine_.size();
+    }
+    bool abandonedCacheDropPending() const {
+        return cacheDropPending_;
+    }
+    // the peers that sent the most recent refused competing blocks (most recent first, a few at most)
+    std::vector<cs::PublicKey> recentRefusedPeers() const;
     // The search for the last common block (cs::forkguard::ForkLocator, driven by the node while FORK
     // HELD) has an answer for the held record `expected` (the record it searched for; nothing is
     // changed if the record changed since). `located` is the last common block the peer's answers
@@ -348,8 +370,11 @@ public:
     // `deeper`, the lowest block searched, where the peer's block already differs (a hint). Only the
     // record (fork-held.json) changes: nothing is unwound, nothing approved.
     // True if the record was updated.
+    // `nextHash`: the peer's block right after the located point (kept when verified: --resolve-fork then
+    // prefers it)
     bool applyLocatedForkPoint(const cs::forkguard::ForkRecord& expected, cs::Sequence located, const std::string& hash,
-                               bool deeper, const std::string& peerKey, bool verified = false);
+                               bool deeper, const std::string& peerKey, bool verified = false,
+                               const std::string& nextHash = std::string{});
     // init() refused to truncate: the stored block at the requested sequence has another hash
     bool truncationRefused() const {
         return truncationRefused_;
@@ -366,7 +391,7 @@ public:
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }
     bool test_rollbackEpisode() const { return rollbackEpisode_; }
     void test_resetRollbackEpisode() {
-        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); deepOverrideSpent_ = false; pendingHold_.reset();
+        rollbackEpisode_ = false; rollbackHighWater_ = 0; approvedBranch_.reset(); resetAbandonedLine(); deepOverrideSpent_ = false; pendingHold_.reset();
         std::lock_guard l(guardMutex_); forkRecord_.reset();
     }
     // make `block` the node's last block (the deferred one), as getLastBlock() returns it
@@ -751,6 +776,29 @@ private:
     // --resolve-fork's approved branch (exact fork point only), pending until the node is past it
     std::optional<cs::forkguard::ApprovedBranch> approvedBranch_;
     std::string resolveCompetingHash_;
+    std::string resolveAbandonedHash_;
+    std::string resolvePeerKey_;
+    // a block refused by the preference for the approved branch (logged once, then once a minute)
+    bool refuseForApprovedBranch(const csdb::Pool& pool, const char* what);
+    void logBranchRefusal(const csdb::Pool& pool, const char* what);
+    std::chrono::steady_clock::time_point lastBranchRefusalLog_{};
+    size_t branchRefusals_ = 0;
+    // while the preference lasts: the abandoned block (its confidants once it is offered and refused),
+    // then the blocks seen built on the line whose round confirmations a majority of their parent's
+    // confidants signed (bounded)
+    static constexpr size_t kMaxAbandonedLine = 256;
+    struct AbandonedLink {
+        std::string hash;
+        std::vector<cs::PublicKey> confidants;
+    };
+    std::vector<AbandonedLink> abandonedLine_;
+    const AbandonedLink* abandonedLink(const std::string& hash) const;
+    bool inAbandonedLine(const std::string& hash) const;
+    void learnAbandonedBlock(const csdb::Pool& block);
+    void extendAbandonedLine(const csdb::Pool& block);
+    void resetAbandonedLine();
+    std::atomic<bool> cacheDropPending_{false};  // the one cleanup at the start of the preference
+    std::vector<cs::PublicKey> refusedPeers_;  // guarded by guardMutex_
     // the approved branch is settled: the node is past its block, or another block took that height
     void checkApprovedBranch();
     void dropApprovedBranch(const char* why);

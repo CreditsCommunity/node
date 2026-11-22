@@ -4,6 +4,7 @@
 #include "gtest/gtest.h"
 
 #include <array>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <vector>
@@ -1088,6 +1089,385 @@ TEST(BlockChain, ResolveForkApprovesOnlyTheRecordedBlock) {
         EXPECT_FALSE(chain.approvedBranch().has_value());
     }
     freshGuardChain();
+}
+
+// After --resolve-fork the branch the operator chose is preferred once: at the height after the fork
+// point only the chosen block is taken; the abandoned block (and anything else there) is refused, also
+// in the cache one height up; the preference clears once the chosen block is stored, or times out (the
+// abandoned block alone then stays refused); it survives a restart; it never lets a block through the
+// authority gate
+TEST(BlockChain, ResolveForkPrefersTheChosenBranch) {
+    TempDir dir("prefer");
+    const auto ours = guardKeys(3);
+    const auto theirs = guardKeys(3);
+    const auto strangers = guardKeys(3);
+    const auto forkBlock = guardBlock(60, ours);                                                              // the cut
+    const auto chosen = guardBlock(61, theirs, &ours, 0b111, false, false, forkBlock.hash(), "chosen");        // their #61
+    const auto abandoned = guardBlock(61, ours, &ours, 0b111, false, false, forkBlock.hash(), "abandoned");    // our old #61
+    const auto third = guardBlock(61, strangers, &ours, 0b111, false, false, forkBlock.hash(), "third");
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    cs::forkguard::ApprovedBranch approval;
+    approval.forkPoint = 60;
+    approval.seq = 61;
+    approval.hash = chosen.hash().to_string();
+    approval.abandonedHash = abandoned.hash().to_string();
+    approval.peerKey = "peer";
+    approval.untilUnix = now + cs::forkguard::kPreferenceSeconds;
+
+    using cs::forkguard::BranchVerdict;
+    EXPECT_EQ(cs::forkguard::judgeBlock(approval, 61, approval.hash), BranchVerdict::Chosen);
+    EXPECT_EQ(cs::forkguard::judgeBlock(approval, 61, approval.abandonedHash), BranchVerdict::Refuse);
+    EXPECT_EQ(cs::forkguard::judgeBlock(approval, 61, third.hash().to_string()), BranchVerdict::Refuse);
+    EXPECT_EQ(cs::forkguard::judgeBlock(approval, 62, third.hash().to_string()), BranchVerdict::None);
+    EXPECT_EQ(cs::forkguard::judgeChild(approval, 62, approval.hash), BranchVerdict::Chosen);
+    EXPECT_EQ(cs::forkguard::judgeChild(approval, 62, approval.abandonedHash), BranchVerdict::Refuse);
+    EXPECT_EQ(cs::forkguard::judgeChild(approval, 63, approval.abandonedHash), BranchVerdict::None);
+
+    // the abandoned block (even vouched for by our confidants) and any other block at #61: refused;
+    // a block of the abandoned branch at #62 is not cached
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        ASSERT_TRUE(chain.approvedBranch().has_value());
+        EXPECT_TRUE(chain.approvedBranch()->preferring());
+        EXPECT_TRUE(chain.abandonedCacheDropPending());  // the cleanup at the start of the preference
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 0u);
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);  // the abandoned block
+        auto forged = guardBlock(61, strangers, &strangers, 0b111, false, false, forkBlock.hash(), "forged");
+        for (const csdb::Pool* b : std::initializer_list<const csdb::Pool*>{&forged, &abandoned, &third, &abandoned}) {  // the abandoned block twice: a replay
+            auto offered = *b;
+            EXPECT_FALSE(chain.storeBlock(offered, cs::PoolStoreType::Synced));
+            EXPECT_EQ(chain.getLastSeq(), 60u);
+            EXPECT_EQ(chain.getLastHash(), forkBlock.hash());
+        }
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);  // a replay adds nothing, triggers nothing
+        // the node's own block at that height (a trusted node that just cut): refused as well while the
+        // preference lasts
+        auto own = abandoned;
+        EXPECT_FALSE(chain.storeBlock(own, cs::PoolStoreType::Created));
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+        const auto cached = chain.getCachedBlocksSize();
+        // a child of the abandoned block with bad signatures: not cached, and not in the line
+        auto badChild = guardBlock(62, ours, &ours, 0b111, false, true, abandoned.hash(), "bad child");
+        EXPECT_FALSE(chain.storeBlock(badChild, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);
+        // forged blocks naming the abandoned block never fill the line (its cap stays for real blocks):
+        // validly signed by the keys they name themselves, but not confirmed by the abandoned block's
+        // confidants
+        for (cs::Sequence seq = 70; seq < 70 + 300; ++seq) {
+            auto junk = guardBlock(seq, strangers, &strangers, 0b111, false, false, abandoned.hash(), "junk" + std::to_string(seq));
+            EXPECT_FALSE(chain.storeBlock(junk, cs::PoolStoreType::Synced));
+        }
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached);
+        // a child confirmed by the abandoned block's confidants (learnt when the abandoned block was
+        // offered): not cached, and it extends the line, so its own child is not cached either
+        auto child = guardBlock(62, ours, &ours, 0b111, false, false, abandoned.hash());
+        EXPECT_FALSE(chain.storeBlock(child, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.abandonedLineSize(), 2u);
+        auto grandchild = guardBlock(63, ours, &ours, 0b111, false, false, child.hash(), "grandchild");
+        EXPECT_FALSE(chain.storeBlock(grandchild, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.abandonedLineSize(), 3u);
+        // an unrelated block is cached as usual
+        auto unrelatedCached = guardBlock(64, theirs, &theirs, 0b111, false, false, someHash('k'), "kept");
+        EXPECT_TRUE(chain.storeBlock(unrelatedCached, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 0u);  // no second drop
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        chain.clearBlockCache();
+        EXPECT_FALSE(chain.forkHeld());
+        EXPECT_FALSE(chain.forkHoldPending());  // refused by the preference, no fork to report
+        EXPECT_TRUE(chain.approvedBranch().has_value());
+
+        // no relaxation: a competing block not built on our head still meets the authority gate
+        auto unrelated = guardBlock(61, strangers, &theirs, 0b111, false, false, someHash('u'));
+        EXPECT_FALSE(chain.competingBlockMayTriggerUnwind(unrelated));
+        EXPECT_FALSE(chain.storeBlock(unrelated, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        EXPECT_TRUE(chain.forkHoldPending());
+        EXPECT_FALSE(chain.deepRollbackApproved());
+
+        // the chosen block is taken (it still goes through the usual checks), and then the
+        // preference ends, the file goes and the cache is to be dropped
+        EXPECT_EQ(cs::forkguard::judgeBlock(*chain.approvedBranch(), 61, chosen.hash().to_string()), BranchVerdict::Chosen);
+        chain.test_setLastBlock(chosen);
+        chain.test_onHeadAdvanced();
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
+        // the preference is over: the line is forgotten and blocks are taken as before (a block of the
+        // abandoned branch above the head is cached as any other; the usual checks decide later)
+        EXPECT_EQ(chain.abandonedLineSize(), 0u);
+        const auto before = chain.getCachedBlocksSize();
+        auto late = guardBlock(64, ours, &ours, 0b111, false, false, grandchild.hash(), "late");
+        EXPECT_TRUE(chain.storeBlock(late, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getCachedBlocksSize(), before + 1);
+        chain.clearBlockCache();
+    }
+    // blocks of the abandoned branch cached before the preference began (e.g. before a restart): the
+    // cleanup at its start drops them, and only them, once
+    {
+        auto& chain = freshGuardChain(dir.str());
+        chain.test_setLastBlock(forkBlock);
+        auto oldChild = guardBlock(62, ours, &ours, 0b111, false, false, abandoned.hash(), "old child");
+        auto oldGrandchild = guardBlock(63, ours, &ours, 0b111, false, false, oldChild.hash(), "old grandchild");
+        auto oldGreat = guardBlock(64, ours, &ours, 0b111, false, false, oldGrandchild.hash(), "old great");
+        auto keep = guardBlock(65, theirs, &theirs, 0b111, false, false, someHash('q'), "keep");
+        const auto cached = chain.getCachedBlocksSize();
+        for (const csdb::Pool* b : std::initializer_list<const csdb::Pool*>{&oldChild, &oldGrandchild, &oldGreat, &keep}) {
+            auto offered = *b;
+            EXPECT_TRUE(chain.storeBlock(offered, cs::PoolStoreType::Synced));
+        }
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 4);
+        // the cut read the abandoned block from the chain: its confidants seed the line, so the cleanup
+        // follows the branch through #62, #63 and #64 (seq + 1 .. seq + 3), and keeps the rest
+        auto seeded = approval;
+        seeded.abandonedConfidants = ours.pub;
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), seeded));
+        chain.setGuardStateDir(dir.str());
+        EXPECT_TRUE(chain.abandonedCacheDropPending());
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 3u);
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        EXPECT_EQ(chain.abandonedLineSize(), 4u);
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 0u);
+        chain.clearBlockCache();
+    }
+    // without the abandoned block's confidants (not read at the cut): only its direct children can be
+    // told apart
+    {
+        auto& chain = freshGuardChain(dir.str());
+        chain.test_setLastBlock(forkBlock);
+        auto oldChild = guardBlock(62, ours, &ours, 0b111, false, false, abandoned.hash(), "old child");
+        auto oldGrandchild = guardBlock(63, ours, &ours, 0b111, false, false, oldChild.hash(), "old grandchild");
+        const auto cached = chain.getCachedBlocksSize();
+        for (const csdb::Pool* b : std::initializer_list<const csdb::Pool*>{&oldChild, &oldGrandchild}) {
+            auto offered = *b;
+            EXPECT_TRUE(chain.storeBlock(offered, cs::PoolStoreType::Synced));
+        }
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.setGuardStateDir(dir.str());
+        EXPECT_EQ(chain.dropAbandonedFromCache(), 1u);
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        chain.clearBlockCache();
+    }
+    // the line's cap, reached with blocks genuinely confirmed down the branch: the line stops growing;
+    // a block on its last member is still not cached, the next one (not linked) goes the usual way
+    {
+        auto& chain = freshGuardChain(dir.str());
+        auto seeded = approval;
+        seeded.abandonedConfidants = ours.pub;
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), seeded));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        chain.dropAbandonedFromCache();
+        const auto cached = chain.getCachedBlocksSize();
+        csdb::PoolHash previous = abandoned.hash();
+        cs::Sequence seq = 62;
+        for (; chain.abandonedLineSize() < 256; ++seq) {
+            auto link = guardBlock(seq, ours, &ours, 0b111, false, false, previous, "link" + std::to_string(seq));
+            EXPECT_FALSE(chain.storeBlock(link, cs::PoolStoreType::Synced));
+            previous = link.hash();
+            ASSERT_LT(seq, 400u);
+        }
+        EXPECT_EQ(chain.abandonedLineSize(), 256u);
+        auto over = guardBlock(seq, ours, &ours, 0b111, false, false, previous, "over");
+        EXPECT_FALSE(chain.storeBlock(over, cs::PoolStoreType::Synced));  // built on the line: refused
+        EXPECT_EQ(chain.abandonedLineSize(), 256u);
+        auto beyond = guardBlock(seq + 1, ours, &ours, 0b111, false, false, over.hash(), "beyond");
+        EXPECT_TRUE(chain.storeBlock(beyond, cs::PoolStoreType::Synced));  // not linked: cached as usual
+        EXPECT_EQ(chain.getCachedBlocksSize(), cached + 1);
+        chain.clearBlockCache();
+    }
+    // the approval ends another way (the node went on with another block there): the line goes too
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);
+        chain.test_setLastBlock(guardBlock(62, ours));
+        chain.test_onHeadAdvanced();
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_EQ(chain.abandonedLineSize(), 0u);
+        EXPECT_FALSE(chain.abandonedCacheDropPending());
+    }
+    // a restart keeps the preference (the file), and its deadline
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        chain.setGuardStateDir("");
+        chain.test_resetRollbackEpisode();
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        const auto loaded = chain.approvedBranch();
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(loaded->hash, approval.hash);
+        EXPECT_EQ(loaded->abandonedHash, approval.abandonedHash);
+        EXPECT_EQ(loaded->peerKey, "peer");
+        EXPECT_EQ(loaded->untilUnix, approval.untilUnix);
+        EXPECT_TRUE(loaded->preferring());
+        chain.checkResolvePreference(now);  // not due yet
+        EXPECT_TRUE(chain.approvedBranch()->preferring());
+    }
+    // the deadline passes: the preference ends (logged, persisted), the abandoned block stays refused,
+    // another block there is no longer refused by it; after a restart too
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), approval));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        EXPECT_EQ(chain.abandonedLineSize(), 1u);
+        chain.checkResolvePreference(approval.untilUnix + 1);
+        EXPECT_EQ(chain.abandonedLineSize(), 0u);  // the preference is over
+        ASSERT_TRUE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(chain.approvedBranch()->preferring());
+        EXPECT_TRUE(chain.approvedBranch()->expired);
+        EXPECT_EQ(cs::forkguard::judgeBlock(*chain.approvedBranch(), 61, third.hash().to_string()), BranchVerdict::None);
+        auto again = abandoned;
+        EXPECT_FALSE(chain.storeBlock(again, cs::PoolStoreType::Synced));
+        EXPECT_EQ(chain.getLastSeq(), 60u);
+        const auto file = cs::forkguard::loadApprovedBranch(dir.str());
+        ASSERT_TRUE(file.has_value());
+        EXPECT_TRUE(file->expired);
+        EXPECT_EQ(file->abandonedHash, approval.abandonedHash);
+        chain.checkResolvePreference(approval.untilUnix + 100);  // once only
+        EXPECT_TRUE(chain.approvedBranch().has_value());
+    }
+    // no abandoned block known: the timeout ends the approval altogether
+    {
+        auto& chain = freshGuardChain(dir.str());
+        auto noAbandoned = approval;
+        noAbandoned.abandonedHash.clear();
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), noAbandoned));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        chain.checkResolvePreference(approval.untilUnix);
+        EXPECT_FALSE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(std::filesystem::exists(dir.path / cs::forkguard::kApprovedFile));
+    }
+    // an approval file of an earlier version (no deadline): an approval without preference
+    {
+        auto& chain = freshGuardChain(dir.str());
+        ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), {60, 61, approval.hash}));
+        chain.test_setLastBlock(forkBlock);
+        chain.setGuardStateDir(dir.str());
+        ASSERT_TRUE(chain.approvedBranch().has_value());
+        EXPECT_FALSE(chain.approvedBranch()->preferring());
+        EXPECT_EQ(cs::forkguard::judgeBlock(*chain.approvedBranch(), 61, third.hash().to_string()), BranchVerdict::None);
+    }
+    freshGuardChain();
+}
+
+// resolve-approved.json as a node reads it: a deadline further than the preference lasts is brought
+// back; an abandoned block or "expired" without a deadline is no file this node writes (refused); the
+// confidants of the abandoned block survive the round trip
+TEST(BlockChain, ApprovedBranchFileEdgeCases) {
+    TempDir dir("approved-file");
+    const int64_t now = 1'800'000'000;
+    cs::forkguard::ApprovedBranch b;
+    b.forkPoint = 60;
+    b.seq = 61;
+    b.hash = "CHOSEN";
+    b.abandonedHash = "ABANDONED";
+    b.abandonedConfidants = {cs::PublicKey{}, cs::PublicKey{}};
+    b.abandonedConfidants[1].fill(7);
+    b.untilUnix = now + 10 * 365 * 24 * 3600;  // far future
+    ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), b));
+    bool corrupt = false;
+    auto loaded = cs::forkguard::loadApprovedBranch(dir.str(), &corrupt, now);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_FALSE(corrupt);
+    EXPECT_EQ(loaded->untilUnix, now + cs::forkguard::kPreferenceSeconds);
+    EXPECT_EQ(loaded->abandonedConfidants, b.abandonedConfidants);
+
+    // an abandoned hash without a deadline
+    auto noDeadline = b;
+    noDeadline.untilUnix = 0;
+    noDeadline.abandonedConfidants.clear();
+    ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), noDeadline));
+    corrupt = false;
+    EXPECT_FALSE(cs::forkguard::loadApprovedBranch(dir.str(), &corrupt, now).has_value());
+    EXPECT_TRUE(corrupt);
+
+    // "expired" without a deadline (written by hand: the node writes expired only with one)
+    {
+        std::ofstream f(dir.path / cs::forkguard::kApprovedFile, std::ios::trunc);
+        f << R"({"fork_point": "60", "block": "61", "hash": "CHOSEN", "expired": "true"})";
+    }
+    corrupt = false;
+    EXPECT_FALSE(cs::forkguard::loadApprovedBranch(dir.str(), &corrupt, now).has_value());
+    EXPECT_TRUE(corrupt);
+
+    // a deadline without an abandoned block (the chain held nothing above the cut): fine
+    auto noAbandoned = b;
+    noAbandoned.abandonedHash.clear();
+    noAbandoned.abandonedConfidants.clear();
+    noAbandoned.untilUnix = now + 60;
+    ASSERT_TRUE(cs::forkguard::saveApprovedBranch(dir.str(), noAbandoned));
+    loaded = cs::forkguard::loadApprovedBranch(dir.str(), nullptr, now);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_TRUE(loaded->preferring());
+    EXPECT_EQ(loaded->untilUnix, now + 60);
+}
+
+// which block --resolve-fork prefers after the cut (cs::forkguard::preferenceFor, what the node passes
+// on to the chain): the recorded competing block of an exact point, the verified next block of a
+// located point (also with --to-located), nothing for an upper bound or an unverified point
+TEST(BlockChain, ResolvePlanPreference) {
+    cs::forkguard::ForkRecord r;
+    r.held = true;
+    r.forkPoint = 100;
+    r.forkPointHash = "F100";
+    r.competingSeq = 101;
+    r.competingHash = "COMPETING";
+    r.peerKey = "PEER";
+    // an upper bound
+    EXPECT_FALSE(cs::forkguard::preferenceFor({100, "F100", r, false}).has_value());
+    // exact: the competing block names the fork point
+    r.forkPointExact = true;
+    auto p = cs::forkguard::preferenceFor({100, "F100", r, false});
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->chosen, "COMPETING");
+    EXPECT_EQ(p->peerKey, "PEER");
+    // located and verified below the refused block: its verified next block, from the peer that gave it
+    cs::forkguard::ForkRecord located = r;
+    located.competingSeq = 160;
+    located.located = true;
+    located.locatedVerified = true;
+    located.upperBound = 159;
+    located.forkPoint = 100;
+    located.locatedPoint = 100;
+    located.locatedHash = "F100";
+    located.locatedNextHash = "NEXT";
+    located.locatedWith = "LOCATOR";
+    p = cs::forkguard::preferenceFor({100, "F100", located, false});
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->chosen, "NEXT");
+    EXPECT_EQ(p->peerKey, "LOCATOR");
+    // the same with --to-located
+    p = cs::forkguard::preferenceFor({100, "F100", located, true});
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->chosen, "NEXT");
+    // verified but the next block not kept: nothing
+    auto noNext = located;
+    noNext.locatedNextHash.clear();
+    EXPECT_FALSE(cs::forkguard::preferenceFor({100, "F100", noNext, false}).has_value());
+    // located, not verified: a hint; --to-located cuts there but prefers nothing
+    cs::forkguard::ForkRecord hint = r;
+    hint.forkPointExact = false;
+    hint.forkPoint = 159;
+    hint.located = true;
+    hint.locatedVerified = false;
+    hint.locatedPoint = 100;
+    hint.locatedHash = "F100";
+    hint.locatedNextHash.clear();
+    EXPECT_FALSE(cs::forkguard::preferenceFor({100, "F100", hint, true}).has_value());
+    EXPECT_FALSE(cs::forkguard::preferenceFor({159, "F159", hint, false}).has_value());
 }
 
 // --resolve-fork acts only on a held fork: a dismissed record is refused, with the remedy
