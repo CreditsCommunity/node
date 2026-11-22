@@ -545,6 +545,75 @@ TEST(BlockChain, RollbackReferenceSurvivesRestart) {
     chain.setGuardStateDir("");
 }
 
+// a node holding a fork is offered the other chain's blocks many times a minute: one line at once,
+// then at most one a minute with the count since the previous one
+TEST(BlockChain, RefusedBlocksAreCountedNotLoggedOneByOne) {
+    using namespace std::chrono_literals;
+    cs::forkguard::RepeatedLine line;
+    const auto t0 = std::chrono::steady_clock::time_point{} + 1h;
+    EXPECT_EQ(line.onEvent(t0), 1u);  // the first refusal: a line at once
+    for (int i = 1; i < 2000; ++i) {
+        EXPECT_EQ(line.onEvent(t0 + std::chrono::milliseconds(25 * i)), 0u);  // 2000 within 50 s
+    }
+    EXPECT_EQ(line.onEvent(t0 + 60s), 2000u);  // 1999 counted + this one
+    EXPECT_EQ(line.onEvent(t0 + 61s), 0u);
+    EXPECT_EQ(line.onEvent(t0 + 10min), 2u);  // a quiet spell: the next one at once, with the one held back
+    EXPECT_EQ(line.onEvent(t0 + 10min + 1s), 0u);
+}
+
+// once FORK HELD, further refusals change nothing on disk: no file is written per refused block
+TEST(BlockChain, RefusalsWhileHeldDoNotTouchTheForkFile) {
+    installDefaultConfig();
+    TempDir dir("refusals");
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.test_resetRollbackEpisode();
+    chain.test_setLastSequence(5000);
+    chain.setGuardStateDir(dir.str());
+    ASSERT_TRUE(chain.guardAutoRollback());
+    chain.test_setLastSequence(4900);
+    ASSERT_FALSE(chain.guardAutoRollback());  // beyond the depth bound: FORK HELD
+    ASSERT_TRUE(chain.forkHeld());
+    const auto file = dir.path / cs::forkguard::kForkFile;
+    ASSERT_TRUE(std::filesystem::exists(file));
+    const auto written = std::filesystem::last_write_time(file);
+    const auto size = std::filesystem::file_size(file);
+    for (int i = 0; i < 1000; ++i) {
+        EXPECT_TRUE(chain.test_recordForkHeld("authority"));
+    }
+    EXPECT_EQ(std::filesystem::last_write_time(file), written);
+    EXPECT_EQ(std::filesystem::file_size(file), size);
+    EXPECT_TRUE(chain.forkHeld());
+    chain.setGuardStateDir("");
+}
+
+// a new FORK HELD episode starts its refusal line afresh: its first refusal is logged at once, even
+// within a minute of the previous episode's last line
+TEST(BlockChain, ANewForkHeldEpisodeLogsItsFirstRefusalAtOnce) {
+    using namespace std::chrono_literals;
+    installDefaultConfig();
+    TempDir dir("refusalepisodes");
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain chain(genesis, start);
+    chain.setGuardStateDir(dir.str());
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int episode = 0; episode < 2; ++episode) {
+        chain.test_resetRollbackEpisode();  // the previous episode ended
+        chain.test_setLastSequence(5000);
+        ASSERT_TRUE(chain.guardAutoRollback());
+        chain.test_setLastSequence(4900);
+        ASSERT_FALSE(chain.guardAutoRollback());  // FORK HELD
+        ASSERT_TRUE(chain.forkHeld());
+        const auto t = t0 + std::chrono::seconds(episode * 5);
+        EXPECT_EQ(chain.test_onRefusedBlock(t), 1u) << "episode " << episode;
+        EXPECT_EQ(chain.test_onRefusedBlock(t + 1s), 0u);
+        EXPECT_EQ(chain.test_onRefusedBlock(t + 2s), 0u);
+    }
+    chain.setGuardStateDir("");
+}
+
 // the fork record and the episode in their files, and the --resolve-fork plan
 TEST(BlockChain, ForkGuardFilesRoundTrip) {
     TempDir dir("files");

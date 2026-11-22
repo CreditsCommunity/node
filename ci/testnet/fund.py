@@ -211,7 +211,12 @@ def main():
     parser.add_argument("--amount", type=int, default=60000)
     parser.add_argument("--low-stake-nodes", type=int, default=0)
     parser.add_argument("--low-amount", type=int, default=1000)
+    # the even nodes' amount (0 = --amount): with official even nodes, more stake takes them the seats
+    parser.add_argument("--even-amount", type=int, default=0)
     parser.add_argument("--load-seconds", type=int, default=0)
+    # the chain of node 1 is cut back during the load (run.sh RESOLVE_FORK_AFTER): a transfer it took on
+    # the branch that was cut may come back expired, an answer and not a fault
+    parser.add_argument("--chain-cut", action="store_true")
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)
     parser.add_argument("--min-stake", type=int, default=0)
@@ -228,7 +233,9 @@ def main():
 
     failures = 0
     def funded(i):
-        return args.low_amount if i > len(nodes) - args.low_stake_nodes else args.amount
+        if i > len(nodes) - args.low_stake_nodes:
+            return args.low_amount
+        return args.even_amount if args.even_amount and i % 2 == 0 else args.amount
 
     for i, node in enumerate(nodes, 1):
         ok, message = send(client, master, node.pk, funded(i))
@@ -320,6 +327,9 @@ def main():
             # the inner id of a transfer whose outcome was unknown: an answer, not a fault
             pending += 1
             print(f"load transfer rejected after an unknown outcome: {message}", flush=True)
+        elif not ok and args.chain_cut and "transaction is expired" in message:
+            pending += 1
+            print(f"load transfer expired after the chain was cut back: {message}", flush=True)
         elif not ok and "not syncronized" in message:
             # the node refuses transfers while it catches up after a restart (power-cut scenario)
             unsynced += 1
