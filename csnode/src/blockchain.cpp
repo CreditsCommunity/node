@@ -297,7 +297,23 @@ bool BlockChain::init(
             branch.forkPoint = newBlockchainTop;
             branch.seq = newBlockchainTop + 1;
             branch.hash = resolveCompetingHash_;
-            branch.abandonedHash = resolveAbandonedHash_ == resolveCompetingHash_ ? std::string{} : resolveAbandonedHash_;
+            // the abandoned block as the chain held it right above the cut (its confidants vouch for its
+            // children); the record's hash only when the chain had nothing there
+            const auto& nextBinary = storage_.truncated_next();
+            if (!nextBinary.empty()) {
+                const csdb::Pool next = csdb::Pool::from_binary(cs::Bytes(nextBinary));
+                if (next.is_valid() && next.sequence() == newBlockchainTop + 1) {
+                    branch.abandonedHash = next.hash().to_string();
+                    branch.abandonedConfidants = next.confidants();
+                }
+            }
+            if (branch.abandonedHash.empty()) {
+                branch.abandonedHash = resolveAbandonedHash_;
+            }
+            if (branch.abandonedHash == resolveCompetingHash_) {
+                branch.abandonedHash.clear();
+                branch.abandonedConfidants.clear();
+            }
             branch.peerKey = resolvePeerKey_;
             branch.untilUnix = static_cast<int64_t>(std::time(nullptr)) + cs::forkguard::kPreferenceSeconds;
             cs::forkguard::saveApprovedBranch(dir, branch);
@@ -1475,7 +1491,7 @@ void BlockChain::resetAbandonedLine() {
     abandonedLine_.clear();
     cacheDropPending_ = false;
     if (approvedBranch_.has_value() && approvedBranch_->preferring() && !approvedBranch_->abandonedHash.empty()) {
-        abandonedLine_.push_back({approvedBranch_->abandonedHash, {}});
+        abandonedLine_.push_back({approvedBranch_->abandonedHash, approvedBranch_->abandonedConfidants});
         cacheDropPending_ = true;  // the cleanup at the start of the preference
     }
 }
@@ -1489,14 +1505,9 @@ size_t BlockChain::dropAbandonedFromCache() {
     if (cachedBlocks_->isEmpty()) {
         return 0;
     }
-    // ascending: a block built on one of the line goes, and joins the line if its signatures verify,
-    // so that its own children go too
-    const cs::Sequence from = cachedBlocks_->minSequence();
-    const cs::Sequence to = cachedBlocks_->maxSequence();
-    for (cs::Sequence seq = from; seq <= to && seq >= from; ++seq) {
-        if (!cachedBlocks_->contains(seq)) {
-            continue;
-        }
+    // ascending: a block built on one of the line goes, and joins the line if its parent's confidants
+    // confirmed it, so that its own children go too
+    for (const cs::Sequence seq : cachedBlocks_->keys()) {
         const auto data = cachedBlocks_->value(seq);
         if (!data.has_value() || !inAbandonedLine(data->pool.previous_hash().to_string())) {
             continue;

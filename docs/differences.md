@@ -346,7 +346,7 @@ consensus rules.
   verified block is then the branch the cut chooses: until the node is past it, it stores at that
   height only that block and refuses any other (neighbours still on the abandoned branch would
   sync it back on top of the cut), asking first, in random order, a few peers that likely have it
-  (a peer that brings no block within 20 s is dropped from them, and with none left the usual random
+  (a peer that brings no block within 20 s, or answers without one, is dropped from them; with none left the usual random
   choice applies, so a peer cannot hold the sync by what it claims); blocks of the abandoned branch
   are not cached while the preference lasts (a block built on the abandoned block, or on a block of
   that branch confirmed by its parent's confidants), and those cached before it began are dropped

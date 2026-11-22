@@ -33,21 +33,34 @@ public:
     explicit PreferredSources(Clock::duration timeout = std::chrono::seconds(20))
     : timeout_(timeout) {
     }
-    // the sources, best first (at most kMax kept); the same list again changes nothing, an empty
-    // one ends the preference (and forgets the demoted ones)
+    // The sources are fixed when the preference starts (the first non-empty list) and only grow while
+    // there is room (at most kMax, never reordered): the node rebuilds its list every few seconds from
+    // what peers claim, and a new order must not restart a source's window. An empty list ends the
+    // preference (and forgets the demoted ones).
     static constexpr size_t kMax = 3;
     void set(std::vector<PublicKey> sources) {
-        if (sources.size() > kMax) {
-            sources.resize(kMax);
-        }
-        if (sources == sources_) {
+        if (sources.empty()) {
+            sources_.clear();
+            demoted_.clear();
+            target_.reset();
             return;
         }
-        if (sources.empty()) {
-            demoted_.clear();
+        for (const auto& key : sources) {
+            if (sources_.size() >= kMax) {
+                break;
+            }
+            if (std::find(sources_.begin(), sources_.end(), key) == sources_.end()) {
+                sources_.push_back(key);
+            }
         }
-        sources_ = std::move(sources);
-        target_.reset();
+    }
+    // a reply of `sender` was handled: from the source asked, a reply that did not move our head
+    // demotes it at once (it answered, but not with the blocks we need)
+    void onReply(const PublicKey& sender, bool progressed) {
+        if (target_.has_value() && *target_ == sender && !progressed) {
+            demoted_.push_back(sender);
+            target_.reset();
+        }
     }
     const std::vector<PublicKey>& sources() const {
         return sources_;
@@ -80,9 +93,10 @@ public:
             target_.reset();
             return std::nullopt;
         }
-        if (!target_.has_value()) {
-            progressAt_ = now;  // the window of a newly chosen source starts now
+        if (target_.has_value() && std::find(candidates.begin(), candidates.end(), *target_) != candidates.end()) {
+            return target_;  // the source asked keeps its window until it brings blocks or times out
         }
+        progressAt_ = now;  // the window of a newly chosen source starts now
         target_ = candidates[candidates.size() == 1 ? 0 : random(candidates.size()) % candidates.size()];
         return target_;
     }

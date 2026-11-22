@@ -168,7 +168,9 @@ void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::Publ
     pacing_.onReply(sender, cs::Utils::currentTimestamp());
     //std::thread sThread(&PoolSynchronizer::manageSyncBlocks, this, std::move(poolsBlock));;
     //sThread.detach();
+    const auto before = blockChain_->getLastSeq();
     manageSyncBlocks(std::move(poolsBlock));
+    preferredSources_.onReply(sender, blockChain_->getLastSeq() > before);
 }
 
 bool PoolSynchronizer::isSyncroStarted() const {

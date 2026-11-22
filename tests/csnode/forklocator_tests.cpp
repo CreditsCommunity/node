@@ -662,6 +662,31 @@ TEST(ForkLocator, ExactOnlyWhenVerifiedAcrossCandidates) {
     EXPECT_EQ(loc.forkPoint(), 533u);
     EXPECT_EQ(loc.resultPeer(), key(8));
 
+    // a hostile candidate claiming an unverified fork point ABOVE the true one, then an honest one: the
+    // verified answer wins, the hostile hint is dropped
+    MultiHarness up;
+    up.chains = {533, 931, 1500};
+    Chains higher = up.chains;
+    higher.fork = 700;
+    up.peers[2] = [&](const std::vector<cs::Sequence>& seqs) {
+        std::vector<Locator::PeerBlock> out;
+        for (auto s : seqs) {
+            // ours up to 700 (it claims to share them), its own blocks above, never verifiable
+            Locator::PeerBlock b{s, s <= 700 ? up.chains.ours(s) : higher.theirs(s),
+                                 s == 0 ? std::string{} : (s - 1 <= 700 ? up.chains.ours(s - 1) : higher.theirs(s - 1)), false};
+            out.push_back(b);
+        }
+        return std::optional(out);
+    };
+    up.peers[8] = [&](const std::vector<cs::Sequence>& seqs) { return std::optional(up.competing(seqs)); };
+    auto& hostile = up.make();
+    hostile.start(std::vector<cs::PublicKey>{key(2), key(8)}, 930, 0, up.now);
+    EXPECT_EQ(up.run(), Status::Exact);
+    EXPECT_TRUE(hostile.verified());
+    EXPECT_EQ(hostile.forkPoint(), 533u);
+    EXPECT_EQ(hostile.resultPeer(), key(8));
+    EXPECT_EQ(hostile.nextHash(), "P534");
+
     // only unverified answers: the hint, not verified (the node keeps it a hint)
     MultiHarness u;
     u.chains = {533, 931, 1500};

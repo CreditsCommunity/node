@@ -60,6 +60,9 @@ public:
 
     void clear();
 
+    // the sequences held, ascending
+    std::vector<cs::Sequence> keys() const;
+
     // returns free spaces at pool caches ranges
     std::vector<Interval> ranges() const;
 

@@ -65,6 +65,8 @@ struct ApprovedBranch {
     cs::Sequence seq = 0;   // forkPoint + 1
     std::string hash;       // the recorded competing block (the chosen one)
     std::string abandonedHash;  // our block at seq before the cut (empty: not known)
+    // the confidants of that block, read from the chain at the cut: they vouch for its children
+    std::vector<cs::PublicKey> abandonedConfidants;
     std::string peerKey;        // base58: a peer that had the chosen block (empty: not known)
     int64_t untilUnix = 0;      // the preference lasts until then (0: no preference, approval only)
     bool expired = false;       // the preference timed out: only abandonedHash is still refused
@@ -94,7 +96,11 @@ BranchVerdict judgeBlock(const ApprovedBranch& branch, cs::Sequence seq, const s
 // preferring, or built on the abandoned block
 BranchVerdict judgeChild(const ApprovedBranch& branch, cs::Sequence seq, const std::string& previous);
 bool saveApprovedBranch(const std::string& dir, const ApprovedBranch& branch);
-std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt = nullptr);
+// nowUnix (0: the clock now): a deadline further than kPreferenceSeconds away is brought back to it.
+// An abandoned block without a deadline, or "expired" without one, is not a file this node writes:
+// *corrupt, nothing loaded
+std::optional<ApprovedBranch> loadApprovedBranch(const std::string& dir, bool* corrupt = nullptr, int64_t nowUnix = 0);
+
 void clearApprovedBranch(const std::string& dir);
 
 struct ForkRecord {
@@ -193,6 +199,15 @@ struct ResolvePlan {
     bool toLocated = false;
 };
 std::optional<ResolvePlan> planResolve(const std::string& dir, std::string* error, bool toLocated = false);
+
+// --resolve-fork: the block the cut prefers at the height after it, and a peer that had it; none when
+// the cut is not at a point the node can name the competing branch's next block for (an upper bound,
+// a located point that is not verified, a verified one without the peer's next block)
+struct PreferredBranch {
+    std::string chosen;
+    std::string peerKey;
+};
+std::optional<PreferredBranch> preferenceFor(const ResolvePlan& plan);
 
 // what --resolve-fork shows before it cuts: our head, the upper bound, the located point and whether
 // it is verified, where the cut goes and how many blocks it removes

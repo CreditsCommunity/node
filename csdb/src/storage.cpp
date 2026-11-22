@@ -224,6 +224,7 @@ private:
     bool truncate_checkpoint_below = true;
     // the last block stored before the last cut
     cs::Sequence truncated_last = 0;
+    cs::Bytes truncated_next;
 
     // the cache keeps one pool per sequence and per hash: a pool saved at a sequence whose previous
     // pool was removed (a chain reorganisation) replaces the cached one, instead of being refused by
@@ -495,6 +496,10 @@ cs::Sequence Storage::truncated_last() const {
     return d->truncated_last;
 }
 
+const cs::Bytes& Storage::truncated_next() const {
+    return d->truncated_next;
+}
+
 Storage::Error Storage::last_error() const {
     return last_error_map(d.get()).last_error_;
 }
@@ -610,6 +615,10 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
             return false;
         }
         d->truncated_last = seqLast >= seqToRemove ? seqLast : 0;
+        d->truncated_next.clear();
+        if (seqLast >= seqToRemove) {
+            d->db->get(seqToRemove, &d->truncated_next);  // read before it is removed
+        }
 
         auto blocksCount = (seqLast >= seqToRemove) ? (seqLast - seqToRemove + 1) : 0;
         if(seqToRemove <= seqLast) {
