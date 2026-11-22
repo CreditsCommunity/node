@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.18.2 or earlier.
+Everything listed here is in release 4.2.532-community.19 or earlier.
 
 ## Storage
 
@@ -147,6 +147,18 @@ Everything listed here is in release 4.2.532-community.18.2 or earlier.
   one contract-state fee) is applied on mainnet only, only where the stored block reward split
   proves it and a node's own state does not already match, so a node synced from scratch is not
   changed. [#184](https://github.com/CreditsCommunity/node/pull/184)
+- **FORK HELD and operator remedies.** The node no longer unwinds more than `[params] max_auto_rollback`
+  (default 100) blocks on its own. When a competing block would need more, it keeps its chain and
+  reports FORK HELD (round-line marker, detail line, `fork-held.json`, unhealthy Docker healthcheck)
+  until the operator decides: `--resolve-fork` (Docker `resolve-fork`) cuts at the fork point the
+  node located, `--set-bc-top` cuts by hand, `dismiss-fork` keeps this chain. After a cut the node
+  prefers the chosen branch once. See "If your node reports FORK HELD" in
+  [quick-start.md](quick-start.md).
+  [#189](https://github.com/CreditsCommunity/node/pull/189), [#192](https://github.com/CreditsCommunity/node/pull/192), [#193](https://github.com/CreditsCommunity/node/pull/193)
+- **Community bootstrap fallback (expert).** Off by default (`[community_bootstrap] confidants=`,
+  `stall_minutes=`): after a long stall, nodes with the list may restart the network with a signed
+  table of initial and listed keys; official nodes then sync the blocks. Not for normal operation.
+  [#188](https://github.com/CreditsCommunity/node/pull/188)
 
 ## Diagnostics
 
@@ -159,6 +171,11 @@ Everything listed here is in release 4.2.532-community.18.2 or earlier.
   the node signed; a `stage3 network block` line shows the block the network stored when stage 3
   failed here, with the fields that differ. Logging only.
   [#176](https://github.com/CreditsCommunity/node/pull/176)
+- **PEERS status.** A `PEERS` log line at start and every 10 minutes shows the neighbours by announced
+  version (official, community, unknown), the official/community share of the trusted seats, and
+  `OFFICIAL NODES GONE` / `BACK` warnings; `peer-status.json` is printed by the Docker healthcheck.
+  Log and status only.
+  [#191](https://github.com/CreditsCommunity/node/pull/191)
 
 ## Crash and safety fixes
 
