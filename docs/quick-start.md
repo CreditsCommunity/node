@@ -510,7 +510,9 @@ majority of the confidants of this node's block there. After a minute or two, on
   ends once the chosen block is stored. If it does not arrive within 30 minutes, the node logs it
   as an error and stops waiting for it, but keeps refusing the block of the abandoned branch at
   M+1 until you cut again. The preference is kept in `resolve-approved.json` across restarts. It
-  never lets a block through a check it would otherwise fail.
+  never lets a block through a check it would otherwise fail. On a trusted node this also covers
+  its own block: if the node takes part in a round at M+1 right after the cut, it does not store the
+  block that round produces unless it is the chosen one. It syncs the chosen block instead.
   A verified point proves that a branch of the other chain forks there, but the branch the node
   refused might fork higher up. Cutting there may then remove more good blocks than needed. The
   cost is only a resync of those blocks.

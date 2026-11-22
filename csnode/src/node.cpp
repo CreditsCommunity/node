@@ -470,8 +470,8 @@ void Node::tickForkLocator() {
         if (forkLocator_->searching() && forkLocator_->rotations() != forkLocatorRotationsLogged_) {
             forkLocatorRotationsLogged_ = forkLocator_->rotations();
             const auto& next = forkLocator_->peer();
-            cslog() << "FORK HELD: fork point search: no answer from the previous peer (" << forkLocator_->why()
-                    << "), asking " << EncodeBase58(next.data(), next.data() + next.size());
+            cslog() << "FORK HELD: fork point search: " << forkLocator_->why() << "; asking "
+                    << EncodeBase58(next.data(), next.data() + next.size()) << " next";
         }
         break;
     case Status::Exact:
@@ -509,8 +509,7 @@ void Node::tickForkLocator() {
 void Node::preferResolvedBranch(const cs::forkguard::ResolvePlan& plan, const std::string& chosen, const std::string& peerKey) {
     cslog() << "--resolve-fork: at the next start the node takes at #" << WithDelimiters(plan.top + 1) << " only the "
             << "block of the chosen branch " << chosen << (peerKey.empty() ? std::string{} : " (asking " + peerKey + " first)")
-            << (plan.record.ourNextHash.empty() ? std::string{} : " and refuses the abandoned block " + plan.record.ourNextHash)
-            << ", for " << cs::forkguard::kPreferenceSeconds / 60 << " minutes at most";
+            << " and refuses there the block this cut abandons, for " << cs::forkguard::kPreferenceSeconds / 60 << " minutes at most";
     blockChain_.setResolveFork(plan.top, csdb::PoolHash::from_string(plan.hash), chosen, plan.record.ourNextHash, peerKey);
 }
 
@@ -561,41 +560,29 @@ std::optional<cs::Sequence> Node::resolveForkTop() {
             << "), our head was #" << WithDelimiters(plan->record.ourHead) << ", if the block at #"
             << WithDelimiters(plan->top) << " is still the recorded one";
     if (plan->toLocated) {
-        // the operator's explicit choice of the located point (verified or not); no branch is approved
+        // the operator's explicit choice of the located point (verified or not); a branch is preferred
+        // only when the point is the verified one (preferenceFor)
         cswarning() << "--resolve-fork --to-located: cutting at #" << WithDelimiters(plan->top) << ", the last common "
                     << "block located with " << plan->record.locatedWith << " from the upper bound #"
                     << WithDelimiters(plan->record.upperBound)
                     << (plan->record.locatedVerified ? " (verified)" : " (NOT verified: the operator's choice)");
-        const auto& r = plan->record;
-        if (r.locatedVerified && r.forkPointExact && r.forkPoint == plan->top && !r.locatedNextHash.empty()) {
-            // verified: the same point as without --to-located, and the same preference
-            preferResolvedBranch(*plan, r.locatedNextHash, r.locatedWith);
-        }
-        else {
-            blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
-        }
     }
-    else if (plan->record.forkPointExact && !plan->record.located && plan->record.competingSeq == plan->top + 1) {
-        preferResolvedBranch(*plan, plan->record.competingHash, plan->record.peerKey);
-    }
-    else if (plan->record.forkPointExact) {
-        // located and verified by the node (the last common block): the cut goes there, and the
-        // competing branch's first block, verified then, is the one preferred at the height after it
+    else if (plan->record.forkPointExact && plan->record.located) {
         cslog() << "--resolve-fork: #" << WithDelimiters(plan->top) << " is the last common block, verified, located "
                 << "from the upper bound #" << WithDelimiters(plan->record.upperBound) << "; the node syncs the other "
                 << "chain from there at the next start";
-        if (!plan->record.locatedNextHash.empty()) {
-            preferResolvedBranch(*plan, plan->record.locatedNextHash, plan->record.locatedWith);
-        }
-        else {
-            blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
-        }
     }
-    else {
+    else if (!plan->record.forkPointExact) {
         cswarning() << "--resolve-fork: the fork point is an upper bound (the other chain diverges at #"
                     << WithDelimiters(plan->top) << " or lower). If it diverges lower, the node reports FORK HELD "
                     << "again with a lower fork point: then find the last common block with the monitor or other "
                     << "nodes and cut there with --set-bc-top <sequence>.";
+    }
+    // the competing branch's next block, when the node can name it: preferred once after the cut
+    if (const auto preferred = cs::forkguard::preferenceFor(*plan)) {
+        preferResolvedBranch(*plan, preferred->chosen, preferred->peerKey);
+    }
+    else {
         blockChain_.setResolveFork(plan->top, csdb::PoolHash::from_string(plan->hash));
     }
     return plan->top;
