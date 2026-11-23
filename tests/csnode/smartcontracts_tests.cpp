@@ -129,12 +129,12 @@ csdb::Address addressOf(const char* base58) {
     return csdb::Address::from_public_key(bytes);
 }
 
-const auto identity = [](const csdb::Address& a) { return a; };
+const auto sameAddress = [](const csdb::Address& a) { return a; };
 
 // the execution an emitted transaction is charged to, as on_next_block_impl decides it: the rule's
 // answer, or the contract's execution before the block when no successful new_state precedes it
 cs::SmartContractRef charged(const csdb::Pool& block, size_t i, const csdb::Address& contract, const cs::SmartContractRef& before) {
-    return cs::SmartContracts::emitting_new_state(block, i, contract, identity).value_or(before);
+    return cs::SmartContracts::emitting_new_state(block, i, contract, sameAddress).value_or(before);
 }
 
 // the same refund as on_remove_block computes it, walking the block backwards
@@ -177,15 +177,15 @@ struct Block25897074 {
 // charged both to GZNHaxfo, the rebuild's 109-wallet difference.
 TEST(SmartContract, EmittedTransactionIsChargedToThePrecedingExecutionInTheBlock) {
     const Block25897074 b;
-    const auto pay1 = cs::SmartContracts::emitting_new_state(b.block, 3, b.dice, identity);
+    const auto pay1 = cs::SmartContracts::emitting_new_state(b.block, 3, b.dice, sameAddress);
     ASSERT_TRUE(pay1.has_value());
     EXPECT_EQ(*pay1, refOf(25897070, 0));
-    const auto pay2 = cs::SmartContracts::emitting_new_state(b.block, 5, b.dice, identity);
+    const auto pay2 = cs::SmartContracts::emitting_new_state(b.block, 5, b.dice, sameAddress);
     ASSERT_TRUE(pay2.has_value());
     EXPECT_EQ(*pay2, refOf(25897070, 1));
     // another contract's new_states do not count, and nothing precedes the first new_state
-    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(b.block, 3, b.other, identity).has_value());
-    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(b.block, 2, b.dice, identity).has_value());
+    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(b.block, 3, b.other, sameAddress).has_value());
+    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(b.block, 2, b.dice, sameAddress).has_value());
 }
 
 // 2019: block 10,635,589 holds twelve executions of 8tvGa1U6 (the replenishes 10,635,585.0-.11 of the
@@ -205,7 +205,7 @@ TEST(SmartContract, EmittedTransactionsOfTwelveExecutionsIn2019) {
         block.add_transaction(plain(contract, addressOf(players[k]), 2 * k + 2));   // 2k+1: the payout to its player
     }
     for (size_t k = 0; k < 12; ++k) {
-        const auto ref = cs::SmartContracts::emitting_new_state(block, 2 * k + 1, contract, identity);
+        const auto ref = cs::SmartContracts::emitting_new_state(block, 2 * k + 1, contract, sameAddress);
         ASSERT_TRUE(ref.has_value()) << players[k];
         EXPECT_EQ(*ref, refOf(10635585, k)) << players[k];
     }
@@ -227,16 +227,16 @@ TEST(SmartContract, EmittedTransactionCountsOnlyDeclaredSuccessfulExecutions) {
     block.add_transaction(newStateWithValue(A, 47, 0, 8, ""));         // 7: A's 47.0 failed (empty value)
     block.add_transaction(plain(A, player, 9));                        // 8: 46.0's
 
-    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 1, A, identity), refOf(40, 0));
-    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 4, A, identity), refOf(40, 0));
-    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 5, B, identity), refOf(41, 1));
-    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 8, A, identity), refOf(46, 0));
+    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 1, A, sameAddress), refOf(40, 0));
+    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 4, A, sameAddress), refOf(40, 0));
+    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 5, B, sameAddress), refOf(41, 1));
+    EXPECT_EQ(*cs::SmartContracts::emitting_new_state(block, 8, A, sameAddress), refOf(46, 0));
 
     // no successful new_state before it: the caller falls back to the execution before the block
     csdb::Pool other(csdb::PoolHash{}, 51);
     other.add_transaction(newState(A, 48, 0, 10, '\0'));
     other.add_transaction(plain(A, player, 11));
-    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(other, 1, A, identity).has_value());
+    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(other, 1, A, sameAddress).has_value());
     EXPECT_EQ(charged(other, 1, A, refOf(46, 0)), refOf(46, 0));
 }
 
@@ -257,7 +257,7 @@ TEST(SmartContract, EmittedTransactionChargeIsTheSameLiveAndReplaying) {
 
     // on_next_block_impl: the rule, or the saved execution, or ref_execute when nothing was saved
     const auto node_charge = [&](size_t i, const cs::SmartContractRef& ref_execute, const std::optional<cs::SmartContractRef>& saved) {
-        return cs::SmartContracts::emitting_new_state(block, i, dice, identity).value_or(saved.value_or(ref_execute));
+        return cs::SmartContracts::emitting_new_state(block, i, dice, sameAddress).value_or(saved.value_or(ref_execute));
     };
     const cs::SmartContractRef live_ref_execute = refOf(25897070, 1);   // after on_update
     cs::SmartContractRef replay_ref_execute = before;
