@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #195 | ci: full wallet comparison with the official nodes. `ci/snapshot/compare_wallets.py` (standard library only) reads every wallet of a node and of at least 3 official mainnet nodes, re-reads the differing ones until they stop moving, and compares the node with the official majority; each difference is classified by its delta (a multiple of an emitted-transaction fee, or other) and official splits are recorded. The wallets where the snapshot lineage is known to differ (25, plus 3 official splits) are in `compare_wallets_baseline.tsv`: reported, only a new or changed difference fails. The snapshot workflow runs it before publishing; `wallet-compare.yml` checks it on an official node on a change, weekly and by hand (see `docs/snapshots.md`). CI only |
 
 ## community.19 — 2026-11-22
 
