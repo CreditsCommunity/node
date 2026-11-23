@@ -101,6 +101,21 @@ jobs:
             echo "monitor=checked" >> "$GITHUB_OUTPUT"
           fi
 
+      # every wallet against the official majority (at least 3 official nodes): the wallets where the
+      # c3 lineage is known to differ (ci/snapshot/compare_wallets_baseline.tsv) are reported, a new
+      # difference fails; when too few official nodes answer (exit 3) the snapshot is published
+      # without this check
+      - name: Compare every wallet with official nodes
+        if: env.SKIP != '1'
+        run: |
+          status=0
+          python3 ci/snapshot/compare_wallets.py --ours 127.0.0.1:9090 --summary "$GITHUB_STEP_SUMMARY" || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::too few official nodes answer: the wallets were not compared with them"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+
       - name: Stop and check the logs
         if: env.SKIP != '1'
         run: |
