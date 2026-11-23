@@ -547,16 +547,38 @@ consensus rules.
   always failed. It now works. Residual risk, as in the official design: a package with more
   signatures that reaches only part of the network would move only that part.
 
-- **Fees of contract payouts.** A transaction a contract emits is charged to the contract's
-  latest successful execution in the same block, which is what a node that executed the contract
-  does (it applies every new state of the block before the payouts). A syncing official node whose
-  re-execution failed charges it to an earlier caller instead. This changes, by one fee, the
-  balances such a node computes for those callers, and makes them those of the nodes that took
-  part in the rounds.
+- **Fees of contract payouts.** The fee of a transaction a contract emits (a payout) is charged to
+  the initiator of one of the contract's executions. The official node charges the contract's last
+  execution it holds (`ref_execute`), and what it holds depends on how it got the block:
+  - a node that reads or syncs the block applies its new states in order, so a payout is charged to
+    the execution whose new state precedes it (the sequential rule);
+  - a node that builds the block in the round applies every new state of the block before storing
+    it (`statesCreated`), so all payouts of a block are charged to the contract's latest execution in
+    it;
+  - a syncing node whose re-execution of a contract failed keeps an earlier execution and charges
+    the previous caller.
+
+  The three agree unless one block holds several executions of one contract with payouts, or a
+  re-execution fails. The community node decides from the block alone, so every node computes the
+  same result however it got the block: the fee goes to the initiator of the contract's nearest new
+  state before the payout in the block that the block declares successful (a non-zero state hash,
+  or a non-empty state value in older blocks), whether or not the node reproduced that state; a
+  failed execution is passed over. With no such new state before it, the contract's execution
+  before the block: on a node that built the block, the one it held before applying the block's
+  states. A rollback refunds each payout to the execution it was charged to.
+
+  This is the sequential rule, which the mainnet majority holds for the whole history. The two
+  rules charge 1,299 payouts differently, in 1,064 blocks from 10.6M to 35.9M (2019 and 2020), and
+  none after 2021. community.12 to community.19 charged every payout of such a block to the latest
+  execution instead (#94): a node that read those blocks with those versions (a slow start from
+  block 0) holds different balances on 109 wallets, by one fee per payout. The published snapshots
+  are not affected: their lineage read those blocks with community.3 and .4, before #94. Compared
+  with an official node whose re-execution failed while syncing, the balances of the callers
+  involved differ by one fee, and are those of the majority.
 
 - **Known state corrections.** The lineage of the published pruned snapshots synced the dice-contract
-  blocks of 2026-06-05 with the official replay rule above. The payout 176760929.2 (block
-  176,760,929) pays `MooNRor8…` the win of its call 176760925.1, whose fee already includes the
+  blocks of 2026-06-05 with the official rule above (a stale `ref_execute` after a failed
+  re-execution). The payout 176760929.2 (block 176,760,929) pays `MooNRor8…` the win of its call 176760925.1, whose fee already includes the
   emitted transaction's fee. The replay of that contract state failed, the stale `ref_execute`
   still pointed to the previous successful call, by `7hWM6wvs…`, and the payout's contract-state
   fee (0.008740234375 CS) was charged to `7hWM6wvs…` as well: that lineage holds one fee less for

@@ -15,6 +15,7 @@
 
 #include <cassert>
 #include <list>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -353,10 +354,11 @@ public:
     // new state of contract, result of invocation of executable transaction
     static bool is_new_state(const csdb::Transaction&);
 
-    // the execution an emitted transaction of the contract is charged to, from the block alone: the
-    // contract's latest successful execution in the block (highest RefStart of its new_states with a
-    // non-zero hash), which is what a live node charges since it applies every new_state of the block
-    // before the emitted transactions; nullopt when the block has none. tr_idx is not used by the rule.
+    // the execution an emitted transaction (block position tr_idx) of the contract is charged to, from
+    // the block alone: the RefStart of the contract's nearest new_state before it that the block declares
+    // successful (is_state_updated), whether or not this node reproduced that state. This is the
+    // sequential rule, what a node applying the block in order holds; nullopt when no such new_state
+    // precedes it, and the caller falls back to the contract's execution before the block.
     static std::optional<SmartContractRef> emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                               const std::function<csdb::Address(const csdb::Address&)>& absolute);
 
@@ -667,6 +669,13 @@ private:
     bool was_reading_db_ = true;
     // get_actual_state skipped a re-execution because of sync_contract_execution=off
     bool sync_execution_skipped_ = false;
+    // the contract's execution before the block being built, saved by on_update (statesCreated) before it
+    // applies the block's states ahead of storing it; on_next_block_impl charges an emitted transaction
+    // without a preceding new_state in the block to it, as a node reading the block does, then clears it
+    std::unordered_map<csdb::Address, SmartContractRef> execution_before_block_;
+    // the execution each emitted transaction charged by the fall-back was charged to (position in its
+    // block), so that on_remove_block refunds the same one: ref_execute has moved on by then
+    std::map<std::pair<cs::Sequence, size_t>, SmartContractRef> fallback_charges_;
     cs::RoundNumber last_state_summary_ = 0;
     void on_live_block(cs::RoundNumber round);
 
@@ -1017,6 +1026,8 @@ private:
      */
 
     void on_next_block_impl(const csdb::Pool& block, bool reading_db, bool* should_stop);
+    // records the execution the fall-back charged an emitted transaction to, for on_remove_block
+    void remember_fallback_charge(cs::Sequence seq, size_t tr_idx, const SmartContractRef& ref);
     void checkExeQueue(const csdb::Pool& block, bool reading_db, bool* should_stop);
 
     // request correct state in network
