@@ -641,8 +641,8 @@ consensus rules.
   the payout, or only outdated ones) is recorded when the block is stored, so that a rollback
   refunds the same execution. The record lives in memory: after a restart, or after the chain was
   cut with `--set-bc-top` or `--resolve-fork`, a rollback of such a block refunds the contract's
-  current execution (`ref_execute`) instead. That needs a payout before its own new state in the
-  block, a layout no real block has shown.
+  current execution (`ref_execute`) instead. That needs a payout before any new state of its
+  contract in the block, or after an outdated one; none was seen in the blocks examined.
 
 - **Known state corrections.** The lineage of the published pruned snapshots synced the dice-contract
   blocks of 2026-06-05 with the official rule above (a stale `ref_execute` after a failed
