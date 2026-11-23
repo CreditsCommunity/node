@@ -9,7 +9,8 @@ list of changes, pull request by pull request, see [CHANGES.md](CHANGES.md).
 - **Network.** The protocol version (532), the block format and the hashes are unchanged, and so
   are the consensus rules, except for the cases listed under "Consensus fixes" below, which only
   change what a node does when a round ends in conflict. A community node syncs and takes part in
-  consensus alongside official nodes.
+  consensus alongside official nodes. One rare case can still make its balances differ from those
+  of official nodes: read [Known risk: fees of contract payouts](#known-risk-fees-of-contract-payouts).
 - **Configuration.** The official `config.ini` works unchanged. Without a `[storage]` section the
   node is a full node on BerkeleyDB, like the official one. It opens the same `db/` folder and
   converts nothing.
@@ -20,6 +21,59 @@ list of changes, pull request by pull request, see [CHANGES.md](CHANGES.md).
 - **Keys, ports and the Thrift API.** These are unchanged. The API changes: when blocks are
   pruned, `TransactionsListGet` skips them (see "Pruned storage" below), and the diagnostic API
   returns two more optional fields (see "Network identity in the diagnostic API" below).
+
+## Known risk: fees of contract payouts
+
+**In short.** In one rare kind of block, community nodes and official nodes that follow the network
+live charge some contract fees to different wallets. It has not happened since 2021. If it happens
+again, the node tells you in its log.
+
+- **What this node does.** When a smart contract sends CS (a payout), someone pays the fee of that
+  payout: the wallet that called the contract. This node always picks that wallet by the original
+  rule, the *sequential* rule: the caller of the contract execution that comes before the payout in
+  the block.
+- **What official nodes do.** Since official release 4.2.419 (July 2019), an official node that
+  follows the network live, trusted or not, uses another rule: it charges every payout of a block to
+  the contract's *latest* execution in that block. An official node that syncs or replays the block
+  later (after downtime, or from block 0) uses the sequential rule, like this node.
+- **When the two rules differ.** Only in a block that holds two or more successful executions of
+  the same contract, started by different wallets, each followed by its payouts. In that block,
+  community nodes and live official nodes compute different balances for those callers, by whole
+  fees: one payout fee (0.0087 CS today) per payout charged differently.
+- **How often.** It happened in 1,064 blocks of 2019 and 2020 (1,299 payouts), and in no block since
+  2021. For all that history the mainnet majority holds the sequential values, the same as this
+  node: the official nodes have re-synced those blocks since.
+- **What it can cause if it happens again.** Until the official nodes re-sync that block, a
+  community node disagrees with them on the balances of the wallets involved:
+  - if one of those wallets belongs to a trusted node, the reward split this node computes for it
+    differs from the official nodes' while it is a confidant, and this node may end up in the
+    minority of those rounds;
+  - if one of those wallets spends close to its whole balance, this node and an official node may
+    disagree on whether a transaction from it is covered, and one may refuse what the other accepts.
+
+  Other wallets, plain transfers and the chain itself are not affected. The official nodes return
+  to the sequential values when they re-sync the block (a restart that re-reads it, or a sync from
+  block 0).
+- **Why this node does not follow the live rule.** The live rule depends on how the block reached
+  each node, so even official nodes disagree among themselves after such a block. The sequential
+  rule depends only on the block: every community node, whether it followed the round live, synced
+  the block or replayed it from block 0, computes the same balances, and these are the balances the
+  mainnet majority holds for the whole history. community.12 to community.19 used the live rule and,
+  after a sync from block 0, disagreed with the majority on 109 wallets of 2019 and 2020.
+- **What to watch for.** When the node processes such a block (live, while syncing, or when it
+  replays the history from block 0, where it meets the 1,064 blocks above), it logs one warning per
+  block that starts with `EMITTED FEE RULE:`. It names the block, the contract, each payout charged
+  differently with its fee, the wallet this node charges and the wallet live official nodes charge,
+  and the balance difference per wallet. It only reports: what the node computes and signs is the
+  same with or without it.
+- **What to do.** Nothing is needed to keep the node running; restarting or resyncing does not
+  change the result, since every community node computes the same. On a block above 36,000,000 (a
+  new case, not the 2019–2020 history), report the line in the
+  [issues](https://github.com/CreditsCommunity/node/issues) or the
+  [technical Telegram](https://t.me/creditstechnical). If a wallet it names is yours, keep at least
+  the difference it shows in that wallet until the official nodes have re-synced. If your node is
+  trusted and one of the wallets is a confidant, expect it to lose some rounds on the reward split
+  while that wallet is in the round.
 
 ## New options
 
@@ -552,29 +606,43 @@ consensus rules.
   execution it holds (`ref_execute`), and what it holds depends on how it got the block:
   - a node that reads or syncs the block applies its new states in order, so a payout is charged to
     the execution whose new state precedes it (the sequential rule);
-  - a node that builds the block in the round applies every new state of the block before storing
-    it (`statesCreated`), so all payouts of a block are charged to the contract's latest execution in
-    it;
+  - every node that follows the rounds live, trusted or not, applies all the new states of the
+    round's block when the block is formed (`statesCreated`), before it stores the block, so it
+    charges all payouts of a block to the contract's latest execution in it (official 4.2.419 and
+    later);
   - a syncing node whose re-execution of a contract failed keeps an earlier execution and charges
     the previous caller.
 
   The three agree unless one block holds several executions of one contract with payouts, or a
   re-execution fails. The community node decides from the block alone, so every node computes the
-  same result however it got the block: the fee goes to the initiator of the contract's nearest new
-  state before the payout in the block that the block declares successful (a non-zero state hash,
-  or a non-empty state value in older blocks), whether or not the node reproduced that state; a
-  failed execution is passed over. With no such new state before it, the contract's execution
-  before the block: on a node that built the block, the one it held before applying the block's
-  states. A rollback refunds each payout to the execution it was charged to.
+  same result however it got the block: the fee goes to the initiator of the contract's highest
+  execution among its new states before the payout in the block that the block declares successful
+  (a non-zero state hash, or a non-empty state value in older blocks), whether or not the node
+  reproduced that state; a failed execution is passed over. "Highest" is what a node applying the
+  block in order holds, since a state older than the contract's execution is ignored; in an ordered
+  block it is the nearest one. The charge never goes below the contract's execution before the
+  block, and is that execution when no such new state precedes the payout: on a node that follows
+  the rounds live, the one it held before applying the block's states. A rollback refunds each
+  payout to the execution it was charged to.
 
-  This is the sequential rule, which the mainnet majority holds for the whole history. The two
+  This is the sequential rule, which the mainnet majority holds for the whole history, and the
+  node applies it always, also where official nodes that follow the rounds live apply the latest
+  one: see [Known risk: fees of contract payouts](#known-risk-fees-of-contract-payouts). The two
   rules charge 1,299 payouts differently, in 1,064 blocks from 10.6M to 35.9M (2019 and 2020), and
   none after 2021. community.12 to community.19 charged every payout of such a block to the latest
-  execution instead (#94): a node that read those blocks with those versions (a slow start from
-  block 0) holds different balances on 109 wallets, by one fee per payout. The published snapshots
-  are not affected: their lineage read those blocks with community.3 and .4, before #94. Compared
-  with an official node whose re-execution failed while syncing, the balances of the callers
-  involved differ by one fee, and are those of the majority.
+  execution instead (#94): a node that processed those blocks with those versions holds different
+  balances on 109 wallets, by one fee per payout. That is a node that synced them from block 0 over
+  the network as well as one that re-read them from its own database (a slow start). The published
+  snapshots are not affected: their lineage processed those blocks with community.3 and .4, before
+  #94. Compared with an official node whose re-execution failed while syncing, the balances of the
+  callers involved differ by one fee, and are those of the majority.
+
+  Known limit: a charge that is not a new state of the block (no new state of the contract before
+  the payout, or only outdated ones) is recorded when the block is stored, so that a rollback
+  refunds the same execution. The record lives in memory: after a restart, or after the chain was
+  cut with `--set-bc-top` or `--resolve-fork`, a rollback of such a block refunds the contract's
+  current execution (`ref_execute`) instead. That needs a payout before its own new state in the
+  block, a layout no real block has shown.
 
 - **Known state corrections.** The lineage of the published pruned snapshots synced the dice-contract
   blocks of 2026-06-05 with the official rule above (a stale `ref_execute` after a failed

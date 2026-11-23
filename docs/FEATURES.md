@@ -80,11 +80,22 @@ Everything listed here is in release 4.2.532-community.19 or earlier.
 
 - **Correct contract states and balances after a sync.** A syncing node takes the contract states
   the chain declares from the confidants instead of re-executing contracts whose result is not
-  reproducible (games that read their own balance), and charges contract fees as the live nodes do.
+  reproducible (games that read their own balance). It charges the fees of contract payouts by the
+  sequential rule the mainnet majority holds for the whole history, from the block alone, so it
+  computes the same balances whether it followed the network live, synced or replayed from block 0.
   An official node in the same situation ends with other balances, or stops at a valid block.
   [#83](https://github.com/CreditsCommunity/node/pull/83), [#93](https://github.com/CreditsCommunity/node/pull/93),
   [#94](https://github.com/CreditsCommunity/node/pull/94), [#95](https://github.com/CreditsCommunity/node/pull/95),
-  [#96](https://github.com/CreditsCommunity/node/pull/96)
+  [#96](https://github.com/CreditsCommunity/node/pull/96); the sequential rule from
+  [#196](https://github.com/CreditsCommunity/node/pull/196) (not released yet)
+- **Known risk: payout fees in rare blocks** (with #196, not released yet). Official nodes that
+  follow the network live charge payout fees by another rule (since official 4.2.419, 2019). In a block with two or more executions
+  of one contract by different callers, each followed by payouts, community nodes and those official
+  nodes then hold different balances for those callers, by whole fees, until the official nodes
+  re-sync; a community node may then be in the minority on a reward split or judge a transaction of
+  such a wallet differently. No such block since 2021; the node logs `EMITTED FEE RULE:` if one
+  comes. See [the details](differences.md#known-risk-fees-of-contract-payouts).
+  [#196](https://github.com/CreditsCommunity/node/pull/196)
 - **A dependable contract executor.** Races and lost connections between the node and its executor
   are fixed, the executor starts as soon as it answers, and several nodes on one machine no longer
   stop each other's executors.
