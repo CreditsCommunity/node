@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.19 or earlier.
+Everything listed here is in release 4.2.532-community.20 or earlier.
 
 ## Storage
 
@@ -87,8 +87,8 @@ Everything listed here is in release 4.2.532-community.19 or earlier.
   [#83](https://github.com/CreditsCommunity/node/pull/83), [#93](https://github.com/CreditsCommunity/node/pull/93),
   [#94](https://github.com/CreditsCommunity/node/pull/94), [#95](https://github.com/CreditsCommunity/node/pull/95),
   [#96](https://github.com/CreditsCommunity/node/pull/96); the sequential rule from
-  [#196](https://github.com/CreditsCommunity/node/pull/196) (not released yet)
-- **Known risk: payout fees in rare blocks** (with #196, not released yet). Official nodes that
+  [#196](https://github.com/CreditsCommunity/node/pull/196)
+- **Known risk: payout fees in rare blocks** (#196). Official nodes that
   follow the network live charge payout fees by another rule (since official 4.2.419, 2019). In a block with two or more executions
   of one contract by different callers, each followed by payouts, community nodes and those official
   nodes then hold different balances for those callers, by whole fees, until the official nodes
