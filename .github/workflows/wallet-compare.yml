@@ -1,0 +1,75 @@
+name: Wallet comparison
+
+# ci/snapshot/compare_wallets.py reads every wallet of a node and of official mainnet nodes and fails on
+# a difference from the official majority that its baseline does not list. The snapshot workflow runs
+# it on the node it publishes (the c3 lineage). This workflow checks the script itself and the
+# official nodes: on a change of the script, weekly and by hand.
+#   - no input: an official node is checked against the others with no baseline (must pass, and
+#     the official splits are listed), then again with one balance altered (must fail);
+#   - ours=HOST:PORT: that node's API, reachable from GitHub, with the c3 baseline (or none).
+# Our own mainnet node is not reachable from here: run the script on its host (docs/snapshots.md).
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'ci/snapshot/compare_wallets*'
+      - '.github/workflows/wallet-compare.yml'
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      ours:
+        description: 'HOST:PORT of the node to check (empty: the self-check against an official node)'
+        default: ''
+      baseline:
+        description: 'with ours: true = report the known c3 differences without failing, false = no baseline'
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare
+        env:
+          OURS: ${{ inputs.ours }}
+          BASELINE: ${{ inputs.baseline }}
+        run: |
+          if [ -n "$OURS" ]; then
+            args=(--ours "$OURS")
+            [ "$BASELINE" = false ] && args+=(--baseline '')
+            python3 ci/snapshot/compare_wallets.py "${args[@]}" --summary "$GITHUB_STEP_SUMMARY" --json wallets.json
+            exit $?
+          fi
+          # 7aYW as "ours": it must agree with the official majority on every wallet
+          status=0
+          python3 ci/snapshot/compare_wallets.py --ours 195.201.241.46:9090 --baseline '' \
+            --summary "$GITHUB_STEP_SUMMARY" --json wallets.json || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::too few official nodes answer: nothing compared"; exit 0
+          fi
+          [ "$status" -eq 0 ] || { echo "FAIL: an official node differs from the official majority"; exit 1; }
+          # the same with one balance altered: the new difference must fail
+          status=0
+          python3 ci/snapshot/compare_wallets.py --ours 195.201.241.46:9090 --baseline '' \
+            --scan-official 3 --self-test-mismatch || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::too few official nodes answer for the self-test"; exit 0
+          fi
+          [ "$status" -eq 1 ] || { echo "FAIL: the self-test exited $status, 1 expected"; exit 1; }
+          echo "self-test: the altered balance failed the check, as it should"
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallets
+          path: wallets.json
+          if-no-files-found: ignore
+          retention-days: 14

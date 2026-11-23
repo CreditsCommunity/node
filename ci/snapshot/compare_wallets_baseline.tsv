@@ -1,0 +1,34 @@
+# Wallets where the c3 lineage (credits-pruned-c3, which builds the published snapshots) is known to
+# differ from the official majority, 2026-11-23, block 188,596,812: c3's 25 wallets and the 3 where the
+# official nodes split. Columns: address, delta (ours - official majority, CS, exact),
+# mechanism (M2: stale ref_execute after a failed contract replay in network sync; M3: new_state applied
+# without its pruned starter), official minority (nodes holding another value, '-' for none), note.
+# compare_wallets.py reports these without failing; a new wallet or another delta fails.
+AcbLs58TfgXPRh6hqNym7wEJoaAyEk6o3oLaLkKUxq4A	0.008740234375000000	M2	-	stale ref_execute, 2020 (8NBuDE7v/CAnKGAa3 payouts; counterpart Fj1nLfXW)
+BKHc3NhfK5Um7AQzCjePe4Z2dq2MszHUzbB6cjowYkZu	0.008740234375000000	M2	-	stale ref_execute after a failed replay in network sync (candidate: DssiFTyw payout 176,060,953.1)
+Dr7JRBQ59dJ67HTDcqaZzWqLPNTuTVVMnXG5pd1Dk9AD	0.008740234375000000	M2	-	stale ref_execute (candidate: 9ATAmu2Y 176,859,474.1 with 176,760,929.2)
+Fj1nLfXWn1sKkxmP1wfeoMEtqMHy4T8hf6in6dENXvur	-0.008740234375000000	M2	-	stale ref_execute, 2020 (counterpart of AcbLs58T)
+ACkyon3ERkNEcNwpjUn4S6TLP3L76LFg3X6kWoJx82dK	0.017480468750000000	M2 official split	G278,JCwd	CdAVDYuK payouts (candidates); JCwd and G278 hold our value
+AL3dpJg3Pi68HinvVpVPR8uWSd3p8ix1Fa7HkM4XaS43	-0.043701171875000000	M2 official split	G278,JCwd	stale caller of BKHc/bNF5/ACky payouts; JCwd and G278 hold another value
+bNF5NLrQHhTpqxaVaSYQDQm85KjWVxLKJFTq34WnswP	0.017480468750000000	M2 official split	G278,JCwd	HEkb8gPm 174,922,950.1 + one more (candidates); JCwd and G278 hold our value
+11111111111111111111111111111111	-0.000964843750000000	M3	-	zero-key entry created by getWalletData(csdb::Address{}) for an unloadable starter
+2CiVzpfUwHg6MtxvW8kPEnJhsz8D7koEs2huHvXbsenm	-0.305425195312500000	M3	-	execution-fee share not paid: x/5 of 18,175,136.0 + x/4 of 18,163,594.1
+2tiWhDvvYFfgcfWqY1AuVwMUginrcBT6ohkGUnCQQmem	-0.169680664062500000	M3	-	execution-fee share not paid: x/4 of 18,163,594.1
+3EqC3ZAJm2wSKq19qpwmEQrhtHdzofEbWsfvHY4uEnsk	0.679205078125000000	M3	-	call 17,970,510.0 cancelled by time-out, new_state 18,175,136.0 applied without its starter
+3YDggY3Cmar8yAa2TJU6m1kso4hsW3JMEwBaDq13Ngph	-0.000804036458333333	M3	-	execution-fee share not paid: x/6 of 7,454,926.0
+6j3X9HGpeW712V1V6gr5gGXbRiQwAnG1h3zws5U423kY	-0.000000267750000000	M3	-	execution-fee share not paid: x/5 of 17,246,084.0
+7QopZTkGWHwEYnDXn1iALzJe2KyU7XaRKjSMaTvMiqU	-3.080195312500000002	M3	-	call 6,321,250.0 -> new_state 7,454,926.0 applied without its pruned starter: max_fee charged, never refunded
+AntdigAEUizgzA32LcfziVgG89E2EiCcV8bq3iWQ3GFC	-0.135744531250000000	M3	-	execution-fee share not paid: x/5 of 18,175,136.0
+B1xY8eaVzJuNSH2tcYAnrbBbXvhi654BuvovLipYE4zM	-0.169680931812500000	M3	-	execution-fee share not paid: x/4 of 18,163,594.1 + x/5 of 17,246,084.0
+D3nCVLRmfuh5m5fUmX1d6TGtNvhnMWEEaUjPfmLQTcTt	-0.000804036458333333	M3	-	execution-fee share not paid: x/6 of 7,454,926.0
+DH1EwdSaEvdtkQifT7r5ZHLuuMbh7C8M4sB5dxTsbyQS	-0.136548567708333333	M3	-	execution-fee share not paid: x/5 of 18,175,136.0 + x/6 of 7,454,926.0
+DtGfUbkTtXGtss3HywnVYoqbmHagevybiweob9QnssBc	-0.000000267750000000	M3	-	execution-fee share not paid: x/5 of 17,246,084.0
+DypjxiiiHMJt22EBkHpNGkqMc65QnwFnY7oAB6CUiSVK	0.000483760625000000	M3	-	call 16,934,402.0 cancelled by time-out, new_state 17,246,084.0 applied without its starter
+FEv1N5p5PevZDpR923ZExpM1wDKUQxgNedymddqyR5mE	-0.000804036458333333	M3	-	execution-fee share not paid: x/6 of 7,454,926.0
+Gyzjjoqi1rDywxXADnyj4LNcibei8faqasF6JWkzpiLP	-0.000000267750000000	M3	-	execution-fee share not paid: x/5 of 17,246,084.0
+H9NLdqQxfrGKssSLEwipZzmDp5LTh633VrJUpWz3YHke	-0.136548567708333333	M3	-	execution-fee share not paid: x/5 of 18,175,136.0 + x/6 of 7,454,926.0
+H9uYhoNajztYL4rW19ifrRWhzYRQSvKBH2EXY5PkJssG	-0.135744531250000000	M3	-	execution-fee share not paid: x/5 of 18,175,136.0
+HFP5BLxqSpS7TQwQrrx31eX8QkjRxkXNKWANVDvNpFZ4	-0.169680664062500000	M3	-	execution-fee share not paid: x/4 of 18,163,594.1
+J4MZJqWFzXm2uPGaPbLzM6U324cx1BJEHBAXqF2iVQE1	-0.000000267750000000	M3	-	execution-fee share not paid: x/5 of 17,246,084.0
+f1T2CiwRR9WyUHD1dqfrdNcVCGeWaFEQY8FNqekh5KR	-0.000804036458333333	M3	-	execution-fee share not paid: x/6 of 7,454,926.0
+h7YPqELJKui7aqtbTRBaSt996BXzY9xy7VhGPT8Rk7c	0.679205078125000000	M3	-	call 17,970,524.0 cancelled by time-out, new_state 18,163,594.1 applied without its starter
