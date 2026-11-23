@@ -386,6 +386,8 @@ public:
     }
 
 #ifdef TESTING
+    // the block storage, for a test that opens it on an in-memory database
+    csdb::Storage& test_storage() { return storage_; }
     // test-only accessors for the longest-chain guard
     void test_setLastSequence(cs::Sequence s) { lastSequence_ = s; }
     cs::Sequence test_rollbackHighWater() const { return rollbackHighWater_; }

@@ -554,6 +554,7 @@ must remove it; remove it then.
 | `the block database is X, config.ini asks for Y` (exit code 3) | `config.ini` names another database than the one in `db/`. Set `db_backend` back to X, or convert on purpose with `./node --convert-db` (Docker: `CREDITS_CONVERT_DB=yes`). See [storage.md](storage.md#conversion). |
 | Snapshot download stopped | Run it again: `./node --download-snapshot` (node stopped) resumes, or run the set-up again. |
 | The node stops with exit code 4, `snapshot.mismatch` exists | The restored state did not match the snapshot. Start over with an empty `db/`, `caches/` and `qs/` (Docker: `CREDITS_RESET=1` once). |
+| A warning `EMITTED FEE RULE: block N ...` in the log | A block charged a contract payout fee to another wallet than official nodes following the network live do. Nothing to fix: the node keeps running. On a block above 36,000,000, report the line. See [Known risk: fees of contract payouts](differences.md#known-risk-fees-of-contract-payouts). |
 | `FORK HELD` on the round lines; the container is unhealthy | See [If your node reports FORK HELD](#11-if-your-node-reports-fork-held). |
 | Disk full | A full node needs 250 to 300 GB with RocksDB. Free space or move to a bigger disk, or turn the backfill off (`backfill=off` in `[storage]`, `CREDITS_BACKFILL=off` in Docker before the first start). |
 | Linux: `GLIBC_2.38 not found` | Use the `linux-x64-glibc2.31` package. |

@@ -319,38 +319,86 @@ bool SmartContracts::is_start(const csdb::Transaction& tr) {
 }
 
 /*static*/
-/*static*/
 std::optional<SmartContractRef> SmartContracts::emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                                    const std::function<csdb::Address(const csdb::Address&)>& absolute) {
-    // A live node applies every new_state of the block (Conveyer::statesCreated -> on_update) before
-    // it charges any emitted transaction, so the execution it charges is the contract's latest
-    // successful one in the block, wherever the emitted transaction stands in it. A failed execution
-    // (zero hash) does not change the contract's execution and is not counted.
-    (void)tr_idx;
-    std::optional<SmartContractRef> latest;
-    for (const auto& t : block.transactions()) {
-        if (!is_new_state(t) || absolute(t.target()) != abs_addr) {
+    // The sequential rule: a node that applies the block in order (every node that reads or syncs it)
+    // holds, when it reaches the emitted transaction, the contract's highest execution among the
+    // new_states before it: update_contract_state ignores a state older than the contract's execution
+    // (official 4a95aaaf, "ignore outdated update"), so in an ordered block it is the nearest one. Only
+    // an execution the block declares successful (is_state_updated: a non-empty value, or a non-zero
+    // hash) counts, whether or not this node could reproduce the state: a failed one leaves the
+    // contract's execution where it was.
+    const auto& transactions = block.transactions();
+    std::optional<SmartContractRef> highest;
+    for (size_t i = 0; i < std::min(tr_idx, transactions.size()); ++i) {
+        const auto& t = transactions[i];
+        if (!is_new_state(t) || absolute(t.target()) != abs_addr || !is_state_updated(t)) {
             continue;
-        }
-        const csdb::UserField hash = t.user_field(trx_uf::new_state::Hash);
-        if (hash.is_valid()) {
-            const std::string bytes = hash.value<std::string>();
-            if (bytes.size() == cs::Hash{}.size() && std::all_of(bytes.begin(), bytes.end(), [](char c) { return c == 0; })) {
-                continue;
-            }
         }
         const csdb::UserField fld = t.user_field(trx_uf::new_state::RefStart);
         if (!fld.is_valid()) {
             continue;
         }
         const SmartContractRef ref(fld);
-        if (!latest.has_value() || *latest < ref) {
-            latest = ref;
+        if (!highest.has_value() || *highest < ref) {
+            highest = ref;
         }
     }
-    return latest;
+    return highest;
 }
 
+/*static*/
+SmartContractRef SmartContracts::charged_execution(const std::optional<SmartContractRef>& emitting, const SmartContractRef& before_block) {
+    if (emitting.has_value() && !(*emitting < before_block)) {
+        return *emitting;
+    }
+    return before_block;
+}
+
+/*static*/
+std::string SmartContracts::emitted_fee_warning(cs::Sequence sequence, const std::vector<EmittedFeeDivergence>& divergences) {
+    if (divergences.empty()) {
+        return {};
+    }
+    const auto b58 = [](const csdb::Address& a) {
+        const cs::PublicKey& key = a.public_key();
+        return EncodeBase58(key.data(), key.data() + key.size());
+    };
+    std::ostringstream os;
+    os << "EMITTED FEE RULE: block " << WithDelimiters(sequence) << " holds " << divergences.size()
+       << " contract payout(s) whose fee this node charges to another wallet than official nodes following the network live do.";
+    // per contract: the payouts, who pays here and who pays on live official nodes
+    std::map<csdb::Address, std::vector<const EmittedFeeDivergence*>> by_contract;
+    for (const auto& d : divergences) {
+        by_contract[d.contract].push_back(&d);
+    }
+    for (const auto& [contract, list] : by_contract) {
+        os << " Contract " << b58(contract) << ':';
+        for (const auto* d : list) {
+            os << ' ' << FormatRef(sequence, d->tr_idx) << " fee " << d->fee.to_string(2) << " CS charged to " << b58(d->payer)
+               << " (execution " << d->charged << "), live official nodes charge " << b58(d->live_payer) << " (execution " << d->live
+               << ");";
+        }
+    }
+    // the balances this node holds against live official nodes, wallet by wallet
+    std::map<csdb::Address, csdb::Amount> delta;
+    for (const auto& d : divergences) {
+        delta[d.payer] -= d.fee;
+        delta[d.live_payer] += d.fee;
+    }
+    os << " Balance here minus balance on live official nodes:";
+    for (const auto& [wallet, amount] : delta) {
+        if (amount == csdb::Amount{0}) {
+            continue;
+        }
+        os << ' ' << b58(wallet) << ' ' << (amount < csdb::Amount{0} ? "" : "+") << amount.to_string(2) << " CS;";
+    }
+    os << " This node applies the original sequential rule (docs/differences.md, \"Known risk: fees of contract payouts\"): official nodes"
+          " that followed this block live may hold different balances for these wallets until they re-sync it.";
+    return os.str();
+}
+
+/*static*/
 bool SmartContracts::is_new_state(const csdb::Transaction& tr) {
     //csdebug() << kLogPrefix << __func__;
     if (!tr.is_valid()) {
@@ -1491,11 +1539,13 @@ void SmartContracts::on_remove_block(const csdb::Pool& block) {
     if (!block.is_valid()) {
         return;
     }
+
+    cs::Lock lock(public_access_lock);
+    // whatever on_update saved was for the block after this one, which is not coming now
+    reset_execution_before_block();
     if (block.transactions_count() == 0) {
         return;
     }
-
-    cs::Lock lock(public_access_lock);
 
     csdebug() << kLogPrefix << "block " << WithDelimiters(block.sequence()) << " is removed, rollback contracts";
     // rollback in reverse order:
@@ -1750,19 +1800,38 @@ void SmartContracts::on_remove_block(const csdb::Pool& block) {
         else {
             csdb::Address abs_addr = absolute_address(t.source());
             if (in_known_contracts(abs_addr)) {
-                // contract emitted transaction, look up corresponding new state (the same rule as
-                // on_next_block_impl, so that a rollback refunds the fee to whom it was charged)
+                // contract emitted transaction: refund the fee to the execution on_next_block_impl charged
+                // it to. A charge that was not the block's own new_state (none before it, or an outdated
+                // one: the execution before the block) was recorded then, since ref_execute has moved on;
+                // otherwise the same rule at the same position. Without a record (the node restarted, or
+                // the chain was cut, since the block was stored) the contract's ref_execute is the
+                // best left: a known limit, docs/differences.md
                 const size_t tr_idx = static_cast<size_t>(std::distance(itr_t, block.transactions().crend())) - 1;
                 const auto absolute = [this](const csdb::Address& a) { return absolute_address(a); };
-                if (const auto ref = emitting_new_state(block, tr_idx, abs_addr, absolute); ref.has_value()) {
-                    csdb::Transaction start_transaction = get_transaction(*ref, abs_addr);
-                    if (start_transaction.is_valid()) {
-                        rollback_emitted_accepted(t, start_transaction);
+                std::optional<SmartContractRef> ref;
+                const auto it_charge = fallback_charges_.find(std::make_pair(block.sequence(), tr_idx));
+                if (it_charge != fallback_charges_.end()) {
+                    ref = it_charge->second;
+                    fallback_charges_.erase(it_charge);
+                }
+                else {
+                    ref = emitting_new_state(block, tr_idx, abs_addr, absolute);
+                    if (!ref.has_value()) {
+                        ref = known_contracts[abs_addr].ref_execute;
                     }
+                }
+                csdb::Transaction start_transaction = get_transaction(*ref, abs_addr);
+                if (start_transaction.is_valid()) {
+                    rollback_emitted_accepted(t, start_transaction);
+                }
+                else {
+                    cserror() << kLogPrefix << "failed to find starter transaction " << *ref << " to refund the emitted transaction "
+                              << FormatRef(block.sequence(), tr_idx);
                 }
             }
         }
     }
+    forget_fallback_charges_from(block.sequence());
 }
 
 void SmartContracts::checkExeQueue(const csdb::Pool& block, bool reading_db, bool* should_stop) {
@@ -1845,6 +1914,16 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
 
     test_contracts_locks();
     checkExeQueue(block, reading_db, should_stop);
+    // the executions on_update saved belong to this block only if it was built for this sequence
+    if (execution_before_block_seq_ != block.sequence()) {
+        reset_execution_before_block();
+        execution_before_block_seq_ = block.sequence();
+    }
+    // records of an earlier block of this sequence (removed, or replaced) are of no use
+    forget_fallback_charges_from(block.sequence());
+    last_emitted_fee_divergences_.clear();
+    // each contract's latest successful execution in the block, what live official nodes charge
+    std::unordered_map<csdb::Address, std::optional<SmartContractRef>> latest_in_block;
     // inspect transactions against smart contracts, raise special event on every item found:
     if (block.transactions_count() > 0) {
         size_t tr_idx = 0;
@@ -1862,6 +1941,12 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
                     }
                     else {
                         SmartContractRef ref_start(fld_contract_ref);
+                        // the contract's execution before this block, kept before its first state here
+                        // moves it (on a node that follows the rounds live, on_update has kept it already)
+                        if (execution_before_block_.find(abs_addr) == execution_before_block_.end()) {
+                            const auto it_known = known_contracts.find(abs_addr);
+                            execution_before_block_.emplace(abs_addr, it_known != known_contracts.end() ? it_known->second.ref_execute : SmartContractRef{});
+                        }
                         // update state
                         
                         if (!update_contract_state(tr, reading_db)) {
@@ -1909,25 +1994,56 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
                 csdb::Address abs_addr = absolute_address(tr.source());
                 const auto it = known_contracts.find(abs_addr);
                 if (it != known_contracts.cend()) {
-                    // is emitted by contract: its fee goes to the initiator of the execution whose new_state
-                    // precedes it in this block, as the live nodes charge it (and as on_remove_block
-                    // refunds it); the contract's last known execution only when the block has none,
-                    // since a node that could not obtain a state (a re-execution that is not
-                    // reproducible while it syncs) holds an earlier one
-                    const auto& contract_item = it->second;
+                    // is emitted by contract: its fee goes to the initiator of the contract's highest execution
+                    // among the new_states before it in this block that the block declares successful (the
+                    // sequential rule a node reading the block applies, and the one on_remove_block refunds
+                    // by), never below the contract's execution before the block. It reads the block, not
+                    // ref_execute: a live node has already applied every state of the block (on_update),
+                    // and a node whose re-execution failed while it synced holds an earlier execution;
+                    // both charge the same one
                     const auto absolute = [this](const csdb::Address& a) { return absolute_address(a); };
+                    const auto it_before = execution_before_block_.find(abs_addr);
+                    const SmartContractRef before_block = it_before != execution_before_block_.end() ? it_before->second : it->second.ref_execute;
                     const auto emitting = emitting_new_state(block, tr_idx, abs_addr, absolute);
-                    if (!emitting.has_value()) {
-                        cswarning() << kLogPrefix << "no new_state of the contract before its emitted transaction " << FormatRef(block.sequence(), tr_idx)
-                                    << ", charging the fee to the last known execution " << contract_item.ref_execute;
+                    const SmartContractRef ref_starter = charged_execution(emitting, before_block);
+                    if (!emitting.has_value() || !(ref_starter == *emitting)) {
+                        cswarning() << kLogPrefix << "no successful new_state of the contract at or above its execution before the block precedes "
+                                    << "its emitted transaction " << FormatRef(block.sequence(), tr_idx) << ", charging the fee to that execution "
+                                    << ref_starter;
+                        remember_fallback_charge(block.sequence(), tr_idx, ref_starter);
                     }
-                    const SmartContractRef ref_starter = emitting.value_or(contract_item.ref_execute);
                     csdb::Transaction starter = get_transaction(ref_starter, abs_addr);
                     if (starter.is_valid()) {
                         if (!reading_db) {
                             csdetails() << kLogPrefix << "found emitted transaction in " << ref_starter;
                         }
                         emit signal_emitted_accepted(tr, starter);
+                        // official nodes following the rounds live charge the contract's latest execution in
+                        // the block: when that is another wallet, the operator is told (no change to what is
+                        // computed here)
+                        auto it_latest = latest_in_block.find(abs_addr);
+                        if (it_latest == latest_in_block.end()) {
+                            it_latest = latest_in_block.emplace(abs_addr, emitting_new_state(block, block.transactions().size(), abs_addr, absolute)).first;
+                        }
+                        const SmartContractRef ref_live = charged_execution(it_latest->second, before_block);
+                        if (!(ref_live == ref_starter)) {
+                            const csdb::Transaction live_starter = get_transaction(ref_live, abs_addr);
+                            if (live_starter.is_valid()) {
+                                const csdb::Address payer = absolute_address(starter.source());
+                                const csdb::Address live_payer = absolute_address(live_starter.source());
+                                if (payer != live_payer) {
+                                    EmittedFeeDivergence d;
+                                    d.tr_idx = tr_idx;
+                                    d.contract = abs_addr;
+                                    d.charged = ref_starter;
+                                    d.live = ref_live;
+                                    d.payer = payer;
+                                    d.live_payer = live_payer;
+                                    d.fee = csdb::Amount(tr.counted_fee().to_double());
+                                    last_emitted_fee_divergences_.push_back(d);
+                                }
+                            }
+                        }
                     }
                     else {
                         cserror() << kLogPrefix << "failed to find starter transaction for contract emitted one";
@@ -1937,8 +2053,31 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
             ++tr_idx;
         }
     }
+    if (!last_emitted_fee_divergences_.empty()) {
+        cswarning() << kLogPrefix << emitted_fee_warning(block.sequence(), last_emitted_fee_divergences_);
+    }
+    // the executions saved before this block are of no use after it
+    reset_execution_before_block();
 
     test_exe_queue(reading_db);
+}
+
+void SmartContracts::reset_execution_before_block() {
+    execution_before_block_.clear();
+    execution_before_block_seq_ = kWrongSequence;
+}
+
+void SmartContracts::forget_fallback_charges_from(cs::Sequence seq) {
+    fallback_charges_.erase(fallback_charges_.lower_bound(std::make_pair(seq, size_t(0))), fallback_charges_.end());
+}
+
+void SmartContracts::remember_fallback_charge(cs::Sequence seq, size_t tr_idx, const SmartContractRef& ref) {
+    // a rollback goes back a few blocks: older records are of no use
+    constexpr cs::Sequence kKeptBlocks = 10000;
+    while (!fallback_charges_.empty() && fallback_charges_.cbegin()->first.first + kKeptBlocks < seq) {
+        fallback_charges_.erase(fallback_charges_.cbegin());
+    }
+    fallback_charges_[std::make_pair(seq, tr_idx)] = ref;
 }
 
 // return next element in queue
@@ -2661,9 +2800,24 @@ void SmartContracts::on_reject(const std::vector<Node::RefExecution>& reject_lis
 /*public*/
 void SmartContracts::on_update(const std::vector< csdb::Transaction >& states) {
     //csdebug() << kLogPrefix << __func__;
+    // the states are those of the round's block being formed (every node that follows the rounds live,
+    // trusted or not), the next one after the last stored
+    const cs::Sequence building = bc.getLastSeq() + 1;
     cs::Lock lock(public_access_lock);
 
+    if (execution_before_block_seq_ != building) {
+        reset_execution_before_block();
+        execution_before_block_seq_ = building;
+    }
     for (const auto& t : states) {
+        // the block is built and not stored yet: keep the contract's execution before it, the floor of
+        // its emitted transactions' charges, for on_next_block_impl when it stores that block (the first
+        // one kept wins, should the block be built again before it is stored)
+        if (is_new_state(t)) {
+            const csdb::Address abs_addr = absolute_address(t.target());
+            const auto it = known_contracts.find(abs_addr);
+            execution_before_block_.emplace(abs_addr, it != known_contracts.end() ? it->second.ref_execute : SmartContractRef{});
+        }
         // is called only in real time, not while read db
         update_contract_state(t, false);
     }
@@ -3757,6 +3911,9 @@ void SmartContracts::clear() {
     locked_contracts.clear();
     state_fetcher_.reset();
     was_reading_db_ = true;
+    reset_execution_before_block();
+    fallback_charges_.clear();
+    last_emitted_fee_divergences_.clear();
 }
 
 

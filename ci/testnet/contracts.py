@@ -429,9 +429,36 @@ def deploy(client, master, name, source):
     sys.exit(f"{name} not deployed after 300 s")
 
 
-def dice_plays(client_for, master, dice):
+TT_CONTRACT_STATE = 3     # api.TransactionType: a contract's new state
+TT_CONTRACT_EMITTED = 16  # api.TransactionType: a transaction a contract emitted (a payout)
+DICE_PAIR_ATTEMPTS = 6
+
+
+def dice_block_layout(client, seq, dice):
+    """The Dice transactions of block seq, in block order: ("S", success, start id) for a new state,
+    ("E", target) for a payout."""
+    trxs = client.PoolTransactionsGet(seq, 0, 10000).transactions or []
+    layout = []
+    for t in sorted(trxs, key=lambda t: t.id.index):
+        tr = t.trxn
+        if tr.type == TT_CONTRACT_STATE and dice in (tr.source, tr.target):
+            info = tr.smartInfo.v_smartState if tr.smartInfo else None
+            start = (info.startTransaction.poolSeq, info.startTransaction.index) if info else None
+            layout.append(("S", bool(info and info.success), start))
+        elif tr.type == TT_CONTRACT_EMITTED and tr.source == dice:
+            layout.append(("E", tr.target))
+    return layout
+
+
+def dice_plays(client_for, master, dice, block_file=""):
     """25 CS into the contract, then three plays by two players in turn, each followed by a 10 CS
-    top-up from the master. Returns the number of failures."""
+    top-up from the master. Then the two players play at once, through two nodes, until both
+    executions land in one block as new state, payout, new state, payout (the layout of mainnet block
+    25,897,074, where the official nodes following the rounds live charge the first payout to the second
+    player and every community node, live or syncing, charges the first player): up to
+    DICE_PAIR_ATTEMPTS pairs. The block's sequence goes to block_file for run.sh, which starts the
+    syncing node after it and checks that every node logged the EMITTED FEE RULE warning for it.
+    Returns (number of failures, plays made, the players)."""
     funder = Client(9090, 300)
     players = [Account(hashlib.sha256(master.pk + b"dice player %d" % i).digest()) for i in (1, 2)]
     master.next_inner_id = None
@@ -445,9 +472,11 @@ def dice_plays(client_for, master, dice):
         time.sleep(5)
     print(f"Dice: contract balance {balance(funder, dice)}", flush=True)
     failures = 0
+    plays = 0
     for n in range(3):
         player = players[n % 2]
         failures += 0 if call(client_for(1), player, dice, "play", f"Dice play {n + 1} by player {n % 2 + 1}", n + 1) else 1
+        plays += 1
         master.next_inner_id = None
         before = balance(funder, dice)
         ok, message = send(funder, master, dice, 10)
@@ -455,19 +484,79 @@ def dice_plays(client_for, master, dice):
         while time.time() < deadline and balance(funder, dice) < before + 10:
             time.sleep(3)
         print(f"Dice: top-up after play {n + 1}: {'ok' if ok else 'FAILED ' + str(message)}, contract balance {balance(funder, dice)}", flush=True)
-    # two plays at once: both executions in one block, so that a node charges both payouts the way the
-    # live nodes do (to the latest successful execution of the block, not to the one before each)
-    master.next_inner_id = None
-    ok, message = send(funder, master, dice, 20)
+
+    # two plays at once, until both executions land in one block, each new state followed by its payout
+    found = None
+    for attempt in range(1, DICE_PAIR_ATTEMPTS + 1):
+        # both plays must see at least 20 CS, and each pays out 10
+        current = balance(funder, dice)
+        if current < 45:
+            master.next_inner_id = None
+            amount = int(45 - current) + 1
+            ok, message = send(funder, master, dice, amount)
+            deadline = time.time() + 120
+            while time.time() < deadline and balance(funder, dice) < 45:
+                time.sleep(3)
+            print(f"Dice: {amount} CS more for two plays at once (attempt {attempt}): {'ok' if ok else 'FAILED ' + str(message)}, "
+                  f"contract balance {balance(funder, dice)}", flush=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda i: call_result(client_for(1 + i), players[i], dice, "play",
+                                                          f"Dice play at once by player {i + 1} (attempt {attempt})"), range(2)))
+        played = [r for r in results if r is not None and r.status.code == 0]
+        plays += len(played)
+        if len(played) != 2 or any(r.stateId is None for r in played):
+            print(f"Dice: attempt {attempt}: a play did not complete, trying again", flush=True)
+            continue
+        seqs = {r.stateId.poolSeq for r in played}
+        calls = {(r.id.poolSeq, r.id.index): i for i, r in enumerate(results)}
+        if len(seqs) != 1:
+            print(f"Dice: attempt {attempt}: the two new states are in blocks {sorted(seqs)}, trying again", flush=True)
+            continue
+        seq = seqs.pop()
+        layout = dice_block_layout(client_for(1), seq, dice)
+        shape = "".join(item[0] for item in layout)
+        starts = [item[2] for item in layout if item[0] == "S"]
+        good = (shape == "SESE" and all(item[1] for item in layout if item[0] == "S") and sorted(starts) == sorted(calls)
+                # each payout goes to the player whose new state precedes it
+                and all(layout[k + 1][1] == players[calls[layout[k][2]]].pk for k in (0, 2)))
+        print(f"Dice: attempt {attempt}: both new states in block {seq}, Dice transactions "
+              f"{[(i[0], i[1], i[2]) if i[0] == 'S' else (i[0], base58.b58encode(i[1]).decode()[:8]) for i in layout]}: "
+              f"{'new state, payout, new state, payout' if good else 'not the layout sought, trying again'}", flush=True)
+        if good:
+            found = seq
+            break
+    if found is None:
+        print(f"Dice: FAILED: the two plays did not land in one block as new state, payout, new state, payout "
+              f"in {DICE_PAIR_ATTEMPTS} attempts", flush=True)
+        failures += 1
+    if block_file:
+        # "none" lets run.sh go on (and fail on it) instead of waiting for the syncing node's start
+        with open(block_file, "w") as f:
+            f.write(f"{found if found is not None else 'none'}\n")
+    return failures, plays, players
+
+
+def call_result(client, master, contract, method, label):
+    """A contract call; its TransactionFlowResult (None when the node was unreachable)."""
     deadline = time.time() + 120
-    while time.time() < deadline and balance(funder, dice) < 45:
-        time.sleep(3)
-    print(f"Dice: 20 CS more for two plays at once: {'ok' if ok else 'FAILED ' + str(message)}, contract balance {balance(funder, dice)}", flush=True)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda i: call(client_for(1 + i), players[i], dice, "play", f"Dice play at once by player {i + 1}"),
-                                range(2)))
-    print(f"Dice: two plays at once sent: {results}", flush=True)
-    return failures
+    try:
+        while True:
+            next_inner_id(client, master)
+            result = client.TransactionFlow(smart_transaction(master, contract, invocation(method=method), TT_EXECUTE))
+            msg = result.status.message or ""
+            if result.status.code == 0 or ("not syncronized" not in msg and "Transaction in progress" not in msg) \
+                    or time.time() >= deadline:
+                break
+            print(f"{label}: refused ({msg.strip()!r}), sending again", flush=True)
+            time.sleep(5)
+    except Exception as e:  # the node went away
+        print(f"{label}: FAILED ({type(e).__name__}: {e})", flush=True)
+        return None
+    value = result.smart_contract_result.v_int if result.smart_contract_result else None
+    state = f"{result.stateId.poolSeq}.{result.stateId.index}" if result.stateId else None
+    print(f"{label}: status {result.status.code} {result.status.message!r}, returned {value}, "
+          f"call {result.id.poolSeq}.{result.id.index}, new state {state}", flush=True)
+    return result
 
 
 def call(client, master, contract, method, label, expected=None):
@@ -628,6 +717,8 @@ def main():
     parser.add_argument("--skip-read-nodes", default="")
     parser.add_argument("--dice", action="store_true",
                         help="deploy Dice and play it before the restart (a contract whose re-execution is not reproducible)")
+    parser.add_argument("--dice-block-file", default="",
+                        help="where to write the block holding the two Dice plays at once (for run.sh)")
     args = parser.parse_args()
     check_nodes = args.check_nodes or args.nodes
     skipped = {int(n) for n in args.skip_read_nodes.split() if n.strip()}
@@ -694,9 +785,11 @@ def main():
             print(f"  n{i}: {v!r} {msg!r}", flush=True)
         return len(bad)
 
+    dice_players = []
     if dice:
-        failures += dice_plays(client_for, master, dice)
-        failures += read_all(dice, "plays", 5, "Dice.plays")
+        dice_failures, dice_count, dice_players = dice_plays(client_for, master, dice, args.dice_block_file)
+        failures += dice_failures
+        failures += read_all(dice, "plays", dice_count, "Dice.plays")
     failures += read_all(counter, "get", calls, "Counter.get before restart")
     failures += read_all(ledger, "entries", calls, "Ledger.entries before restart")
 
@@ -772,6 +865,20 @@ def main():
         print(f"{name} state per node: {states}", flush=True)
         if len(set(states.values())) != 1:
             print(f"FAIL: nodes disagree on the {name} state", flush=True)
+            failures += 1
+    # the fees of the Dice payouts: the nodes that played the rounds live and the one that synced the
+    # plays (run.sh starts it after them) must hold the same balances for the players
+    for k, p in enumerate(dice_players):
+        balances = {}
+        for i in range(1, (args.check_nodes or args.nodes) + 1):
+            try:
+                b = client_for(i).WalletBalanceGet(p.pk).balance
+                balances[i] = f"{b.integral}.{b.fraction:018d}"
+            except Exception as e:
+                balances[i] = f"unreachable ({type(e).__name__})"
+        print(f"Dice player {k + 1} balance per node: {balances}", flush=True)
+        if len(set(balances.values())) != 1:
+            print(f"FAIL: nodes disagree on the balance of Dice player {k + 1}", flush=True)
             failures += 1
     sys.exit(1 if failures else 0)
 
