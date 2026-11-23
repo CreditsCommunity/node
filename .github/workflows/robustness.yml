@@ -471,7 +471,10 @@ jobs:
           # six SIGKILLs of n6 and its executor while contracts are deployed and called
           # a node that syncs from block 0 through plays of a contract reading its own balance
           # (docs/specs/2026-10-24-contract-state-sync-design.md): its balances and the contract's
-          # state must end as the live nodes', the state fetched from the confidants once it is live
+          # state must end as the live nodes', the state fetched from the confidants once it is live.
+          # Two plays at once must land in one block as new state, payout, new state, payout (retried
+          # until they do); the joiner starts after that block, and it and n1 must log EMITTED FEE RULE
+          # for it (official live nodes charge the first payout to the other player there)
           - name: contracts-dice-join
             official: 'no'   # an official joiner (n8) re-executes Dice while syncing and ends on another state: the official behaviour #93-#96 fixed (reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300

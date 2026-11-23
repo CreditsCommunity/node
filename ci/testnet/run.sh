@@ -48,7 +48,12 @@
 #        (the command that runs the Java sample, e.g. "java -jar .../credits-client.jar"), with the Java
 #        one; the nodes keep the token cache, and the token API must report the test token
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
-#        times before the restart test; a node that syncs through the plays re-executes them
+#        times before the restart test, then by two players at once until both plays land in one block
+#        as new state, payout, new state, payout (official nodes following the rounds live charge the
+#        first payout's fee to the second player there, community nodes to the first); a node that syncs
+#        through the plays re-executes them. With JOIN_PRUNED_AT the joining node starts only once that
+#        block exists, so it syncs it; every node of this build must log EMITTED FEE RULE for the block,
+#        and contracts.py compares the players' balances on every node
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
 #        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
 #        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
@@ -1510,7 +1515,9 @@ while :; do
     echo "$line"
     echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
-    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
+    # with CONTRACT_DICE the joiner waits for the block of the two plays at once, so that it syncs it
+    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ] \
+        && { [ "$CONTRACT_DICE" != 1 ] || [ "$CONTRACTS" != 1 ] || [ -e "$WORK/dice-block" ]; }; then
         if [ "$JOIN_FETCH" = p2p ]; then
             echo "join test: n$JOIN_NODE starts on an empty database at sequence $min and fetches a snapshot from its neighbours"
         else
@@ -2126,7 +2133,8 @@ PY
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
             --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
             --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
-            --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice)) > "$WORK/contracts.log" 2>&1 &
+            --stats-file "$WORK/contracts-stats.json" \
+            $([ "$CONTRACT_DICE" = 1 ] && echo --dice --dice-block-file "$WORK/dice-block")) > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
     if [ "$TOKENS" = "1" ] && [ "$CONTRACTS" = "1" ] && [ -z "$TOKENS_PID" ] && grep -q "load transfers sent" "$WORK/fund.log" 2>/dev/null \
@@ -2707,6 +2715,54 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# CONTRACT_DICE: the block of the two plays at once is one where official nodes following the rounds
+# live charge a payout fee to another player than this build. n1 (live) and the joining node (which
+# synced it) must both log the EMITTED FEE RULE warning for it; the balances of the players were
+# compared on every node by contracts.py, the state digests above
+if [ "$CONTRACTS" = 1 ] && [ "$CONTRACT_DICE" = 1 ]; then
+    dice_block=$(cat "$WORK/dice-block" 2>/dev/null || true)
+    [[ "$dice_block" =~ ^[0-9]+$ ]] || { echo "FAIL: no block with the two Dice plays at once (${dice_block:-no file})"; exit 1; }
+    dice_fmt=$(python3 -c 'import sys; print(f"{int(sys.argv[1]):,}".replace(",", "\x27"))' "$dice_block")
+    required="1"
+    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ "${SNAPSHOT_AT:-0}" -eq 0 ] && [ "$JOIN_FETCH" != p2p ] && ! alt_node "$JOIN_NODE"; then
+        required="1 $JOIN_NODE"
+    fi
+    line="dice: block $dice_block (two plays at once), EMITTED FEE RULE logged by"
+    for i in $(seq 1 "$ALL_NODES"); do
+        alt_node "$i" && continue
+        if grep -aq "EMITTED FEE RULE: block $dice_fmt " "$WORK/n$i/node.log" 2>/dev/null; then
+            line+=" n$i"
+        elif [[ " $required " == *" $i "* ]]; then
+            echo "$line"
+            echo "FAIL: n$i did not log EMITTED FEE RULE for block $dice_block"
+            exit 1
+        fi
+    done
+    echo "$line"
+    grep -a -m1 "EMITTED FEE RULE: block $dice_fmt " "$WORK/n1/node.log" | cut -c1-600
+    # the joiner synced the block: its state digests after it are n1's (a mismatch failed above already;
+    # without a digest after the block, the players' balances compared by contracts.py are the check)
+    if [[ "$required" == *" "* ]]; then
+        python3 - "$WORK" "$JOIN_NODE" "$dice_block" <<'PY' || exit 1
+import glob, re, sys
+work, joiner, block = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+def digests(i):
+    out = {}
+    for path in glob.glob(f"{work}/n{i}/*.log"):
+        for m in re.finditer(r"STATE DIGEST #(\d+) ([0-9a-fA-F]+) wallets (\d+)", open(path, errors="replace").read()):
+            out[int(m.group(1))] = m.group(2).lower()
+    return out
+live, synced = digests(1), digests(joiner)
+common = sorted(s for s in set(live) & set(synced) if s > block)
+if not common:
+    print(f"dice: no state digest after block {block} on both n1 and n{joiner}; the players' balances are the check")
+    sys.exit(0)
+bad = [s for s in common if live[s] != synced[s]]
+print(f"dice: state digests of n1 (live) and n{joiner} (synced block {block}) at {common}: {'equal' if not bad else 'DIFFERENT at ' + str(bad)}")
+sys.exit(1 if bad else 0)
+PY
+    fi
+fi
 # the other joining nodes: each started from a snapshot (or fell back, as JOIN_EXPECT says)
 for i in $EXTRA_JOINERS; do
     log_i="$WORK/n$i/node.log"
