@@ -8,6 +8,11 @@
 #include <apihandler.hpp>
 #include <base58.h>
 #include <serializer.hpp>
+#include <config.hpp>
+#include <csnode/blockchain.hpp>
+#include <csnode/configholder.hpp>
+#include <solver/callsqueuescheduler.hpp>
+#include "memorydb.hpp"
 //#include "networkmock.hpp"
 //#include "nodemock.hpp"
 //#include "solvermock.hpp"
@@ -131,25 +136,6 @@ csdb::Address addressOf(const char* base58) {
 
 const auto sameAddress = [](const csdb::Address& a) { return a; };
 
-// the execution an emitted transaction is charged to, as on_next_block_impl decides it: the rule's
-// answer, or the contract's execution before the block when no successful new_state precedes it
-cs::SmartContractRef charged(const csdb::Pool& block, size_t i, const csdb::Address& contract, const cs::SmartContractRef& before) {
-    return cs::SmartContracts::emitting_new_state(block, i, contract, sameAddress).value_or(before);
-}
-
-// the same refund as on_remove_block computes it, walking the block backwards
-std::vector<std::pair<size_t, cs::SmartContractRef>> refunded(const csdb::Pool& block, const csdb::Address& contract, const cs::SmartContractRef& before) {
-    std::vector<std::pair<size_t, cs::SmartContractRef>> result;
-    for (auto itr_t = block.transactions().crbegin(); itr_t != block.transactions().crend(); ++itr_t) {
-        if (cs::SmartContracts::is_new_state(*itr_t) || itr_t->source() != contract) {
-            continue;
-        }
-        const size_t tr_idx = static_cast<size_t>(std::distance(itr_t, block.transactions().crend())) - 1;
-        result.emplace_back(tr_idx, charged(block, tr_idx, contract, before));
-    }
-    return result;
-}
-
 // block 25,897,074 of the mainnet, as stored: two replenishes of EYvmJjyc (2bAyU7bF 0.7 at 25,897,070.0,
 // GZNHaxfo 0.1 at 25,897,070.1) executed in one batch, each new_state followed by its payout
 struct Block25897074 {
@@ -237,79 +223,315 @@ TEST(SmartContract, EmittedTransactionCountsOnlyDeclaredSuccessfulExecutions) {
     other.add_transaction(newState(A, 48, 0, 10, '\0'));
     other.add_transaction(plain(A, player, 11));
     EXPECT_FALSE(cs::SmartContracts::emitting_new_state(other, 1, A, sameAddress).has_value());
-    EXPECT_EQ(charged(other, 1, A, refOf(46, 0)), refOf(46, 0));
+    EXPECT_EQ(cs::SmartContracts::charged_execution(std::nullopt, refOf(46, 0)), refOf(46, 0));
 }
 
-// The official node charges an emitted transaction to the contract's ref_execute. A node reading the
-// block has advanced it in block order; a live node has applied every state of the block before storing
-// it (statesCreated -> on_update) and holds the latest. on_next_block_impl reads the block instead, and
-// its fall-back takes the execution on_update saved before applying the states, not ref_execute: the
-// two paths charge the same executions, the ones a reading node holds.
-TEST(SmartContract, EmittedTransactionChargeIsTheSameLiveAndReplaying) {
-    Block25897074 base;
-    const auto& dice = base.dice;
-    csdb::Pool block(csdb::PoolHash{}, 25897074);
-    block.add_transaction(plain(dice, base.player, 7));   // 0: a payout no new_state precedes
-    for (const auto& t : base.block.transactions()) {
-        block.add_transaction(t);
-    }
-    const auto before = refOf(25896000, 0);   // the contract's execution before the block
+// H1: among the successful new_states before the payout, the highest RefStart, not the nearest: a node
+// applying the block in order ignores a state older than the contract's execution (update_contract_state,
+// "ignore outdated update", also in official 4a95aaaf), so S(.1), S(.0), E leaves the contract at .1. In
+// an ordered block (every real one) the highest is the nearest. Never below the execution before the block.
+TEST(SmartContract, EmittedTransactionIsChargedToTheHighestPrecedingExecution) {
+    const auto A = addressOf(1), player = addressOf(3);
+    csdb::Pool block(csdb::PoolHash{}, 50);
+    block.add_transaction(newState(A, 45, 1, 1));    // 0: S(45.1)
+    block.add_transaction(newState(A, 45, 0, 2));    // 1: S(45.0), outdated after 45.1
+    block.add_transaction(plain(A, player, 3));      // 2: E
+    const auto emitting = cs::SmartContracts::emitting_new_state(block, 2, A, sameAddress);
+    ASSERT_TRUE(emitting.has_value());
+    EXPECT_EQ(*emitting, refOf(45, 1));
+    EXPECT_EQ(cs::SmartContracts::charged_execution(emitting, refOf(40, 0)), refOf(45, 1));
 
-    // on_next_block_impl: the rule, or the saved execution, or ref_execute when nothing was saved
-    const auto node_charge = [&](size_t i, const cs::SmartContractRef& ref_execute, const std::optional<cs::SmartContractRef>& saved) {
-        return cs::SmartContracts::emitting_new_state(block, i, dice, sameAddress).value_or(saved.value_or(ref_execute));
+    // the execution before the block is the floor: an outdated state does not move the charge below it
+    EXPECT_EQ(cs::SmartContracts::charged_execution(emitting, refOf(46, 0)), refOf(46, 0));
+    EXPECT_EQ(cs::SmartContracts::charged_execution(emitting, refOf(45, 1)), refOf(45, 1));
+    // an unknown execution before the block (invalid ref) is no floor
+    EXPECT_EQ(cs::SmartContracts::charged_execution(emitting, cs::SmartContractRef{}), refOf(45, 1));
+}
+
+namespace {
+// a call of `caller` to `contract` (a start transaction)
+csdb::Transaction callOf(csdb::Address caller, csdb::Address contract, int64_t id) {
+    auto t = plain(caller, contract, id);
+    api::SmartContractInvocation invocation;
+    invocation.__set_method("play");
+    t.add_user_field(cs::trx_uf::start::Methods, cs::Serializer::serialize(invocation));
+    return t;
+}
+
+// a payout of `contract` to `to`, with a counted fee
+csdb::Transaction payout(csdb::Address contract, csdb::Address to, int64_t id) {
+    return csdb::Transaction(id, contract, to, csdb::Currency{}, csdb::Amount(1), csdb::AmountCommission(0.1),
+                             csdb::AmountCommission(0.008740234375), cs::Signature{});
+}
+
+// SmartContracts on a BlockChain whose storage is an in-memory database. The last block holds the
+// contract's calls (block 1000: .0 by `before` the contract's execution before the payout block, .1 by
+// `first`, .2 by `second`), so the starters load from it. The payout block is 1001, the one a node builds
+// next (on_update keys the executions it saves with bc.getLastSeq() + 1). on_next_block_impl, on_update and
+// on_remove_block run as on a node; the charges and refunds are read from the signals the wallet cache
+// takes, as the initiators they name.
+class EmittedFee : public ::testing::Test {
+protected:
+    const csdb::Address dice = addressOf("EYvmJjycxhgxXjueZPzUAGvcZaTctWE8dMKhgY7A1gUH");
+    const csdb::Address prior = addressOf("89VMiM8xtPaVkU2arxdtB5yiSfdZnX6BSiHjCNECdh9G");
+    const csdb::Address first = addressOf("2bAyU7bFW6C2XevacDoKaoHVUucwMLk6DkM94kXnUMfa");
+    const csdb::Address second = addressOf("GZNHaxfoZUbNhcf8Hsa6aAaNJcAg8y7Tc1EgNHeEWCi5");
+    const csdb::Address player = addressOf(7);
+    static constexpr cs::Sequence kCalls = 1000;
+    static constexpr cs::Sequence kPayouts = 1001;
+
+    BlockChain chain{csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001"),
+                     csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002")};
+    CallsQueueScheduler scheduler;
+    std::shared_ptr<MemoryDb> db = std::make_shared<MemoryDb>();
+    csdb::Pool calls{csdb::PoolHash{}, kCalls};
+
+    struct Peer {
+        std::unique_ptr<cs::SmartContracts> sc;
+        std::vector<csdb::Address> charged;    // the initiator charged, payout by payout
+        std::vector<csdb::Address> refunded;   // the initiator refunded, in on_remove_block's order
     };
-    const cs::SmartContractRef live_ref_execute = refOf(25897070, 1);   // after on_update
-    cs::SmartContractRef replay_ref_execute = before;
-    size_t payouts = 0;
-    for (size_t i = 0; i < block.transactions().size(); ++i) {
-        const auto& t = block.transactions()[i];
-        if (cs::SmartContracts::is_new_state(t)) {
-            if (cs::SmartContracts::is_state_updated(t)) {
-                replay_ref_execute = cs::SmartContractRef(t.user_field(cs::trx_uf::new_state::RefStart));
-            }
-            continue;
-        }
-        if (t.source() != dice) {
-            continue;
-        }
-        ++payouts;
-        const auto replaying = node_charge(i, replay_ref_execute, std::nullopt);
-        const auto live = node_charge(i, live_ref_execute, before);
-        EXPECT_EQ(replaying, live) << i;
-        EXPECT_EQ(replaying, replay_ref_execute) << i;   // what the official rule charges when reading
-        if (i == 4) {
-            // the official ambiguity: reading charges 25,897,070.0, live 25,897,070.1
-            EXPECT_FALSE(replay_ref_execute == live_ref_execute);
-        }
+
+    void SetUp() override {
+        cs::ConfigHolder::instance().setConfig(Config{});
+        csdb::Storage::OpenOptions options;
+        options.db = db;
+        ASSERT_TRUE(chain.test_storage().open(options));
+        calls.add_transaction(callOf(prior, dice, 1));
+        calls.add_transaction(callOf(first, dice, 2));
+        calls.add_transaction(callOf(second, dice, 3));
+        ASSERT_TRUE(calls.compose());
+        chain.test_setLastBlock(calls);
     }
-    EXPECT_EQ(payouts, 3u);
+
+    std::unique_ptr<Peer> node() {
+        auto n = std::make_unique<Peer>();
+        n->sc = std::make_unique<cs::SmartContracts>(chain, scheduler);
+        // the contract stands at its execution before the payout block, kCalls.0
+        n->sc->test_addContract(dice, refOf(kCalls, 0), calls.transaction(0), "state 0");
+        Peer* p = n.get();
+        cs::Connector::connect(&n->sc->signal_emitted_accepted,
+                               [p](const csdb::Transaction&, const csdb::Transaction& starter) { p->charged.push_back(starter.source()); });
+        cs::Connector::connect(&n->sc->rollback_emitted_accepted,
+                               [p](const csdb::Transaction&, const csdb::Transaction& starter) { p->refunded.push_back(starter.source()); });
+        return n;
+    }
+
+    // the new_states of a block, as the conveyer passes them to statesCreated
+    static std::vector<csdb::Transaction> statesOf(const csdb::Pool& block) {
+        std::vector<csdb::Transaction> states;
+        for (const auto& t : block.transactions()) {
+            if (cs::SmartContracts::is_new_state(t)) {
+                states.push_back(t);
+            }
+        }
+        return states;
+    }
+
+    // a node that follows the rounds live: statesCreated -> on_update when the round's block is formed,
+    // then the block is stored
+    void live(Peer& n, const csdb::Pool& block) {
+        n.sc->on_update(statesOf(block));
+        n.sc->test_nextBlock(block, false);
+    }
+
+    // a node that reads the block (sync, start-up)
+    void reading(Peer& n, const csdb::Pool& block) {
+        n.sc->test_nextBlock(block, true);
+    }
+
+    csdb::Transaction state(cs::Sequence index, int64_t id) {
+        return newStateWithValue(dice, kCalls, index, id, "state " + std::to_string(index));
+    }
+};
+}  // namespace
+
+// The layout of block 25,897,074 (a new_state, its payout, the next new_state, its payout) with a payout
+// first that no new_state precedes. A node that follows the rounds live has applied both states before it stores
+// it (on_update: ref_execute is at .2), a node that reads it applies them in order: both charge the
+// sequential result, the first payout to the execution before the block, then 2bAyU7bF, then GZNHaxfo.
+TEST_F(EmittedFee, LiveAndReadingNodesChargeTheSameInitiators) {
+    csdb::Pool block(csdb::PoolHash{}, kPayouts);
+    block.add_transaction(payout(dice, player, 10));   // 0: no new_state before it
+    block.add_transaction(state(1, 11));               // 1: S(.1) by 2bAyU7bF
+    block.add_transaction(payout(dice, first, 12));    // 2
+    block.add_transaction(state(2, 13));               // 3: S(.2) by GZNHaxfo
+    block.add_transaction(payout(dice, second, 14));   // 4
+    ASSERT_TRUE(block.compose());   // as stored: the transactions get their ids
+
+    auto building = node();
+    building->sc->on_update(statesOf(block));
+    EXPECT_EQ(building->sc->test_refExecute(dice), refOf(kCalls, 2));   // the states are applied ahead
+    building->sc->test_nextBlock(block, false);
+    auto reader = node();
+    reading(*reader, block);
+
+    const std::vector<csdb::Address> sequential{prior, first, second};
+    EXPECT_EQ(building->charged, sequential);
+    EXPECT_EQ(reader->charged, sequential);
+    EXPECT_EQ(reader->sc->test_refExecute(dice), refOf(kCalls, 2));
+    // the saved executions are dropped after the block; the first payout's charge is recorded
+    EXPECT_EQ(building->sc->test_executionsBeforeBlock(), 0u);
+    EXPECT_EQ(building->sc->test_fallbackCharges(), 1u);
+    EXPECT_EQ(reader->sc->test_fallbackCharges(), 1u);
 }
 
-// A rollback refunds each emitted transaction to the execution it was charged to: on_remove_block
-// walks the block backwards and applies the same rule at the same position.
-TEST(SmartContract, RollbackRefundsEmittedTransactionsToTheChargedExecution) {
-    Block25897074 base;
-    csdb::Pool block(csdb::PoolHash{}, 25897074);
-    block.add_transaction(newState(base.dice, 25897069, 0, 7, '\0'));   // 0: a failed execution
-    block.add_transaction(plain(base.dice, base.player, 8));             // 1: a payout no successful new_state precedes
-    for (const auto& t : base.block.transactions()) {
-        block.add_transaction(t);
+// H1 on the node: S(.2), S(.1), E. The reading node ignores the outdated .1 and holds .2; the live node
+// applied both; both charge GZNHaxfo (.2), not 2bAyU7bF (the nearest).
+TEST_F(EmittedFee, AnOutdatedStateDoesNotMoveTheCharge) {
+    csdb::Pool block(csdb::PoolHash{}, kPayouts);
+    block.add_transaction(state(2, 11));
+    block.add_transaction(state(1, 12));
+    block.add_transaction(payout(dice, second, 13));
+    ASSERT_TRUE(block.compose());
+    auto building = node();
+    live(*building, block);
+    auto reader = node();
+    reading(*reader, block);
+    EXPECT_EQ(building->charged, std::vector<csdb::Address>{second});
+    EXPECT_EQ(reader->charged, std::vector<csdb::Address>{second});
+    EXPECT_EQ(reader->sc->test_refExecute(dice), refOf(kCalls, 2));
+}
+
+// C3: on_update keeps the executions for the block it builds (bc.getLastSeq() + 1); a block of another
+// sequence does not use them, and on_remove_block drops them.
+TEST_F(EmittedFee, SavedExecutionsServeOnlyTheBlockTheyWereSavedFor) {
+    csdb::Pool built(csdb::PoolHash{}, kPayouts);
+    built.add_transaction(payout(dice, player, 10));
+    built.add_transaction(state(1, 11));
+    built.add_transaction(payout(dice, first, 12));
+    ASSERT_TRUE(built.compose());
+
+    // the saved execution .0 is used for block 1001: the first payout goes to the prior caller
+    auto n = node();
+    live(*n, built);
+    EXPECT_EQ(n->charged, (std::vector<csdb::Address>{prior, first}));
+
+    // saved for block 1001, then a block 1002 arrives: the saved .0 is not used, the contract stands at .1
+    auto other = node();
+    other->sc->on_update(statesOf(built));
+    EXPECT_EQ(other->sc->test_executionsBeforeBlock(), 1u);
+    csdb::Pool next(csdb::PoolHash{}, kPayouts + 1);
+    next.add_transaction(payout(dice, player, 20));
+    ASSERT_TRUE(next.compose());
+    other->sc->test_nextBlock(next, false);
+    EXPECT_EQ(other->charged, std::vector<csdb::Address>{first});
+    EXPECT_EQ(other->sc->test_executionsBeforeBlock(), 0u);
+
+    // a block removed after on_update drops the saved executions
+    auto removing = node();
+    removing->sc->on_update(statesOf(built));
+    EXPECT_EQ(removing->sc->test_executionsBeforeBlock(), 1u);
+    csdb::Pool removed(csdb::PoolHash{}, kCalls);
+    removed.add_transaction(payout(dice, player, 30));
+    ASSERT_TRUE(removed.compose());
+    removing->sc->on_remove_block(removed);
+    EXPECT_EQ(removing->sc->test_executionsBeforeBlock(), 0u);
+
+    // clear() drops them and the recorded charges (C2)
+    auto cleared = node();
+    live(*cleared, built);
+    EXPECT_EQ(cleared->sc->test_fallbackCharges(), 1u);
+    cleared->sc->on_update(statesOf(built));
+    cleared->sc->clear();
+    EXPECT_EQ(cleared->sc->test_fallbackCharges(), 0u);
+    EXPECT_EQ(cleared->sc->test_executionsBeforeBlock(), 0u);
+}
+
+// A rollback refunds each payout to the initiator it was charged to: on_remove_block walks the block
+// backwards; the first payout's charge (no new_state before it) comes from the record on_next_block_impl
+// made, since ref_execute has moved on to .2 by then.
+TEST_F(EmittedFee, RollbackRefundsTheChargedInitiators) {
+    csdb::Pool block(csdb::PoolHash{}, kPayouts);
+    block.add_transaction(payout(dice, player, 10));
+    block.add_transaction(state(1, 11));
+    block.add_transaction(payout(dice, first, 12));
+    block.add_transaction(state(2, 13));
+    block.add_transaction(payout(dice, second, 14));
+    ASSERT_TRUE(block.compose());
+    for (bool is_live : {true, false}) {
+        auto n = node();
+        if (is_live) {
+            live(*n, block);
+        }
+        else {
+            reading(*n, block);
+        }
+        ASSERT_EQ(n->charged, (std::vector<csdb::Address>{prior, first, second})) << is_live;
+        n->sc->on_remove_block(block);
+        EXPECT_EQ(n->refunded, (std::vector<csdb::Address>{second, first, prior})) << is_live;
+        EXPECT_EQ(n->sc->test_fallbackCharges(), 0u) << is_live;
     }
-    const auto before = refOf(25896000, 0);
-    const auto refunds = refunded(block, base.dice, before);
-    ASSERT_EQ(refunds.size(), 3u);
-    for (const auto& [i, ref] : refunds) {
-        EXPECT_EQ(ref, charged(block, i, base.dice, before)) << i;
+}
+
+// The runtime warning: a payout that official nodes following the rounds live charge to another wallet
+// (the contract's latest execution in the block) is detected, one entry per payout, the fee included;
+// nothing is reported when the latest execution has the same initiator or the block has one execution.
+TEST_F(EmittedFee, PayoutsChargedDifferentlyByLiveOfficialNodesAreReported) {
+    csdb::Pool block(csdb::PoolHash{}, kPayouts);
+    block.add_transaction(state(1, 11));               // 0: S(.1) by 2bAyU7bF
+    block.add_transaction(payout(dice, first, 12));    // 1: live official nodes charge GZNHaxfo
+    block.add_transaction(state(2, 13));               // 2: S(.2) by GZNHaxfo
+    block.add_transaction(payout(dice, second, 14));   // 3: the same on both
+    ASSERT_TRUE(block.compose());
+    for (bool is_live : {true, false}) {
+        auto n = node();
+        if (is_live) {
+            live(*n, block);
+        }
+        else {
+            reading(*n, block);
+        }
+        EXPECT_EQ(n->charged, (std::vector<csdb::Address>{first, second})) << is_live;
+        const auto& found = n->sc->test_emittedFeeDivergences();
+        ASSERT_EQ(found.size(), 1u) << is_live;
+        EXPECT_EQ(found[0].tr_idx, 1u);
+        EXPECT_EQ(found[0].contract, dice);
+        EXPECT_EQ(found[0].charged, refOf(kCalls, 1));
+        EXPECT_EQ(found[0].live, refOf(kCalls, 2));
+        EXPECT_EQ(found[0].payer, first);
+        EXPECT_EQ(found[0].live_payer, second);
+        EXPECT_GT(found[0].fee.to_double(), 0.008);
+
+        const std::string line = cs::SmartContracts::emitted_fee_warning(kPayouts, found);
+        EXPECT_NE(line.find("EMITTED FEE RULE: block 1'001"), std::string::npos) << line;
+        EXPECT_NE(line.find("EYvmJjycxhgxXjueZPzUAGvcZaTctWE8dMKhgY7A1gUH"), std::string::npos) << line;
+        EXPECT_NE(line.find("charged to 2bAyU7bFW6C2XevacDoKaoHVUucwMLk6DkM94kXnUMfa"), std::string::npos) << line;
+        EXPECT_NE(line.find("live official nodes charge GZNHaxfoZUbNhcf8Hsa6aAaNJcAg8y7Tc1EgNHeEWCi5"), std::string::npos) << line;
+        EXPECT_NE(line.find("2bAyU7bFW6C2XevacDoKaoHVUucwMLk6DkM94kXnUMfa -0.00"), std::string::npos) << line;
+        EXPECT_NE(line.find("GZNHaxfoZUbNhcf8Hsa6aAaNJcAg8y7Tc1EgNHeEWCi5 +0.00"), std::string::npos) << line;
     }
-    // backwards: GZNHaxfo's payout to 25,897,070.1, 2bAyU7bF's to 25,897,070.0, the first to the
-    // execution before the block
-    EXPECT_EQ(refunds[0].first, 7u);
-    EXPECT_EQ(refunds[0].second, refOf(25897070, 1));
-    EXPECT_EQ(refunds[1].first, 5u);
-    EXPECT_EQ(refunds[1].second, refOf(25897070, 0));
-    EXPECT_EQ(refunds[2].first, 1u);
-    EXPECT_EQ(refunds[2].second, before);
+    EXPECT_TRUE(cs::SmartContracts::emitted_fee_warning(kPayouts, {}).empty());
+
+    // one execution in the block: nothing to report
+    csdb::Pool single(csdb::PoolHash{}, kPayouts);
+    single.add_transaction(state(1, 11));
+    single.add_transaction(payout(dice, first, 12));
+    ASSERT_TRUE(single.compose());
+    auto n = node();
+    reading(*n, single);
+    EXPECT_TRUE(n->sc->test_emittedFeeDivergences().empty());
+}
+
+// The same caller started both executions: the rules name different executions but the same wallet pays,
+// so no balance differs and nothing is reported.
+TEST_F(EmittedFee, TheSameInitiatorIsNotReported) {
+    calls = csdb::Pool(csdb::PoolHash{}, kCalls);
+    calls.add_transaction(callOf(prior, dice, 1));
+    calls.add_transaction(callOf(first, dice, 2));
+    calls.add_transaction(callOf(first, dice, 3));
+    ASSERT_TRUE(calls.compose());
+    chain.test_setLastBlock(calls);
+    csdb::Pool block(csdb::PoolHash{}, kPayouts);
+    block.add_transaction(state(1, 11));
+    block.add_transaction(payout(dice, first, 12));
+    block.add_transaction(state(2, 13));
+    block.add_transaction(payout(dice, first, 14));
+    ASSERT_TRUE(block.compose());
+    auto n = node();
+    reading(*n, block);
+    EXPECT_EQ(n->charged, (std::vector<csdb::Address>{first, first}));
+    EXPECT_TRUE(n->sc->test_emittedFeeDivergences().empty());
 }
 
 // step 2 of the contract state sync plan: the declared call and hash survive a checkpoint, an item of

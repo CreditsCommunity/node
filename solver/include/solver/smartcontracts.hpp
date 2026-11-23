@@ -355,12 +355,35 @@ public:
     static bool is_new_state(const csdb::Transaction&);
 
     // the execution an emitted transaction (block position tr_idx) of the contract is charged to, from
-    // the block alone: the RefStart of the contract's nearest new_state before it that the block declares
-    // successful (is_state_updated), whether or not this node reproduced that state. This is the
-    // sequential rule, what a node applying the block in order holds; nullopt when no such new_state
-    // precedes it, and the caller falls back to the contract's execution before the block.
+    // the block alone: the highest RefStart among the contract's new_states before it that the block
+    // declares successful (is_state_updated), whether or not this node reproduced those states. This is
+    // the sequential rule, what a node applying the block in order holds: update_contract_state ignores
+    // a state older than the contract's execution, so the highest one wins, which is the nearest one in
+    // an ordered block. nullopt when no such new_state precedes it. tr_idx = the block's size gives the
+    // contract's latest execution in the block, which official nodes following the rounds live charge
+    // every payout of the block to (statesCreated -> on_update applies all states first).
     static std::optional<SmartContractRef> emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                               const std::function<csdb::Address(const csdb::Address&)>& absolute);
+
+    // the execution a payout is charged to: the new_state emitting_new_state found, never below the
+    // contract's execution before the block (an outdated state does not move the official ref_execute),
+    // and that execution when there is none
+    static SmartContractRef charged_execution(const std::optional<SmartContractRef>& emitting, const SmartContractRef& before_block);
+
+    // a payout of a block for which official nodes following the rounds live charge another wallet (the
+    // contract's latest execution in the block) than this node (the sequential rule); one warning per
+    // block names them (EMITTED FEE RULE)
+    struct EmittedFeeDivergence {
+        size_t tr_idx = 0;                  // position of the payout in the block
+        csdb::Address contract;             // absolute address of the contract
+        SmartContractRef charged;           // the execution this node charges (sequential rule)
+        SmartContractRef live;              // the one live official nodes charge (latest rule)
+        csdb::Address payer;                // its initiator, who pays the fee here
+        csdb::Address live_payer;           // the initiator who pays it on live official nodes
+        csdb::Amount fee;                   // the payout's counted fee
+    };
+    // the warning line for a block's divergences (empty when there are none)
+    static std::string emitted_fee_warning(cs::Sequence sequence, const std::vector<EmittedFeeDivergence>& divergences);
 
     // public for the tests of the state bookkeeping (StateItem::to_bytes/from_bytes, is_stale)
     enum class PayableStatus : int
@@ -669,13 +692,21 @@ private:
     bool was_reading_db_ = true;
     // get_actual_state skipped a re-execution because of sync_contract_execution=off
     bool sync_execution_skipped_ = false;
-    // the contract's execution before the block being built, saved by on_update (statesCreated) before it
-    // applies the block's states ahead of storing it; on_next_block_impl charges an emitted transaction
-    // without a preceding new_state in the block to it, as a node reading the block does, then clears it
+    // each contract's execution before the block execution_before_block_seq_, saved before that block's
+    // states are applied: by on_update (statesCreated) on a node that follows the rounds live, which
+    // applies them when the round's block is formed, ahead of storing it, or by on_next_block_impl at
+    // the contract's first new_state. A payout is never charged below it (charged_execution).
+    // on_next_block_impl uses it only for the block of that sequence and clears it after the block;
+    // on_remove_block and clear() clear it too
     std::unordered_map<csdb::Address, SmartContractRef> execution_before_block_;
-    // the execution each emitted transaction charged by the fall-back was charged to (position in its
-    // block), so that on_remove_block refunds the same one: ref_execute has moved on by then
+    cs::Sequence execution_before_block_seq_ = kWrongSequence;
+    void reset_execution_before_block();
+    // the execution each emitted transaction was charged to when that is not the block's new_state
+    // emitting_new_state finds (none before it, or an outdated one), by position in its block, so that
+    // on_remove_block refunds the same one: ref_execute has moved on by then
     std::map<std::pair<cs::Sequence, size_t>, SmartContractRef> fallback_charges_;
+    // the divergences of the last block on_next_block_impl processed, for the tests
+    std::vector<EmittedFeeDivergence> last_emitted_fee_divergences_;
     cs::RoundNumber last_state_summary_ = 0;
     void on_live_block(cs::RoundNumber round);
 
@@ -1028,6 +1059,8 @@ private:
     void on_next_block_impl(const csdb::Pool& block, bool reading_db, bool* should_stop);
     // records the execution the fall-back charged an emitted transaction to, for on_remove_block
     void remember_fallback_charge(cs::Sequence seq, size_t tr_idx, const SmartContractRef& ref);
+    // forgets the records of block seq and above (the block is removed, or stored again)
+    void forget_fallback_charges_from(cs::Sequence seq);
     void checkExeQueue(const csdb::Pool& block, bool reading_db, bool* should_stop);
 
     // request correct state in network
@@ -1036,6 +1069,30 @@ private:
     Reject::Reason prevalidate_inner(const cs::TransactionsPacket& pack);
 
     friend class SmartContracts_Serializer;
+
+#ifdef TESTING
+public:
+    // the tests drive on_update, on_next_block_impl and on_remove_block on a contract they register
+    void test_addContract(const csdb::Address& abs_addr, const SmartContractRef& ref_execute, const csdb::Transaction& execute,
+                          const std::string& state) {
+        StateItem& item = known_contracts[abs_addr];
+        item.ref_execute = ref_execute;
+        item.execute = execute;
+        item.state = state;
+    }
+    SmartContractRef test_refExecute(const csdb::Address& abs_addr) const {
+        const auto it = known_contracts.find(abs_addr);
+        return it != known_contracts.end() ? it->second.ref_execute : SmartContractRef{};
+    }
+    void test_nextBlock(const csdb::Pool& block, bool reading_db) {
+        cs::Lock lock(public_access_lock);
+        bool should_stop = false;
+        on_next_block_impl(block, reading_db, &should_stop);
+    }
+    size_t test_fallbackCharges() const { return fallback_charges_.size(); }
+    size_t test_executionsBeforeBlock() const { return execution_before_block_.size(); }
+    const std::vector<EmittedFeeDivergence>& test_emittedFeeDivergences() const { return last_emitted_fee_divergences_; }
+#endif
 };
 
 }  // namespace cs
