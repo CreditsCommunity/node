@@ -49,6 +49,11 @@
 #        one; the nodes keep the token cache, and the token API must report the test token
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
 #        times before the restart test; a node that syncs through the plays re-executes them
+#        CONTRACT_PAYOUT_PAIR=1 (with CONTRACTS): also a Payout contract that pays 1 CS back to its caller;
+#        two players call it at the same moment until both executions land in one block, each followed
+#        by its payout (contracts.py --payout-pair, the block in payout-pair.json). The joining node
+#        (JOIN_PRUNED_AT) starts only after that block, so it syncs it; at the end the players'
+#        balances on every node are reported against the joiner's (who pays the payout fees)
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
 #        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
 #        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
@@ -323,6 +328,7 @@ JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
 CONTRACT_DICE=${CONTRACT_DICE:-0}
+CONTRACT_PAYOUT_PAIR=${CONTRACT_PAYOUT_PAIR:-0}
 TOKENS=${TOKENS:-0}
 TOKENS_STRICT_API=${TOKENS_STRICT_API:-0}
 TOKENS_VIA=${TOKENS_VIA:-1}
@@ -1510,7 +1516,8 @@ while :; do
     echo "$line"
     echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
-    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
+    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ] \
+        && { [ "$CONTRACT_PAYOUT_PAIR" != 1 ] || [ -e "$WORK/payout-pair.json" ]; }; then
         if [ "$JOIN_FETCH" = p2p ]; then
             echo "join test: n$JOIN_NODE starts on an empty database at sequence $min and fetches a snapshot from its neighbours"
         else
@@ -2126,7 +2133,8 @@ PY
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
             --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
             --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
-            --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice)) > "$WORK/contracts.log" 2>&1 &
+            --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice) \
+            $([ "$CONTRACT_PAYOUT_PAIR" = 1 ] && echo --payout-pair "$WORK/payout-pair.json")) > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
     if [ "$TOKENS" = "1" ] && [ "$CONTRACTS" = "1" ] && [ -z "$TOKENS_PID" ] && grep -q "load transfers sent" "$WORK/fund.log" 2>/dev/null \

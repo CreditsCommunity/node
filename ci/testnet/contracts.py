@@ -58,6 +58,7 @@ from fund import Account, Client, api, balance, encode_max_fee, general, pack_in
 CURRENCY_CS = 1
 TT_DEPLOY = 1   # api.TransactionType: contract deployment
 TT_EXECUTE = 2  # api.TransactionType: contract execution
+TT_STATE = 3    # api.TransactionType: contract new state
 SMART_MAX_FEE = encode_max_fee(10.0)
 COUNTER = """import com.credits.scapi.v0.SmartContract;
 
@@ -146,6 +147,37 @@ public class Dice extends SmartContract {
         sendTransaction(contractAddress, initiator, 10.0, new byte[0]);
         plays += 1;
         lastPlayer = initiator;
+        return plays;
+    }
+
+    public int plays() {
+        return plays;
+    }
+
+    @Override
+    public String payable(BigDecimal amount, byte[] userData) {
+        return "ok";
+    }
+}
+"""
+
+# a contract whose play() pays 1 CS back to its caller and does not read its own balance, so that
+# every node, live or syncing, applies the same states and differs only in who pays the payout fee
+# (the payout-pair experiment below)
+PAYOUT = """import com.credits.scapi.v3.SmartContract;
+
+import java.math.BigDecimal;
+
+public class Payout extends SmartContract {
+    private int plays;
+
+    public Payout() {
+        super();
+    }
+
+    public int play() {
+        sendTransaction(contractAddress, initiator, 1.0, new byte[0]);
+        plays += 1;
         return plays;
     }
 
@@ -326,6 +358,8 @@ def write_sources(directory):
         f.write(LEDGER)
     with open(os.path.join(directory, "Dice.java"), "w") as f:
         f.write(DICE)
+    with open(os.path.join(directory, "Payout.java"), "w") as f:
+        f.write(PAYOUT)
 
 
 def invocation(method="", used=(), deploy=None):
@@ -468,6 +502,115 @@ def dice_plays(client_for, master, dice):
                                 range(2)))
     print(f"Dice: two plays at once sent: {results}", flush=True)
     return failures
+
+
+def amount_units(a):
+    """general.Amount in 1e-18 CS, exact (a negative value has a negative integral and a positive fraction)."""
+    return a.integral * 10**18 + a.fraction
+
+
+def units_cs(u):
+    sign = "-" if u < 0 else ""
+    u = abs(u)
+    return f"{sign}{u // 10**18}.{u % 10**18:018d}"
+
+
+def payout_pair(client_for, master, payout, attempts=12):
+    """Two players call Payout.play at the same moment, again until both new_states land in one
+    block, each followed by its payout. Returns a dict that describes that block (or the failure)."""
+    funder = Client(9090, 300)
+    players = [Account(hashlib.sha256(master.pk + b"payout player %d" % i).digest()) for i in (1, 2)]
+    names = [base58.b58encode(p.pk).decode() for p in players]
+    master.next_inner_id = None
+    for p, name in zip(players, names):
+        ok, message = send(funder, master, p.pk, 100)
+        print(f"Payout: fund player {name}: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+    ok, message = send(funder, master, payout, 50)
+    print(f"Payout: 50 CS to the contract: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline and (balance(funder, payout) < 50 or any(balance(funder, p.pk) < 100 for p in players)):
+        time.sleep(5)
+    # the replenish runs payable(): a new_state of the contract by the master, kept out of the pair's block
+    time.sleep(20)
+    print(f"Payout: contract balance {balance(funder, payout)}", flush=True)
+    clients = [client_for(1), client_for(1)]
+    result = {"contract": base58.b58encode(payout).decode(), "players": names, "attempts": []}
+    for attempt in range(1, attempts + 1):
+        barrier = threading.Barrier(2)
+
+        def play(i):
+            next_inner_id(clients[i], players[i])
+            t = smart_transaction(players[i], payout, invocation(method="play"), TT_EXECUTE)
+            barrier.wait(timeout=120)
+            return clients[i].TransactionFlow(t)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            got = list(pool.map(play, range(2)))
+        info = []
+        for i, r in enumerate(got):
+            sid = (r.stateId.poolSeq, r.stateId.index) if r.stateId else None
+            info.append({"player": i + 1, "status": r.status.code, "message": r.status.message,
+                         "call": (r.id.poolSeq, r.id.index) if r.id else None, "state": sid,
+                         "returned": r.smart_contract_result.v_int if r.smart_contract_result else None})
+        print(f"Payout: attempt {attempt}: {info}", flush=True)
+        result["attempts"].append(info)
+        states = [x["state"] for x in info]
+        if all(x["status"] == 0 for x in info) and all(states) and states[0][0] == states[1][0]:
+            seq = states[0][0]
+            time.sleep(5)
+            txs = client_for(1).PoolTransactionsGet(seq, 0, 1000).transactions
+            layout = []
+            for st in txs:
+                t = st.trxn
+                src, dst = base58.b58encode(t.source).decode(), base58.b58encode(t.target).decode()
+                if payout not in (t.source, t.target):
+                    continue
+                entry = {"index": st.id.index, "type": int(t.type), "source": src, "target": dst,
+                         "amount": units_cs(amount_units(t.amount))}
+                if t.smartInfo and t.smartInfo.v_smartState:
+                    ss = t.smartInfo.v_smartState
+                    entry["success"] = ss.success
+                    entry["start"] = (ss.startTransaction.poolSeq, ss.startTransaction.index)
+                layout.append(entry)
+            print(f"Payout: block {seq}, the contract's transactions in order:", flush=True)
+            for e in layout:
+                print(f"  {e}", flush=True)
+            n_states = sum(1 for e in layout if e["type"] == TT_STATE and e.get("success"))
+            n_payouts = sum(1 for e in layout if e["type"] != TT_STATE and e["source"] == result["contract"])
+            if n_states == 2 and n_payouts == 2:
+                result.update(block=seq, layout=layout)
+                print(f"Payout: PAIR in block {seq}: 2 successful new_states and 2 payouts", flush=True)
+                return result
+            print(f"Payout: block {seq} holds {n_states} successful states and {n_payouts} payouts, trying again", flush=True)
+        time.sleep(3)
+    result["block"] = None
+    print("Payout: no block with both plays after %d attempts" % attempts, flush=True)
+    return result
+
+
+def payout_balances(client_for, nodes, pair):
+    """The players' and the contract's balances on every node, exact, with the difference from the last node."""
+    keys = [("player1", pair["players"][0]), ("player2", pair["players"][1]), ("contract", pair["contract"])]
+    table = {}
+    for i in range(1, nodes + 1):
+        row = {}
+        for label, key in keys:
+            try:
+                r = client_for(i).WalletBalanceGet(base58.b58decode(key))
+                row[label] = amount_units(r.balance) if r.status.code == 0 else None
+            except Exception as e:
+                row[label] = None
+        table[i] = row
+    ref = table[nodes]
+    print(f"Payout balances per node (block {pair.get('block')}; delta = node - n{nodes}, the joiner):", flush=True)
+    for i, row in table.items():
+        cells = []
+        for label, _ in keys:
+            v, r = row[label], ref[label]
+            d = units_cs(v - r) if v is not None and r is not None else "?"
+            cells.append(f"{label}={units_cs(v) if v is not None else 'error'} (delta {d})")
+        print(f"  n{i}: " + "  ".join(cells), flush=True)
+    return {str(i): {k: (units_cs(v) if v is not None else None) for k, v in row.items()} for i, row in table.items()}
 
 
 def call(client, master, contract, method, label, expected=None):
@@ -628,6 +771,9 @@ def main():
     parser.add_argument("--skip-read-nodes", default="")
     parser.add_argument("--dice", action="store_true",
                         help="deploy Dice and play it before the restart (a contract whose re-execution is not reproducible)")
+    parser.add_argument("--payout-pair", default="",
+                        help="deploy Payout, play it twice at once until both executions land in one block, "
+                             "write that block to this JSON file, and report the players' balances on every node at the end")
     args = parser.parse_args()
     check_nodes = args.check_nodes or args.nodes
     skipped = {int(n) for n in args.skip_read_nodes.split() if n.strip()}
@@ -697,6 +843,13 @@ def main():
     if dice:
         failures += dice_plays(client_for, master, dice)
         failures += read_all(dice, "plays", 5, "Dice.plays")
+    pair = None
+    if args.payout_pair:
+        payout = deploy(client_for(1), master, "Payout", PAYOUT)
+        pair = payout_pair(client_for, master, payout)
+        with open(args.payout_pair + ".tmp", "w") as f:
+            json.dump(pair, f, indent=1)
+        os.replace(args.payout_pair + ".tmp", args.payout_pair)
     failures += read_all(counter, "get", calls, "Counter.get before restart")
     failures += read_all(ledger, "entries", calls, "Ledger.entries before restart")
 
@@ -761,7 +914,12 @@ def main():
             time.sleep(5)
         print(f"final file {'found' if os.path.exists(args.final_file) else 'MISSING'}", flush=True)
     time.sleep(60)  # let the last state reach every node
-    for name, contract in (("Counter", counter), ("Ledger", ledger), ("TipJar", tipjar)) + callers + ((("Dice", dice),) if dice else ()):
+    if pair is not None:
+        pair["balances"] = payout_balances(client_for, args.check_nodes or args.nodes, pair)
+        with open(args.payout_pair, "w") as f:
+            json.dump(pair, f, indent=1)
+    for name, contract in (("Counter", counter), ("Ledger", ledger), ("TipJar", tipjar)) + callers + ((("Dice", dice),) if dice else ()) \
+            + ((("Payout", base58.b58decode(pair["contract"])),) if pair else ()):
         states = {}
         for i in range(1, (args.check_nodes or args.nodes) + 1):
             try:

@@ -481,6 +481,13 @@ jobs:
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300 SYNC_CONTRACT_EXECUTION=0
             contracts: true
+          # two executions of one contract by different callers in one block, each followed by its
+          # payout; the joiner n8 (official with node_alt_ref=official) syncs that block afterwards.
+          # Reports who pays the payout fees on the live nodes and on the joiner (payout-pair.json)
+          - name: contracts-live-vs-sync
+            env: CONTRACTS=1 CONTRACT_PAYOUT_PAIR=1 JOIN_PRUNED_AT=200 JOIN_FULL=1 TARGET_SEQ=1500
+            contracts: true
+            manual: true
           - name: contracts-crash
             official: 'no'   # n6 is official: killed while saving a checkpoint it never restarts (checkpoint ahead of its blocks, official behaviour this fork handles; reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CRASH_NODE=6 CONTRACTS=1 TARGET_SEQ=1600
@@ -664,6 +671,7 @@ jobs:
             testnet-run/n*/*.log
             testnet-run/fund.log
             testnet-run/contracts.log
+            testnet-run/payout-pair.json
             testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
             testnet-run/resources.tsv
