@@ -87,6 +87,30 @@ https address, so give another address only when you trust whoever publishes the
 a download that stops is resumed by running it again (`snapshot-download/`). The node's normal
 start never downloads from GitHub.
 
+## How the published snapshot is checked
+
+Before publishing, the snapshot workflow brings the node to the chain head and compares it with
+independent sources: 50 random balances with the public monitor (`ci/snapshot/check_node.py`), and
+every wallet with the official mainnet nodes (`ci/snapshot/compare_wallets.py`, Python standard
+library only). The second reads all wallets (`WalletsGet`) of the node and of at least 3 official
+nodes, reads every wallet that differs again on all of them until the values stop moving, and
+compares the node with the official majority. Each difference is classified by its delta: a
+multiple of an emitted-transaction fee (0.008740234375 CS, 0.0004287109375 CS in 2019) comes from
+the attribution of contract-emitted fees; anything else from a contract state applied without its
+starter, or is unknown. Wallets where the official nodes disagree among themselves are listed as
+official splits. The wallets where the snapshot lineage is known to differ are listed in
+`ci/snapshot/compare_wallets_baseline.tsv`: they are reported, and only a new wallet or a changed
+delta fails (and blocks the publication). The workflow `wallet-compare.yml` checks the script on
+an official node weekly and on any node API reachable from GitHub by hand. To check your own node:
+
+```
+python3 ci/snapshot/compare_wallets.py --ours 127.0.0.1:9090
+```
+
+It only reads (exit 0: nothing new; 1: a new or changed difference; 3: too few official nodes
+answered) and takes a few minutes. `--baseline ''` reports every difference as new,
+`--json FILE` writes the details.
+
 ## Seeing who serves what
 
 `./node --survey-snapshots [seconds]` (default 600, 10 to 86400; the node stopped) starts the node
