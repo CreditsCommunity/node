@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #196 | solver: an emitted transaction's fee is charged to the initiator of the contract's nearest new_state before it in the block that the block declares successful (non-zero hash or non-empty value), whether or not the node reproduced it; the execution before the block when none precedes it. Replaces the latest-execution rule of #94 with the sequential rule the mainnet majority holds: 1,299 payouts in 1,064 blocks of 2019–2020, which a slow start from block 0 with community.12–.19 charged differently (109 wallets); no block after 2021 is affected. The result is the same on a node that builds the block (`statesCreated` → `on_update` applies its states before it is stored) and on one that reads it; a rollback refunds by the same rule, fall-back charges included. Consensus-relevant |
 
 ## community.19 — 2026-11-22
 
