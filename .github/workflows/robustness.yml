@@ -291,6 +291,11 @@ jobs:
           # never a network reset (a quorum of neighbours must confirm the lag)
           - name: net-inflated-rounds
             env: INFLATED_ROUNDS_AT=300 INFLATED_ROUNDS_SECONDS=900 RESTART_AT=0
+          # a real ROUND LAG on a live network: n9 is stopped 3 s every 6 s for 5 min, with short
+          # ROUND LAG settings (test builds only); it must reset its network sessions (net::Host::Reset),
+          # get its neighbours back, keep up and be trusted again afterwards
+          - name: net-round-lag-reset
+            env: NODES=9 TRUSTED_NODES=7 LAG_NODE=9 LAG_AT=300 LAG_SECONDS=300 CS_TEST_ROUNDLAG=60,3,60,30,90 RESTART_AT=0
           # comparison: the same outage on a node with a public address (no NAT)
           - name: net-outage-rejoin-public
             env: NODES=23 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_AT=600 OUTAGE_SECONDS=150 OUTAGE_BLIP_AFTER=300 RESTART_AT=0
