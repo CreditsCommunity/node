@@ -127,7 +127,7 @@ loop: there, do not act on this healthcheck, or watch `fork-held.json` instead.
 A node that keeps missing round packages (`NODE> detect round lag` in many rounds, blocks caught up
 by SYNC, its key gray-listed whenever it is trusted) warns `ROUND LAG` once it has lasted 10 minutes
 and rebuilds its network sessions by itself, as a restart would (every connection closed, peers
-looked up again), at most every 15 minutes. While it lasts, `round-lag.json` in the data directory
+looked up again), then 15 minutes later at the earliest, less and less often, at most 2 an hour. While it lasts, `round-lag.json` in the data directory
 has `"persistent": "true"` and the healthcheck reports the container unhealthy; `ROUND LAG over`
 in the log and the healthcheck back to healthy mean it caught up. If it goes on:
 `docker compose restart`, and check the network of the host.

@@ -433,11 +433,16 @@ into the plan's BootstrapSignature protocol.
 - **Round lag that does not go away.** The official node logs `detect round lag` for every message
   of a round ahead of its own (dozens a round) and does nothing more about it; after a network
   outage a node behind a NAT kept missing round packages for hours, until it was restarted. This node
-  logs the first such message of a round (the others at debug level) and counts the rounds; when it
-  lags in at least 5 rounds in 10 minutes, for 10 minutes, it warns `ROUND LAG` with what it does
-  about it and rebuilds its network sessions as a restart would (`net::Host::Reset`: every connection
-  closed, the routing table looked up again, the neighbours handshaked again), at most every 15
-  minutes, and logs `ROUND LAG over` when it keeps up again. The state is in `round-lag.json` next to
+  logs the first such message of a round (the others at debug level) and counts the rounds. A round
+  counts only if, at that moment, a quorum of distinct neighbours (at least 3 and more than half)
+  announced a last block at least two above the node's own: the round number in a packet header is
+  the sender's word, and one peer sending inflated rounds must not make the node reset its network.
+  When it lags in at least 5 such rounds in 10 minutes, for 10 minutes, it warns `ROUND LAG` with
+  what it does about it and rebuilds its network sessions as a restart would (`net::Host::Reset`:
+  every connection closed, the routing table looked up again, the neighbours handshaked again): the
+  first reset at once, the next one 15 minutes later at the earliest, the interval doubling up to 4
+  hours, never more than 2 in an hour, each logged with its reason; `ROUND LAG over` when it keeps up
+  again. The state is in `round-lag.json` next to
   the `db` folder, and the Docker healthcheck reports the container unhealthy while the lag persists.
   Nothing is sent, signed, hashed or validated differently, and there is no new option.
 

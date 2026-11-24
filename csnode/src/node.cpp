@@ -3543,9 +3543,19 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
             if (round > 1 && subRound_ == 0) {
                 // not on the very start; the first message of a lagging round is logged, the others
                 // (one per message ahead, dozens a round) only at debug level
+                // the round in the header is the sender's word: the episode counts towards ROUND LAG (and a
+                // network reset) only if a quorum of distinct neighbours announced blocks ahead of ours
                 const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (roundLag_.onLag(now, round)) {
-                    cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                std::vector<uint64_t> announced;
+                transport_->forEachNeighbour([&announced](const cs::PublicKey&, cs::Sequence lastSeq, cs::RoundNumber) {
+                    announced.push_back(lastSeq);
+                });
+                size_t ahead = 0;
+                const bool confirmed = cs::roundlag::quorumAhead(blockChain_.getLastSeq(), announced, &ahead);
+                const std::string senderId(reinterpret_cast<const char*>(sender.data()), sender.size());
+                if (roundLag_.onLag(now, round, senderId, confirmed)) {
+                    cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << "; " << ahead << " of "
+                                << announced.size() << " neighbours ahead)";
                 }
                 else {
                     csdebug() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";

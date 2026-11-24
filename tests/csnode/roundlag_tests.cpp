@@ -6,12 +6,14 @@ using cs::roundlag::Monitor;
 using cs::roundlag::Settings;
 
 namespace {
-// one lag episode a minute from `from`, at rounds from `round`, ticking every 5 s; returns the resets
-size_t lagFor(Monitor& m, int64_t from, int64_t seconds, uint64_t round, std::vector<std::string>* lines = nullptr) {
+// one confirmed lag episode a minute from `from`, at rounds from `round`, ticking every 5 s;
+// returns the resets
+size_t lagFor(Monitor& m, int64_t from, int64_t seconds, uint64_t round, std::vector<std::string>* lines = nullptr,
+              bool confirmed = true) {
     size_t resets = 0;
     for (int64_t t = from; t < from + seconds; t += 5) {
         if ((t - from) % 60 == 0) {
-            m.onLag(t, round++);
+            m.onLag(t, round++, "peer-a", confirmed);
         }
         const auto tick = m.tick(t);
         if (tick.reset) {
@@ -25,19 +27,75 @@ size_t lagFor(Monitor& m, int64_t from, int64_t seconds, uint64_t round, std::ve
 }
 }  // namespace
 
+TEST(RoundLag, QuorumAhead) {
+    size_t ahead = 0;
+    // 16 neighbours, 9 two blocks ahead of 100: a majority, at least 3
+    std::vector<uint64_t> seqs(16, 100);
+    for (size_t i = 0; i < 9; ++i) {
+        seqs[i] = 102;
+    }
+    EXPECT_TRUE(cs::roundlag::quorumAhead(100, seqs, &ahead));
+    EXPECT_EQ(ahead, 9u);
+    // one block ahead is the normal state of a node during a round
+    EXPECT_FALSE(cs::roundlag::quorumAhead(101, seqs));
+    // half is not a majority
+    seqs[8] = 100;
+    EXPECT_FALSE(cs::roundlag::quorumAhead(100, seqs, &ahead));
+    EXPECT_EQ(ahead, 8u);
+    // two neighbours are never a quorum, even all of them
+    EXPECT_FALSE(cs::roundlag::quorumAhead(100, {500, 500}));
+    EXPECT_TRUE(cs::roundlag::quorumAhead(100, {500, 500, 500}));
+    EXPECT_FALSE(cs::roundlag::quorumAhead(100, {}));
+}
+
 TEST(RoundLag, OneEpisodePerLocalRound) {
     Monitor m;
-    EXPECT_TRUE(m.onLag(1000, 50));
-    EXPECT_FALSE(m.onLag(1000, 50));
-    EXPECT_FALSE(m.onLag(1001, 50));
-    EXPECT_TRUE(m.onLag(1002, 51));
+    EXPECT_TRUE(m.onLag(1000, 50, "a", true));
+    EXPECT_FALSE(m.onLag(1000, 50, "b", true));
+    EXPECT_FALSE(m.onLag(1001, 50, "a", false));
+    EXPECT_TRUE(m.onLag(1002, 51, "a", true));
     EXPECT_EQ(m.episodesInWindow(1002), 2u);
+}
+
+TEST(RoundLag, UnconfirmedEpisodesDoNotCount) {
+    Monitor m;
+    m.onLag(1000, 50, "a", false);
+    m.onLag(1001, 51, "a", false);
+    EXPECT_EQ(m.episodesInWindow(1001), 0u);
+    EXPECT_EQ(m.seenInWindow(1001), 2u);
+    // confirmed later in the same round (a quorum ahead by then): it counts
+    m.onLag(1002, 51, "b", true);
+    EXPECT_EQ(m.episodesInWindow(1002), 1u);
+}
+
+TEST(RoundLag, InflatedRoundsFromOnePeerNeverReset) {
+    // one peer sends messages with high round numbers in every round, for hours; the neighbours do
+    // not announce blocks ahead of ours (no quorum): no lag, no warning, no reset
+    Monitor m;
+    std::vector<std::string> lines;
+    uint64_t round = 1000;
+    size_t resets = 0;
+    for (int64_t t = 1000; t < 1000 + 6 * 3600; t += 1) {
+        m.onLag(t, round++, "attacker", false);
+        if (t % 5 == 0) {
+            const auto tick = m.tick(t);
+            resets += tick.reset ? 1 : 0;
+            if (!tick.text.empty()) {
+                lines.push_back(tick.text);
+            }
+        }
+    }
+    EXPECT_EQ(resets, 0u);
+    EXPECT_FALSE(m.lagging());
+    EXPECT_FALSE(m.persistent());
+    EXPECT_TRUE(lines.empty());
+    EXPECT_NE(m.statusJson(1764000000, 1000 + 6 * 3600).find("\"persistent\": \"false\""), std::string::npos);
 }
 
 TEST(RoundLag, EpisodesLeaveTheWindow) {
     Monitor m;
     for (uint64_t r = 0; r < 4; ++r) {
-        m.onLag(1000 + static_cast<int64_t>(r), 100 + r);
+        m.onLag(1000 + static_cast<int64_t>(r), 100 + r, "a", true);
     }
     EXPECT_EQ(m.episodesInWindow(1100), 4u);
     EXPECT_EQ(m.episodesInWindow(1700), 0u);
@@ -49,7 +107,7 @@ TEST(RoundLag, AFewLagsAreNotALag) {
     std::vector<std::string> lines;
     for (int64_t t = 0; t < 86400; t += 5) {
         if (t % 4320 == 0) {
-            m.onLag(1000 + t, static_cast<uint64_t>(t));
+            m.onLag(1000 + t, static_cast<uint64_t>(t), "a", true);
         }
         const auto tick = m.tick(1000 + t);
         EXPECT_FALSE(tick.reset);
@@ -77,6 +135,7 @@ TEST(RoundLag, PersistentLagWarnsAndResets) {
     ASSERT_EQ(lines.size(), 1u);
     EXPECT_NE(lines[0].find("ROUND LAG:"), std::string::npos);
     EXPECT_NE(lines[0].find("rebuilding the network sessions"), std::string::npos);
+    EXPECT_NE(lines[0].find("reason:"), std::string::npos);
 
     // still lagging: a warning every 5 min, the next reset 15 min after the first
     lines.clear();
@@ -88,6 +147,50 @@ TEST(RoundLag, PersistentLagWarnsAndResets) {
         sawNotYet = sawNotYet || l.find("were rebuilt") != std::string::npos;
     }
     EXPECT_TRUE(sawNotYet);
+}
+
+TEST(RoundLag, ResetsBackOffAndAreCapped) {
+    // a lag that never ends: resets at once, then 15 min later, the third held back to 60 min after the
+    // first (never more than 2 in an hour, its own interval was 30 min), then +60, +120, +240 and every
+    // 240 min (resetMaxInterval)
+    Monitor m;
+    std::vector<int64_t> at;
+    uint64_t round = 10;
+    for (int64_t t = 1000; t < 1000 + 12 * 3600; t += 5) {
+        if ((t - 1000) % 60 == 0) {
+            m.onLag(t, round++, "peer-a", true);
+        }
+        if (m.tick(t).reset) {
+            at.push_back(t);
+        }
+    }
+    ASSERT_GE(at.size(), 6u);
+    EXPECT_EQ(at[1] - at[0], 900);
+    EXPECT_EQ(at[2] - at[0], 3600);
+    EXPECT_EQ(at[3] - at[2], 3600);
+    EXPECT_EQ(at[4] - at[3], 7200);
+    EXPECT_EQ(at[5] - at[4], 14400);
+    for (size_t i = 0; i + 2 < at.size(); ++i) {
+        EXPECT_GE(at[i + 2] - at[i], 3600) << "more than 2 resets in an hour";
+    }
+    EXPECT_LE(at.size(), 8u);
+}
+
+TEST(RoundLag, ResetCapPerHourWithShortSettings) {
+    Settings s;
+    s.episodes = 1;
+    s.persistAfter = 0;
+    s.resetEvery = 60;
+    s.resetMaxInterval = 60;
+    s.resetsPerHour = 2;
+    Monitor m(s);
+    size_t resets = 0;
+    uint64_t round = 1;
+    for (int64_t t = 1000; t < 1000 + 3600; t += 5) {
+        m.onLag(t, round++, "a", true);
+        resets += m.tick(t).reset ? 1 : 0;
+    }
+    EXPECT_EQ(resets, 2u);
 }
 
 TEST(RoundLag, LagOverIsReported) {
@@ -138,11 +241,11 @@ TEST(RoundLag, Settings) {
     s.persistAfter = 60;
     s.window = 120;
     Monitor m(s);
-    m.onLag(1000, 1);
-    m.onLag(1001, 2);
+    m.onLag(1000, 1, "a", true);
+    m.onLag(1001, 2, "a", true);
     EXPECT_FALSE(m.tick(1001).reset);
     EXPECT_TRUE(m.lagging());
-    m.onLag(1050, 3);
+    m.onLag(1050, 3, "a", true);
     const auto tick = m.tick(1062);
     EXPECT_TRUE(tick.reset);
     EXPECT_TRUE(m.persistent());

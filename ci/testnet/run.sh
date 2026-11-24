@@ -2297,7 +2297,7 @@ if [ "$OUTAGE_NODE" -gt 0 ]; then
     python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" <<'PY' || rejoin_status=$?
 import re, sys
 work, nodes, x, since, max_lag, max_gray = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
-lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)\)")
+lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)[;)]")
 rows = {}
 for i in range(1, nodes + 1):
     r = dict(rounds=0, trusted=0, lag_lines=0, episodes=set(), slow=0, gray=0, removed=0, warn=0)
