@@ -9,6 +9,10 @@
 // k-buckets are candidates (nodes whose datagrams came from the endpoint recorded, never ids that
 // other nodes named), the neighbours are left out (they are pinged anyway), and at most `cap` are
 // taken, from `offset` on, so that with more candidates every one gets its turn; `offset` advances.
+// Every 2 s against the 10 s idle timeout, kMaxPeersPerIteration keeps about 160 routing-table peers'
+// connections open (mainnet has about 25): above that some connections idle out between turns.
+// The pings go through Host::SendDirectIfKnown: no queue for an id not in the k-buckets, no lookup;
+// to a known node not yet connected a ping waits in the send queue until the dial ends.
 namespace cs::keepalive {
 
 inline constexpr size_t kMaxPeersPerIteration = 32;

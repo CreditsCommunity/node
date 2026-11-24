@@ -442,7 +442,8 @@ into the plan's BootstrapSignature protocol.
   every connection closed, the routing table looked up again, the neighbours handshaked again): the
   first reset at once, the next one 15 minutes later at the earliest, the interval doubling up to 4
   hours, never more than 2 in an hour, each logged with its reason; `ROUND LAG over` when it keeps up
-  again. The state is in `round-lag.json` next to
+  again. No reset while the node holds a fork (FORK HELD: its neighbours are ahead on the chain it
+  refuses); the warning says so, and the healthcheck reports the fork. The state is in `round-lag.json` next to
   the `db` folder, and the Docker healthcheck reports the container unhealthy while the lag persists.
   Nothing is sent, signed, hashed or validated differently, and there is no new option.
 
@@ -467,21 +468,28 @@ consensus rules.
   datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
   host at exit.
 - **Nodes behind a NAT stay reachable.** When a node behind a NAT (a home router, Docker) opened a
-  connection to a peer, the official p2p library recorded the connection's source port, an
-  ephemeral port of the NAT, as the node's TCP port. Once that connection closed (an idle timeout,
-  a network outage, a new address) the peer could not dial the node again, marked it unreachable
-  every 120 s and dropped what it sent it, relayed round packages included: the node followed the
-  chain by SYNC only, lagged and was gray-listed whenever trusted, until a restart took it out of
-  the peers' routing tables (mainnet incident of 2026-11-24, five hours). The fork keeps the TCP
-  port a peer announces, and erases only the connection that dropped (it erased every connection
-  with that peer in the same direction, a newer one too). Official peers still record the source
-  port, so a node behind a NAT (private address, no UPnP mapping) pings the peers of its routing
-  table every 2 s, not only its neighbours: it keeps a connection of its own open to each of them,
-  through which they reach it. Only the k-buckets count (nodes whose datagrams came from the
-  endpoint recorded, never ids other nodes named), at most 32 a time in turn, and a ping goes only
-  to a node still there: nothing is queued or looked up for any other id. `net::Host::Reset` rebuilds the p2p sessions as a restart would
-  (used by `ROUND LAG`, see above). Nothing changes on the wire but those pings, which any node
-  answers.
+  connection to a peer, the official p2p library (since 2020-01-15, commit 4705c36) recorded the
+  connection's source port as the node's TCP port: an ephemeral port the node's socket never bound
+  (outgoing connections bind no port) and where nothing listens. Once that connection closed (an
+  idle timeout, a network outage, a new address) the peer could not dial the node again, marked it
+  unreachable every 120 s and dropped what it sent it, relayed round packages included, until the
+  node left the peer's routing table (a restart). This is shown in the private test network
+  (robustness `net-outage-new-address`). A mainnet node behind a NAT that lagged for five hours after
+  an outage on 2026-11-24 until it was restarted may have met it; that link is a hypothesis, not
+  established (its own p2p log is not available, and a lost UPnP or port-forward mapping would explain
+  it too). The fork keeps the TCP port a peer announces, and erases only the connection that dropped
+  (it erased every connection with that peer in the same direction, a newer one too). Official peers
+  still record the source port, so a node behind a NAT (private address, no UPnP mapping; with a
+  UPnP mapping the peers do not rewrite the port and this does not run) pings the peers of its
+  routing table every 2 s, not only its neighbours: it keeps a connection of its own open to each of
+  them, through which they reach it. Only the k-buckets count (nodes whose datagrams came from the
+  endpoint recorded, never ids other nodes named), at most 32 a time in turn: with the 10 s idle
+  timeout that covers about 160 routing-table peers (mainnet has about 25). A ping goes only to a
+  node still in the k-buckets: no queue for unknown ids and no lookup (to a known node not yet
+  connected it waits in the send queue until the dial ends, as any message). `net::Host::Reset`
+  rebuilds the p2p sessions as a restart would (used by `ROUND LAG`, see above; pending dials are
+  abandoned without marking their peers unreachable). Nothing changes on the wire but those pings,
+  which any node answers.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;

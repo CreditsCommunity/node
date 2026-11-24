@@ -249,7 +249,8 @@ void Transport::sendBroadcastIfNoConnection(Packet&& pack, const cs::PublicKey& 
 // node pings the peers of its routing table (its neighbours already are, every 2 s), which keeps a
 // connection of its own open to each of them; a peer answers anyone's ping. Only the k-buckets (nodes
 // whose datagrams came from the endpoint recorded, not ids other nodes named), at most
-// kMaxPeersPerIteration a time, in turn, and only to a node still there when sent: no queue, no lookup.
+// kMaxPeersPerIteration a time, in turn (32 every 2 s against the 10 s idle timeout: about 160 peers
+// covered), and only to a node still there when sent: no queue for an unknown id, no lookup.
 void Transport::keepReachable() {
     if (!net::Network::Instance().BehindNAT()) {
         return;

@@ -297,7 +297,7 @@ ROUND LAG: 12 confirmed lag episodes in the last 10 min, for 10 min (round packa
 and does what a restart would do in the network layer: it closes every connection, looks its peers
 up again and handshakes its neighbours again (the next reset 15 minutes later at the earliest, then
 less and less often, at most 2 an hour; the warning every 5 minutes), then
-logs `ROUND LAG over` when it keeps up again. Meanwhile `round-lag.json` next to the `db` folder has
+logs `ROUND LAG over` when it keeps up again (no reset while it reports FORK HELD). Meanwhile `round-lag.json` next to the `db` folder has
 `"persistent": "true"` and the Docker healthcheck reports the container unhealthy. If it does not
 end, restart the node and check the network of its host (a home router that changed address, a
 firewall). A node trusted while it lags cannot do its part: its key is gray-listed for 1000 rounds.

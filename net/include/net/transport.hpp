@@ -54,7 +54,8 @@ public:
     void processPostponed(const cs::RoundNumber); // @TODO move to Node
 
     void sendDirect(Packet&&, const cs::PublicKey&);
-    // only to a node of the routing table's k-buckets: nothing queued or looked up for another id
+    // only to a node of the routing table's k-buckets: no queue and no lookup for another id (to a
+    // known node not yet connected the message waits in the send queue until the dial ends)
     bool sendDirectIfKnown(Packet&&, const cs::PublicKey&);
     void sendMulticast(Packet&&, const std::vector<cs::PublicKey>&);
     void sendBroadcast(Packet&&);
