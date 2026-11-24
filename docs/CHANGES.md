@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #198 | net, csnode: a node behind a NAT recovers after a network outage (mainnet incident of 2026-11-24: a NAS node 2-10 rounds behind for 5 hours until restarted). p2p bumped to 2eefa87 (CreditsCommunity/p2p#4): the routing table keeps the TCP port a peer announces instead of the source port of the connection it opened (an ephemeral NAT port: once that connection closed the peer could not dial the node again and dropped what it sent it, round packages included), a dropped connection erases only itself, `net::Host::Reset`. A node behind a NAT pings the k-bucket peers of its routing table every 2 s (at most 32 non-neighbours a time, never queued or looked up), so that official peers, which still record the source port, reach it through its own connection. `ROUND LAG` safety net: rounds in which the node saw messages two or more rounds ahead count only when a quorum of distinct neighbours announced blocks ahead of its own; 5 of them in 10 minutes, for 10 minutes, give a `ROUND LAG` warning, a network reset as a restart would (at once, then after 15 min, doubling up to 4 h, at most 2 an hour) and `ROUND LAG over` when it ends; `round-lag.json` makes the Docker healthcheck unhealthy while it persists; `detect round lag` once per round. CI: robustness `net-outage-rejoin`, `net-outage-new-address`, `net-inflated-rounds` (and `net-outage-rejoin-public`, manual). No consensus change, no new option |
 
 ## community.20 — 2026-11-23
 
