@@ -170,3 +170,47 @@ TEST(P2pConnection, AbandonedAfterRegistrationIsReportedAsDropped) {
     conn->Abandon();
     EXPECT_TRUE(conn->IsDropped());
 }
+
+TEST(P2pConnection, AbandonWhileAWriteIsInFlight) {
+    // a large packet the other side does not read yet keeps an async_write in flight; Abandon from
+    // another thread (as Host::Reset does) must not free the buffer that write uses (run under ASan
+    // in the standalone build), and more sends are refused
+    Loop loop;
+    bi::tcp::acceptor acceptor(loop.io, bi::tcp::endpoint(bi::make_address("127.0.0.1"), 0));
+    Owner owner;
+    const NodeId me = idOf(1), dialled = idOf(2);
+
+    auto conn = Connection::Create(owner, loop.io);
+    conn->Connect(acceptor.local_endpoint(), registration(me, dialled));
+    bi::tcp::socket server(loop.io);
+    acceptor.accept(server);
+    ba::write(server, ba::buffer(bytesOf(registration(dialled, me))));
+    ASSERT_TRUE(waitFor([&] { return owner.connected.load() == 1; }));
+
+    for (int i = 0; i < 4; ++i) {
+        Packet p;
+        p.data = ByteVector(8 * 1024 * 1024, static_cast<uint8_t>(i));
+        p.header.type = Packet::Type::kDirect;
+        p.header.data_size = p.data.size();
+        conn->Send(std::move(p));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::thread other([&] { conn->Abandon(); });
+    other.join();
+    Packet more;
+    more.data = ByteVector(16, 1);
+    more.header.type = Packet::Type::kDirect;
+    more.header.data_size = more.data.size();
+    conn->Send(std::move(more));
+
+    // drain what was written until the connection closes
+    boost::system::error_code ec;
+    std::array<uint8_t, 65536> buf{};
+    size_t total = 0;
+    while (!ec) {
+        total += server.read_some(ba::buffer(buf), ec);
+    }
+    EXPECT_TRUE(conn->IsDropped());
+    EXPECT_LT(total, size_t(4) * 8 * 1024 * 1024);
+    EXPECT_EQ(owner.dropped.load(), 0);
+}
