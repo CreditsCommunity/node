@@ -466,6 +466,20 @@ consensus rules.
   refreshed from its answers to our pings, instead of the first one seen; passes each received
   datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
   host at exit.
+- **Nodes behind a NAT stay reachable.** When a node behind a NAT (a home router, Docker) opened a
+  connection to a peer, the official p2p library recorded the connection's source port, an
+  ephemeral port of the NAT, as the node's TCP port. Once that connection closed (an idle timeout,
+  a network outage, a new address) the peer could not dial the node again, marked it unreachable
+  every 120 s and dropped what it sent it, relayed round packages included: the node followed the
+  chain by SYNC only, lagged and was gray-listed whenever trusted, until a restart took it out of
+  the peers' routing tables (mainnet incident of 2026-11-24, five hours). The fork keeps the TCP
+  port a peer announces, and erases only the connection that dropped (it erased every connection
+  with that peer in the same direction, a newer one too). Official peers still record the source
+  port, so a node behind a NAT (private address, no UPnP mapping) pings every peer of its routing
+  table every 2 s, not only its neighbours: it keeps a connection of its own open to each of them,
+  through which they reach it. `net::Host::Reset` rebuilds the p2p sessions as a restart would
+  (used by `ROUND LAG`, see above). Nothing changes on the wire but those pings, which any node
+  answers.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
