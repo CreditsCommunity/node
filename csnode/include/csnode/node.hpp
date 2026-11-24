@@ -509,6 +509,7 @@ private:
     cs::roundlag::Monitor roundLag_;
     bool roundLagStatusWritten_ = false;
     bool roundLagConfigured_ = false;  // CS_TEST_ROUNDLAG read (test network builds)
+    std::vector<cs::Sequence> testResetAt_;  // CS_TEST_RESET_AT_SEQ, the next last (test network builds)
     void onRoundLagTick();
     // FORK HELD with only an upper bound of the fork point: the search for the last common block with
     // the peer of the refused block (read-only; processor thread), for the record forkLocatorFor_;

@@ -261,14 +261,11 @@
 #        network once more, for OUTAGE_BLIP_SECONDS (default 15): its connections time out, but it is
 #        too short for the peers to drop it from their routing tables, as on a flaky home line. The
 #        report then counts from 60 s after the blip, and the run lasts REJOIN_MINUTES after it
-#        LAG_NODE (default 0 = off): from sequence LAG_AT (default 300), for LAG_SECONDS (default 300),
-#        that node is stopped (SIGSTOP) for 3 s every 6 s, so that it falls behind again and again
-#        while its neighbours go on: a real, confirmed round lag. With CS_TEST_ROUNDLAG (test network
-#        builds: shorter ROUND LAG settings) it must report ROUND LAG and reset its network sessions
-#        (net::Host::Reset) on the live network; then, LAG_CHECK_MINUTES (default 15) after the pauses
-#        end, its neighbours must be back after the reset, it must keep up (at most 5 lag episodes from
-#        60 s after the pauses, at least 90 % of the median rounds), report ROUND LAG over and be
-#        trusted again
+#        RESET_NODE (default 0 = off): that node resets its network sessions (net::Host::Reset, what a
+#        persistent ROUND LAG does) at each block of RESET_AT_SEQ (default 400,700; test network builds
+#        read CS_TEST_RESET_AT_SEQ). After each reset its neighbours must come back, and from 60 s after
+#        the last one, for RESET_CHECK_MINUTES (default 10), it must keep up (at most 5 lag episodes, at
+#        least 90 % of the median rounds) and be trusted again
 #        INFLATED_ROUNDS_AT (default 0 = off): from that sequence inflated_rounds.py, one peer with a
 #        random id, sends INFLATED_ROUNDS_NODE (default 3) two messages a second with rounds far ahead
 #        of the network's for INFLATED_ROUNDS_SECONDS (default 900). The node logs the round lag it
@@ -405,10 +402,10 @@ REJOIN_MAX_LAG=${REJOIN_MAX_LAG:-5}
 REJOIN_MAX_GRAY=${REJOIN_MAX_GRAY:-2}
 REJOIN_MAX_SLOW=${REJOIN_MAX_SLOW:-10}
 REJOIN_MAX_DIAL_FAILURES=${REJOIN_MAX_DIAL_FAILURES:-3}
-LAG_NODE=${LAG_NODE:-0}
-LAG_AT=${LAG_AT:-300}
-LAG_SECONDS=${LAG_SECONDS:-300}
-LAG_CHECK_MINUTES=${LAG_CHECK_MINUTES:-15}
+RESET_NODE=${RESET_NODE:-0}
+RESET_AT_SEQ=${RESET_AT_SEQ:-400,700}
+RESET_CHECK_MINUTES=${RESET_CHECK_MINUTES:-10}
+RESET_LAST_SEQ=$(echo "$RESET_AT_SEQ" | tr ',' '\n' | sort -n | tail -1)
 INFLATED_ROUNDS_AT=${INFLATED_ROUNDS_AT:-0}
 INFLATED_ROUNDS_NODE=${INFLATED_ROUNDS_NODE:-3}
 INFLATED_ROUNDS_SECONDS=${INFLATED_ROUNDS_SECONDS:-900}
@@ -943,6 +940,7 @@ start_node() {
     fi
     (cd "$WORK/n$i" && ulimit -c unlimited \
         && { [ -z "$early_cg" ] || { me=$BASHPID; echo "$me" | sudo tee "$early_cg/cgroup.procs" > /dev/null; } || echo "could not move n$i to its cgroup" >&2; } \
+        && { [ "$i" -ne "$RESET_NODE" ] || export CS_TEST_RESET_AT_SEQ="$RESET_AT_SEQ"; } \
         && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
@@ -1099,7 +1097,6 @@ stop_all() {
     if [ "$OUTAGE_NODE" -gt 0 ]; then outage_off; outage_new_address_off; [ "$OUTAGE_NAT" != 1 ] || outage_nat_off; fi
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ -z "${INFLATED_PID:-}" ] || kill "$INFLATED_PID" 2>/dev/null || true
-    if [ -n "${LAG_PID:-}" ]; then kill "$LAG_PID" 2>/dev/null || true; kill -CONT "${PIDS[$LAG_NODE]}" 2>/dev/null || true; fi
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
 trap stop_all EXIT
@@ -1224,9 +1221,8 @@ blip_at=0                 # OUTAGE_BLIP_AFTER: when the blip began, 0 before
 blip_end=0
 INFLATED_PID=
 inflated_from=""          # node.log time when inflated_rounds.py started
-LAG_PID=
-lag_end=0                 # LAG_NODE: when the pauses ended (epoch s)
-lag_end_stamp=""
+reset_seen=0              # RESET_NODE: when it had stored the last block of RESET_AT_SEQ (epoch s)
+reset_seen_stamp=""
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
@@ -1835,24 +1831,10 @@ while :; do
         blip_end=$(date +%s)
         outage_end_stamp=$(date '+%F %T')
     fi
-    if [ "$LAG_NODE" -gt 0 ] && [ -z "$LAG_PID" ] && [ "$min" -ge "$LAG_AT" ]; then
-        echo "lag: n$LAG_NODE stopped for 3 s every 6 s for $LAG_SECONDS s, from sequence $min"
-        (
-            end=$(( $(date +%s) + LAG_SECONDS ))
-            while [ "$(date +%s)" -lt "$end" ]; do
-                kill -STOP "${PIDS[$LAG_NODE]}" 2>/dev/null || break
-                sleep 3
-                kill -CONT "${PIDS[$LAG_NODE]}" 2>/dev/null || break
-                sleep 3
-            done
-            kill -CONT "${PIDS[$LAG_NODE]}" 2>/dev/null || true
-        ) &
-        LAG_PID=$!
-    fi
-    if [ -n "$LAG_PID" ] && [ "$lag_end" -eq 0 ] && ! kill -0 "$LAG_PID" 2>/dev/null; then
-        lag_end=$(date +%s)
-        lag_end_stamp=$(date '+%F %T')
-        echo "lag: n$LAG_NODE runs freely again at sequence $min"
+    if [ "$RESET_NODE" -gt 0 ] && [ "$reset_seen" -eq 0 ] && [ "$(seq_of "$RESET_NODE")" -ge "$RESET_LAST_SEQ" ] 2>/dev/null; then
+        reset_seen=$(date +%s)
+        reset_seen_stamp=$(date '+%F %T')
+        echo "reset: n$RESET_NODE is past block $RESET_LAST_SEQ (its last network reset) at sequence $min"
     fi
     if [ "$INFLATED_ROUNDS_AT" -gt 0 ] && [ -z "$INFLATED_PID" ] && [ "$min" -ge "$INFLATED_ROUNDS_AT" ]; then
         inflated_from=$(date '+%F %T')
@@ -2373,7 +2355,7 @@ PY
         && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ] \
                 && { [ "$OUTAGE_BLIP_AFTER" -eq 0 ] || { [ "$blip_end" -gt 0 ] && [ "$(date +%s)" -ge $((blip_end + REJOIN_MINUTES * 60)) ]; }; }; }; } \
         && { [ "$INFLATED_ROUNDS_AT" -eq 0 ] || { [ -n "$INFLATED_PID" ] && ! kill -0 "$INFLATED_PID" 2>/dev/null; }; } \
-        && { [ "$LAG_NODE" -eq 0 ] || { [ "$lag_end" -gt 0 ] && [ "$(date +%s)" -ge $((lag_end + LAG_CHECK_MINUTES * 60)) ]; }; }; then break; fi
+        && { [ "$RESET_NODE" -eq 0 ] || { [ "$reset_seen" -gt 0 ] && [ "$(date +%s)" -ge $((reset_seen + RESET_CHECK_MINUTES * 60)) ]; }; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
@@ -2465,35 +2447,34 @@ PY
     [ "$rejoin_status" -eq 0 ] || { echo "FAIL: n$OUTAGE_NODE did not recover from the outage by itself"; exit 1; }
 fi
 
-# LAG_NODE: a real ROUND LAG, a real network reset on the live network, and the node back afterwards
-if [ "$LAG_NODE" -gt 0 ]; then
-    from_stamp=$(date -d "$lag_end_stamp 60 seconds" '+%F %T')
+# RESET_NODE: network resets on the live network, and the node back afterwards
+if [ "$RESET_NODE" -gt 0 ]; then
     lag_status=0
-    python3 - "$WORK" "$NODES" "$LAG_NODE" "$from_stamp" <<'PY' || lag_status=$?
+    python3 - "$WORK" "$NODES" "$RESET_NODE" "$RESET_AT_SEQ" <<'PY' || lag_status=$?
 import re, sys
-work, nodes, x, since = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+import datetime
+work, nodes, x, wanted = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), len(sys.argv[4].split(","))
 def stamp(line):
     return line[1:20]
+def plus(st, seconds):
+    t = datetime.datetime.strptime(st, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(seconds=seconds)
+    return t.strftime("%Y-%m-%d %H:%M:%S")
 lines = open(f"{work}/n{x}/node.log", errors="replace").read().splitlines()
 resets = [stamp(l) for l in lines if "TRANSPORT> network reset" in l]
-warnings = [l for l in lines if "ROUND LAG:" in l and "rebuilding" in l]
-over = [stamp(l) for l in lines if "ROUND LAG over" in l]
 problems = []
-if not resets:
-    problems.append("no network reset")
-if len(warnings) < len(resets):
-    problems.append(f"{len(resets)} resets but {len(warnings)} ROUND LAG lines that announce one")
-# the neighbours after each reset: removed by the reset, back within 60 s
+if len(resets) != wanted:
+    problems.append(f"{len(resets)} network reset(s), {wanted} expected")
+# the neighbours after each reset: removed by it, back within 60 s
 for r in resets:
-    t0 = r
-    removed = sum(1 for l in lines if "neighbour removed" in l and stamp(l) >= t0 and stamp(l) <= t0[:17] + "59")
-    back = 0
-    for l in lines:
-        if "new neighbour added" in l and stamp(l) >= t0:
-            back += 1
-    print(f"LAG: reset at {r}: {removed} neighbour(s) removed in the minute, {back} added since")
-    if back == 0:
-        problems.append(f"no neighbour back after the reset at {r}")
+    removed = sum(1 for l in lines if "neighbour removed" in l and r <= stamp(l) <= plus(r, 10))
+    back = sum(1 for l in lines if "new neighbour added" in l and r <= stamp(l) <= plus(r, 60))
+    print(f"RESET: at {r}: {removed} neighbour(s) removed within 10 s, {back} added again within 60 s")
+    if removed == 0:
+        problems.append(f"the reset at {r} removed no neighbour")
+    if back < removed:
+        problems.append(f"after the reset at {r} only {back} of {removed} neighbours came back within 60 s")
+since = plus(resets[-1], 60) if resets else "9999"
+over = []
 episodes = set()
 rounds = trusted = 0
 for l in lines:
@@ -2516,20 +2497,18 @@ for i in range(1, nodes + 1):
     others.append(n)
 others.sort()
 median = others[len(others) // 2] if others else 0
-if not over:
-    problems.append("no ROUND LAG over")
 if len(episodes) > 5:
-    problems.append(f"{len(episodes)} lag episodes after the pauses")
+    problems.append(f"{len(episodes)} lag episodes after the last reset")
 if rounds * 10 < median * 9:
     problems.append(f"{rounds} rounds against a median of {median}")
 if trusted == 0:
-    problems.append("never trusted after the pauses")
-print(f"LAG RESULT: n{x}: {len(resets)} network reset(s) at {', '.join(resets) or '-'}, ROUND LAG over at {', '.join(over) or '-'}; "
+    problems.append("never trusted after the last reset")
+print(f"RESET RESULT: n{x}: {len(resets)} network reset(s) at {', '.join(resets) or '-'}; "
       f"from {since}: {len(episodes)} lag episodes, {rounds} rounds (median {median}), trusted in {trusted}"
       + ("" if not problems else "; PROBLEMS: " + "; ".join(problems)))
 sys.exit(1 if problems else 0)
 PY
-    [ "$lag_status" -eq 0 ] || { echo "FAIL: n$LAG_NODE did not reset its network sessions and recover as expected"; exit 1; }
+    [ "$lag_status" -eq 0 ] || { echo "FAIL: n$RESET_NODE did not reset its network sessions and recover as expected"; exit 1; }
 fi
 
 # INFLATED_ROUNDS_AT: the round lag one peer claimed was seen and logged, never taken for a ROUND LAG

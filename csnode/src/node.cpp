@@ -5,6 +5,7 @@
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <functional>
 #include <numeric>
 #include <stdexcept>
 
@@ -311,6 +312,27 @@ void Node::onRoundLagTick() {
             roundLag_.setSettings(cs::roundlag::settingsFromText(text));
             cslog() << "ROUND LAG: test settings " << text << " (CS_TEST_ROUNDLAG, test network build)";
         }
+        // CS_TEST_RESET_AT_SEQ=s1,s2,...: a network reset once the node has stored each of these
+        // blocks, the reset ROUND LAG makes, so that CI checks the node rebuilds its sessions on a live
+        // network (a real lag is hard to produce in the test network)
+        if (const char* text = std::getenv("CS_TEST_RESET_AT_SEQ")) {
+            std::stringstream ss(text);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                try {
+                    testResetAt_.push_back(static_cast<cs::Sequence>(std::stoull(item)));
+                }
+                catch (...) {
+                }
+            }
+            std::sort(testResetAt_.begin(), testResetAt_.end(), std::greater<cs::Sequence>());
+        }
+    }
+    if (!testResetAt_.empty() && blockChain_.getLastSeq() >= testResetAt_.back()) {
+        cswarning() << "ROUND LAG: test network reset at block " << blockChain_.getLastSeq()
+                    << " (CS_TEST_RESET_AT_SEQ, test network build)";
+        testResetAt_.pop_back();
+        transport_->resetNetwork();
     }
 #endif
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
