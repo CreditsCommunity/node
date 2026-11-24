@@ -278,6 +278,18 @@ jobs:
             env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
           - name: net-partition
             env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
+          # a node at home behind a NAT loses its connection for 150 s and gets it back (incident of
+          # 2026-11-24): it must catch up and keep up by itself, without round lag or a gray-listed key,
+          # for 20 min. A network the size of mainnet (19 nodes, 7 trusted, 16 neighbours at most)
+          - name: net-outage-rejoin
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_NAT=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+          # the same, and the provider hands out a new public address: the old one stays dead
+          - name: net-outage-new-address
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_NAT=1 OUTAGE_NEW_ADDRESS=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+          # comparison: the same outage on a node with a public address (no NAT)
+          - name: net-outage-rejoin-public
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+            manual: true
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
             env: SLOW_NODES=3,6 SLOW_CPU=5

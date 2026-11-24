@@ -240,6 +240,19 @@
 #        was only an upper bound and that holds the fork again lower is cut with --set-bc-top at the
 #        last common block (docs/quick-start.md, "If your node reports FORK HELD"). A start right after
 #        a cut that stops at once is reported and repeated. Every node must then end on one chain
+#        OUTAGE_NODE (default 0 = off, Linux): that node loses its network at sequence OUTAGE_AT
+#        (default 600) for OUTAGE_SECONDS (default 150), as when a home connection goes down:
+#        everything it sends and everything sent to it is dropped (iptables, no reset), then the
+#        network comes back and nothing is restarted. OUTAGE_NAT=1: the node sits behind a NAT, as a
+#        node in Docker at home: its [host_input] ip is 127.0.0.1 (the private address) and everything
+#        it starts leaves from 127.0.<i>.1, its public address, where the others reach its p2p port.
+#        OUTAGE_NEW_ADDRESS=1 (with OUTAGE_NAT=1): after the outage the public address is 127.0.<i>.2
+#        and the old one stays dead, as when the provider hands out a new IP. The run lasts at least
+#        REJOIN_MINUTES (default 20) after the network is back, then reports for every node, from
+#        60 s after it, the round lag (episodes of "detect round lag"), the slow rounds, the trusted
+#        share and the gray-listings of its own key. The outage node fails the run when it lags in
+#        more than REJOIN_MAX_LAG episodes (default 5) or its key is gray-listed REJOIN_MAX_GRAY times
+#        or more (default 2): a node must recover by itself, without a restart
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -360,6 +373,14 @@ OFFICIAL_PARTITION_RESTART=${OFFICIAL_PARTITION_RESTART:-0}
 RESOLVE_FORK_AFTER=${RESOLVE_FORK_AFTER:-0}
 RESOLVE_LOCATE_WAIT=${RESOLVE_LOCATE_WAIT:-6}   # minutes to wait for the located fork point
 RESOLVE_FORK_WAIT=${RESOLVE_FORK_WAIT:-5}
+OUTAGE_NODE=${OUTAGE_NODE:-0}
+OUTAGE_AT=${OUTAGE_AT:-600}
+OUTAGE_SECONDS=${OUTAGE_SECONDS:-150}
+OUTAGE_NAT=${OUTAGE_NAT:-0}
+OUTAGE_NEW_ADDRESS=${OUTAGE_NEW_ADDRESS:-0}
+REJOIN_MINUTES=${REJOIN_MINUTES:-20}
+REJOIN_MAX_LAG=${REJOIN_MAX_LAG:-5}
+REJOIN_MAX_GRAY=${REJOIN_MAX_GRAY:-2}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -410,6 +431,9 @@ fi
 # sender's p2p port, needs sudo), which is the address the receiver's routing table records
 NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && [ "$JOIN_SOURCES" != keys ] && echo 1 || echo 0)}
 node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
+# the address the other nodes reach node i at: its own, but the public address of a node behind the
+# outage NAT (its own, node_ip, is then its private address)
+pub_ip() { if [ "$OUTAGE_NAT" = 1 ] && [ "$1" -eq "$OUTAGE_NODE" ]; then echo "127.0.$1.1"; else node_ip "$1"; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 STORAGE_SWITCH_NODE=${STORAGE_SWITCH_NODE:-6}
 # the node switched from full to pruned at the same time: n5, with the default n6 only
@@ -527,6 +551,7 @@ if [ "$OS_KIND" != linux ]; then
     [ -z "$SLOW_NODES" ] || not_here "SLOW_NODES (cgroups)"
     [ "$DISK_FULL_NODE" -eq 0 ] || not_here "DISK_FULL_NODE (tmpfs)"
     [ "$NODE_NETS" != 1 ] || not_here "NODE_NETS=1 (iptables SNAT, JOIN_FETCH=p2p without JOIN_SOURCES=keys)"
+    [ "$OUTAGE_NODE" -eq 0 ] || not_here "OUTAGE_NODE (iptables, cgroups)"
     if [ "$SAMPLE_SECONDS" -gt 0 ]; then
         echo "sampler: off on $OS_KIND (sampler.py reads /proc)"
         SAMPLE_SECONDS=0
@@ -773,7 +798,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
         ! is_initial "$j" || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
-        [ "$j" -ne "$i" ] && echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
+        [ "$j" -ne "$i" ] && echo "$(pub_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
 [params]
@@ -881,7 +906,7 @@ start_node() {
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
     # marked for the network fault (its executor, started later, inherits the cgroup)
-    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || [ "$i" -eq "$OUTAGE_NODE" ]; then
         sudo mkdir -p "/sys/fs/cgroup/cstest-$i"
         if [[ ",$SLOW_NODES," == *",$i,"* ]]; then
             echo "$((SLOW_CPU * 1000)) 100000" | sudo tee "/sys/fs/cgroup/cstest-$i/cpu.max" > /dev/null
@@ -948,6 +973,57 @@ node_nets_off() {
 net_fault_stats() {
     sudo tc -s qdisc show dev lo 2>/dev/null | grep -A1 netem | tail -1 | sed 's/^ *//'
 }
+# OUTAGE_NAT: everything the outage node starts (TCP connections, datagrams) leaves from its public
+# address; what others start towards it keeps the address they used (conntrack), as through a NAT
+# with its p2p port forwarded
+outage_nat_on() {
+    sudo iptables -t nat -A POSTROUTING -o lo -m cgroup --path "cstest-$OUTAGE_NODE" -j SNAT --to-source "$1" \
+        || { echo "FAIL: cannot give n$OUTAGE_NODE the public address $1 (no cgroup match in the nat table)"; exit 1; }
+}
+outage_nat_off() {
+    sudo iptables -t nat -F POSTROUTING 2>/dev/null || true
+}
+# OUTAGE_NODE: nothing it sends and nothing sent to it passes (dropped in OUTPUT, the loopback's only
+# way: the sender sees no reset)
+outage_on() {
+    local i=$OUTAGE_NODE
+    outage_off
+    sudo iptables -N CSOUTAGE
+    sudo iptables -I OUTPUT 1 -o lo -j CSOUTAGE
+    sudo iptables -A CSOUTAGE -m cgroup --path "cstest-$i" -j DROP \
+        || { echo "FAIL: no cgroup match, the outage cannot stop what n$i sends"; exit 1; }
+    if [ "$OUTAGE_NAT" = 1 ]; then
+        sudo iptables -A CSOUTAGE -d "127.0.$i.1" -j DROP
+    else
+        sudo iptables -A CSOUTAGE -p udp --dport $((BASE_PORT + i)) -j DROP
+        sudo iptables -A CSOUTAGE -p tcp --dport $((BASE_PORT + i)) -j DROP
+    fi
+}
+outage_off() {
+    sudo iptables -D OUTPUT -o lo -j CSOUTAGE 2>/dev/null || true
+    sudo iptables -F CSOUTAGE 2>/dev/null || true
+    sudo iptables -X CSOUTAGE 2>/dev/null || true
+}
+outage_stats() {
+    sudo iptables -L CSOUTAGE -v -x -n 2>/dev/null | awk 'NR > 2 { p += $1 } END { print p + 0 }'
+}
+# OUTAGE_NEW_ADDRESS: the old public address stays dead, the node leaves from a new one, and the NAT
+# forgets the mappings of the old one (its connections and datagram flows)
+outage_new_address() {
+    local i=$OUTAGE_NODE
+    outage_nat_off
+    outage_nat_on "127.0.$i.2"
+    sudo iptables -N CSOLDADDR
+    sudo iptables -I OUTPUT 1 -o lo -j CSOLDADDR
+    sudo iptables -A CSOLDADDR -d "127.0.$i.1" -j DROP
+    sudo conntrack -D -q "127.0.$i.1" > /dev/null 2>&1 || true
+    sudo conntrack -D -d "127.0.$i.1" > /dev/null 2>&1 || true
+}
+outage_new_address_off() {
+    sudo iptables -D OUTPUT -o lo -j CSOLDADDR 2>/dev/null || true
+    sudo iptables -F CSOLDADDR 2>/dev/null || true
+    sudo iptables -X CSOLDADDR 2>/dev/null || true
+}
 
 stop_all() {
     # the sampler's last sample still sees the nodes running
@@ -979,6 +1055,7 @@ stop_all() {
     [ -z "$NET_FAULT" ] || net_fault_off
     [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || partition_off
     [ "$NODE_NETS" != 1 ] || node_nets_off
+    if [ "$OUTAGE_NODE" -gt 0 ]; then outage_off; outage_new_address_off; [ "$OUTAGE_NAT" != 1 ] || outage_nat_off; fi
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
@@ -1056,6 +1133,20 @@ fi
 if [ "$NODE_NETS" = 1 ]; then
     node_nets_on
 fi
+if [ "$OUTAGE_NODE" -gt 0 ]; then
+    [ "$OUTAGE_NODE" -le "$NODES" ] || { echo "FAIL: OUTAGE_NODE=$OUTAGE_NODE is not a node of this network"; exit 1; }
+    [ "$NODE_NETS" != 1 ] || [ "$OUTAGE_NAT" != 1 ] || { echo "FAIL: OUTAGE_NAT runs without NODE_NETS=1"; exit 1; }
+    [ "$OUTAGE_NEW_ADDRESS" != 1 ] || [ "$OUTAGE_NAT" = 1 ] || { echo "FAIL: OUTAGE_NEW_ADDRESS needs OUTAGE_NAT=1"; exit 1; }
+    if [ "$OUTAGE_NEW_ADDRESS" = 1 ] && ! command -v conntrack > /dev/null; then
+        sudo apt-get install -y -qq conntrack > /dev/null || { echo "FAIL: OUTAGE_NEW_ADDRESS needs conntrack"; exit 1; }
+    fi
+    if [ "$OUTAGE_NAT" = 1 ]; then
+        # the cgroup exists before the node starts, so that its first datagram leaves from the public address
+        sudo mkdir -p "/sys/fs/cgroup/cstest-$OUTAGE_NODE"
+        outage_nat_on "127.0.$OUTAGE_NODE.1"
+        echo "outage: n$OUTAGE_NODE behind a NAT: private address $(node_ip "$OUTAGE_NODE"), public address 127.0.$OUTAGE_NODE.1"
+    fi
+fi
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
 SAMPLER_PID=
@@ -1083,6 +1174,9 @@ disk_filled_at=0
 disk_freed=0
 net_fault_at=0
 net_fault_done=0
+outage_at=0               # when the outage began (epoch s), 0 before
+outage_end=0              # when the network came back (epoch s)
+outage_end_stamp=""       # the same as node.log prints it
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
@@ -1664,6 +1758,19 @@ while :; do
         echo "restart test: $(printf 'n%s ' $RESTART_NODES)started again"
     fi
 
+    if [ "$OUTAGE_NODE" -gt 0 ] && [ "$outage_at" -eq 0 ] && [ "$min" -ge "$OUTAGE_AT" ]; then
+        outage_on
+        outage_at=$(date +%s)
+        echo "outage: n$OUTAGE_NODE loses its network at sequence $min for $OUTAGE_SECONDS s$([ "$OUTAGE_NAT" = 1 ] && echo " (behind a NAT, public address 127.0.$OUTAGE_NODE.1)")"
+    fi
+    if [ "$outage_at" -gt 0 ] && [ "$outage_end" -eq 0 ] && [ "$(date +%s)" -ge $((outage_at + OUTAGE_SECONDS)) ]; then
+        dropped=$(outage_stats)
+        [ "$OUTAGE_NEW_ADDRESS" != 1 ] || outage_new_address
+        outage_off
+        outage_end=$(date +%s)
+        outage_end_stamp=$(date '+%F %T')
+        echo "outage: n$OUTAGE_NODE has its network back at sequence $min ($dropped packets dropped)$([ "$OUTAGE_NEW_ADDRESS" = 1 ] && echo ", public address now 127.0.$OUTAGE_NODE.2")"
+    fi
     if [ -n "$NET_FAULT" ] && [ "$net_fault_at" -eq 0 ] && [ "$min" -ge "$NET_FAULT_AT" ]; then
         net_fault_on
         net_fault_at=$(date +%s)
@@ -2172,13 +2279,66 @@ PY
     # with contracts, not before the calls after the restart were let go
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
-        && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; }; then break; fi
+        && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; } \
+        && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ]; }; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
 done
+
+# OUTAGE_NODE: did the node recover by itself? From 60 s after the network came back, for every node:
+# round lag episodes (the rounds it was at when it saw a message two or more rounds ahead), slow
+# rounds, the share of rounds it was trusted in and the gray-listings of its own key
+if [ "$OUTAGE_NODE" -gt 0 ]; then
+    from_stamp=$(date -d "$outage_end_stamp 60 seconds" '+%F %T')
+    rejoin_status=0
+    python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" <<'PY' || rejoin_status=$?
+import re, sys
+work, nodes, x, since, max_lag, max_gray = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
+lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)\)")
+rows = {}
+for i in range(1, nodes + 1):
+    r = dict(rounds=0, trusted=0, lag_lines=0, episodes=set(), slow=0, gray=0, removed=0, warn=0)
+    with open(f"{work}/n{i}/node.log", errors="replace") as f:
+        for line in f:
+            if line[1:20] < since:
+                continue
+            if "=====" in line and " R-" in line:
+                r["rounds"] += 1
+                if "TRUSTED [" in line:
+                    r["trusted"] += 1
+            elif "detect round lag" in line:
+                r["lag_lines"] += 1
+                m = lag_re.search(line)
+                if m:
+                    r["episodes"].add(int(m.group(2)))
+            elif "last round >" in line:
+                r["slow"] += 1
+            elif "OWN KEY gray-listed" in line:
+                r["gray"] += 1
+            elif "neighbour removed" in line:
+                r["removed"] += 1
+            elif "ROUND LAG" in line:
+                r["warn"] += 1
+    rows[i] = r
+print(f"REJOIN: from {since} (60 s after n{x} got its network back)")
+print("REJOIN: node  rounds  trusted%  lag-episodes  lag-lines  slow-rounds  own-key-gray  neighbours-removed  lag-warnings")
+for i, r in rows.items():
+    share = 100.0 * r["trusted"] / r["rounds"] if r["rounds"] else 0.0
+    print(f"REJOIN: n{i:<3}{'*' if i == x else ' '} {r['rounds']:6d}  {share:7.1f}%  {len(r['episodes']):12d}  {r['lag_lines']:9d}  "
+          f"{r['slow']:11d}  {r['gray']:12d}  {r['removed']:18d}  {r['warn']:12d}")
+others = [len(r["episodes"]) for i, r in rows.items() if i != x]
+rx = rows[x]
+ok = len(rx["episodes"]) <= max_lag and rx["gray"] < max_gray
+print(f"REJOIN RESULT: n{x} {'recovered' if ok else 'did NOT recover'}: {len(rx['episodes'])} round lag episodes "
+      f"(others at most {max(others) if others else 0}, limit {max_lag}), own key gray-listed {rx['gray']} times (limit {max_gray - 1}), "
+      f"trusted in {rx['trusted']} of {rx['rounds']} rounds")
+sys.exit(0 if ok else 1)
+PY
+    [ "$rejoin_status" -eq 0 ] || { echo "FAIL: n$OUTAGE_NODE did not recover from the outage by itself"; exit 1; }
+fi
 
 # network identity for clients: GetNodeInfo on the diag port of every node, the same networkUuid on
 # all the nodes of this build and communityVersion from their VERSION file
