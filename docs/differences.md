@@ -473,11 +473,12 @@ consensus rules.
   (outgoing connections bind no port) and where nothing listens. Once that connection closed (an
   idle timeout, a network outage, a new address) the peer could not dial the node again, marked it
   unreachable every 120 s and dropped what it sent it, relayed round packages included, until the
-  node left the peer's routing table (a restart). This is shown in the private test network
-  (robustness `net-outage-new-address`). A mainnet node behind a NAT that lagged for five hours after
-  an outage on 2026-11-24 until it was restarted may have met it; that link is a hypothesis, not
-  established (its own p2p log is not available, and a lost UPnP or port-forward mapping would explain
-  it too). The fork keeps the TCP port a peer announces, and erases only the connection that dropped
+  node left the peer's routing table (a restart). It is seen on mainnet: a community node behind a
+  NAT (UPnP not found, port forwarded by hand) failed to dial another NAT'd community node 229 times
+  in 8 hours, "Connection refused" every 120 s, at the port it had recorded from that node's
+  connection; and in the private test network (robustness `net-outage-new-address`). The same NAS
+  node lagged for five hours after an outage on 2026-11-24 until it was restarted, probably for this
+  reason (its p2p log does not cover the start of the lag). The fork keeps the TCP port a peer announces, and erases only the connection that dropped
   (it erased every connection with that peer in the same direction, a newer one too). Official peers
   still record the source port, so a node behind a NAT (private address, no UPnP mapping; with a
   UPnP mapping the peers do not rewrite the port and this does not run) pings the peers of its
