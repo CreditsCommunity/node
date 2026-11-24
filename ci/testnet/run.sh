@@ -255,6 +255,10 @@
 #        or more (default 2), it has more than REJOIN_MAX_SLOW slow rounds (default 10) or fewer than
 #        90 % of the median rounds of the others (no round package at all, blocks by SYNC only): a node
 #        must recover by itself, without a restart
+#        OUTAGE_BLIP_AFTER (seconds, default 0 = off): that long after the outage the node loses its
+#        network once more, for OUTAGE_BLIP_SECONDS (default 15): its connections time out, but it is
+#        too short for the peers to drop it from their routing tables, as on a flaky home line. The
+#        report then counts from 60 s after the blip, and the run lasts REJOIN_MINUTES after it
 #        INFLATED_ROUNDS_AT (default 0 = off): from that sequence inflated_rounds.py, one peer with a
 #        random id, sends INFLATED_ROUNDS_NODE (default 3) two messages a second with rounds far ahead
 #        of the network's for INFLATED_ROUNDS_SECONDS (default 900). The node logs the round lag it
@@ -385,6 +389,8 @@ OUTAGE_SECONDS=${OUTAGE_SECONDS:-150}
 OUTAGE_NAT=${OUTAGE_NAT:-0}
 OUTAGE_NEW_ADDRESS=${OUTAGE_NEW_ADDRESS:-0}
 REJOIN_MINUTES=${REJOIN_MINUTES:-20}
+OUTAGE_BLIP_AFTER=${OUTAGE_BLIP_AFTER:-0}
+OUTAGE_BLIP_SECONDS=${OUTAGE_BLIP_SECONDS:-15}
 REJOIN_MAX_LAG=${REJOIN_MAX_LAG:-5}
 REJOIN_MAX_GRAY=${REJOIN_MAX_GRAY:-2}
 REJOIN_MAX_SLOW=${REJOIN_MAX_SLOW:-10}
@@ -1198,6 +1204,8 @@ net_fault_done=0
 outage_at=0               # when the outage began (epoch s), 0 before
 outage_end=0              # when the network came back (epoch s)
 outage_end_stamp=""       # the same as node.log prints it
+blip_at=0                 # OUTAGE_BLIP_AFTER: when the blip began, 0 before
+blip_end=0
 INFLATED_PID=
 inflated_from=""          # node.log time when inflated_rounds.py started
 snapshot_done=0
@@ -1796,6 +1804,18 @@ while :; do
         # the harness itself: an outage that dropped nothing tested nothing
         [ "$dropped" -gt 0 ] || { echo "FAIL: the outage dropped no packet: n$OUTAGE_NODE was never cut off (cgroup or NAT set-up)"; exit 1; }
     fi
+    if [ "$OUTAGE_BLIP_AFTER" -gt 0 ] && [ "$outage_end" -gt 0 ] && [ "$blip_at" -eq 0 ] \
+        && [ "$(date +%s)" -ge $((outage_end + OUTAGE_BLIP_AFTER)) ]; then
+        outage_on
+        blip_at=$(date +%s)
+        echo "outage: n$OUTAGE_NODE loses its network again for $OUTAGE_BLIP_SECONDS s at sequence $min (a blip)"
+    fi
+    if [ "$blip_at" -gt 0 ] && [ "$blip_end" -eq 0 ] && [ "$(date +%s)" -ge $((blip_at + OUTAGE_BLIP_SECONDS)) ]; then
+        echo "outage: n$OUTAGE_NODE has its network back after the blip at sequence $min ($(outage_stats) packets dropped)"
+        outage_off
+        blip_end=$(date +%s)
+        outage_end_stamp=$(date '+%F %T')
+    fi
     if [ "$INFLATED_ROUNDS_AT" -gt 0 ] && [ -z "$INFLATED_PID" ] && [ "$min" -ge "$INFLATED_ROUNDS_AT" ]; then
         inflated_from=$(date '+%F %T')
         echo "inflated rounds: one peer sends n$INFLATED_ROUNDS_NODE messages of rounds from $((min + 100000)) on for $INFLATED_ROUNDS_SECONDS s, from sequence $min"
@@ -2312,7 +2332,8 @@ PY
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
         && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; } \
-        && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ]; }; } \
+        && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ] \
+                && { [ "$OUTAGE_BLIP_AFTER" -eq 0 ] || { [ "$blip_end" -gt 0 ] && [ "$(date +%s)" -ge $((blip_end + REJOIN_MINUTES * 60)) ]; }; }; }; } \
         && { [ "$INFLATED_ROUNDS_AT" -eq 0 ] || { [ -n "$INFLATED_PID" ] && ! kill -0 "$INFLATED_PID" 2>/dev/null; }; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
