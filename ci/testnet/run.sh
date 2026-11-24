@@ -913,14 +913,15 @@ start_node() {
         return 0
     fi
     # the outage node joins its cgroup before it starts: a socket belongs to the cgroup its process was
-    # in when it opened it, and the node opens its UDP socket within milliseconds
+    # in when it opened it, and the node opens its UDP socket within milliseconds ($BASHPID read before
+    # the pipe: on its left side it is the pid of that side's own subshell)
     local early_cg=""
     if [ "$i" -eq "$OUTAGE_NODE" ]; then
         early_cg="/sys/fs/cgroup/cstest-$i"
         sudo mkdir -p "$early_cg"
     fi
     (cd "$WORK/n$i" && ulimit -c unlimited \
-        && { [ -z "$early_cg" ] || echo "$BASHPID" | sudo tee "$early_cg/cgroup.procs" > /dev/null || echo "could not move n$i to its cgroup" >&2; } \
+        && { [ -z "$early_cg" ] || { me=$BASHPID; echo "$me" | sudo tee "$early_cg/cgroup.procs" > /dev/null; } || echo "could not move n$i to its cgroup" >&2; } \
         && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
@@ -1792,6 +1793,8 @@ while :; do
         outage_end=$(date +%s)
         outage_end_stamp=$(date '+%F %T')
         echo "outage: n$OUTAGE_NODE has its network back at sequence $min ($dropped packets dropped)$([ "$OUTAGE_NEW_ADDRESS" = 1 ] && echo ", public address now 127.0.$OUTAGE_NODE.2")"
+        # the harness itself: an outage that dropped nothing tested nothing
+        [ "$dropped" -gt 0 ] || { echo "FAIL: the outage dropped no packet: n$OUTAGE_NODE was never cut off (cgroup or NAT set-up)"; exit 1; }
     fi
     if [ "$INFLATED_ROUNDS_AT" -gt 0 ] && [ -z "$INFLATED_PID" ] && [ "$min" -ge "$INFLATED_ROUNDS_AT" ]; then
         inflated_from=$(date '+%F %T')
