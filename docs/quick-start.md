@@ -285,6 +285,21 @@ These lines are information, not faults: the network goes on with community node
 is also in `peer-status.json` next to the `db` folder, and the Docker healthcheck prints it
 (`docker inspect --format '{{json .State.Health}}' <container>`) without turning unhealthy.
 
+**Round lag.** A node that misses round packages logs `NODE> detect round lag (global N, local M)`
+and catches up by SYNC; a few a day are normal. When it happens in at least 5 rounds in 10 minutes,
+for 10 minutes, the node warns
+
+```
+ROUND LAG: 12 lag episodes in the last 10 min, for 10 min (round packages arrive late or not at all, blocks come by SYNC): rebuilding the network sessions, as a restart would (connections dropped, peers looked up again; reset 1)
+```
+
+and does what a restart would do in the network layer: it closes every connection, looks its peers
+up again and handshakes its neighbours again (at most every 15 minutes, the warning every 5), then
+logs `ROUND LAG over` when it keeps up again. Meanwhile `round-lag.json` next to the `db` folder has
+`"persistent": "true"` and the Docker healthcheck reports the container unhealthy. If it does not
+end, restart the node and check the network of its host (a home router that changed address, a
+firewall). A node trusted while it lags cannot do its part: its key is gray-listed for 1000 rounds.
+
 ## 8. The wallet in two lines
 
 Open it with `./credits-wallet --config wallet.toml` in `csnode` (`credits-wallet.exe` on Windows;

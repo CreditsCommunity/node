@@ -26,6 +26,7 @@
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>
 #include <csnode/peerstatus.hpp>
+#include <csnode/roundlag.hpp>
 #include <csnode/forklocator.hpp>
 
 #include <lib/system/timer.hpp>
@@ -503,6 +504,11 @@ private:
     void onPeerStatusBlock(const csdb::Pool& pool);
     void onPeerStatusBlockRemoved(const csdb::Pool& pool);
     void onPeerStatusTick();
+    // round lag that does not go away (cs::roundlag): fed by chooseMessageAction, ticked by the fork
+    // guard's timer; ROUND LAG warnings, network resets, round-lag.json for the healthcheck
+    cs::roundlag::Monitor roundLag_;
+    bool roundLagStatusWritten_ = false;
+    void onRoundLagTick();
     // FORK HELD with only an upper bound of the fork point: the search for the last common block with
     // the peer of the refused block (read-only; processor thread), for the record forkLocatorFor_;
     // after a failed search, a new one starts at forkLocatorRetryAt_

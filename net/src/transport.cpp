@@ -240,6 +240,11 @@ void Transport::sendBroadcastIfNoConnection(Packet&& pack, const cs::PublicKey& 
     host_.SendBroadcastIfNoConnection(toNodeId(receiver), pack.moveData());
 }
 
+void Transport::resetNetwork() {
+    cswarning() << "TRANSPORT> network reset: closing every connection and looking the peers up again";
+    host_.Reset();
+}
+
 void Transport::clearInbox() {
     {
         std::lock_guard g(inboxMux_);

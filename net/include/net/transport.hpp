@@ -63,6 +63,9 @@ public:
     void clearBanList();
     void getBanList(BanList&) const;
     void clearInbox();
+    // what a restart rebuilds in the network layer, without one (net::Host::Reset): connections closed,
+    // the routing table looked up again, so the neighbours go and come back with a fresh handshake
+    void resetNetwork();
 
     // neighbours interface
     void setPermanentNeighbours(const std::set<cs::PublicKey>&);

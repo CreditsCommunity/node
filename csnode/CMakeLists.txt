@@ -82,6 +82,7 @@ add_library(csnode
   include/csnode/blockverifier.hpp
   include/csnode/forkguardstate.hpp
   include/csnode/peerstatus.hpp
+  include/csnode/roundlag.hpp
   include/csnode/forklocator.hpp
   include/csnode/backwardsync.hpp
   include/csnode/sendcachedata.hpp
@@ -139,6 +140,7 @@ add_library(csnode
   src/blockverifier.cpp
   src/forkguardstate.cpp
   src/peerstatus.cpp
+  src/roundlag.cpp
   src/forklocator.cpp
   src/backwardsync.cpp
   src/sendcachedata.cpp

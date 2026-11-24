@@ -296,6 +296,34 @@ void Node::onForkGuardTick() {
     tickForkLocator();
     logForkHeldDetail(blockChain_.forkHeldRecord());
     onPeerStatusTick();
+    onRoundLagTick();
+}
+
+// every 5 s (fork guard's timer): round lag that persists is logged with what the node does about it,
+// the network sessions are rebuilt (at most every 15 min) and round-lag.json is kept for the healthcheck
+void Node::onRoundLagTick() {
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto tick = roundLag_.tick(now);
+    if (!tick.text.empty()) {
+        if (tick.warning) {
+            cswarning() << tick.text;
+        }
+        else {
+            cslog() << tick.text;
+        }
+    }
+    if (tick.reset) {
+        transport_->resetNetwork();
+    }
+    // written at the start too: a file left by an earlier run must not keep the container unhealthy
+    if (tick.statusChanged || !roundLagStatusWritten_) {
+        roundLagStatusWritten_ = true;
+        const auto dir = cs::forkguard::stateDirFor(cs::ConfigHolder::instance().config()->getPathToDB());
+        const auto wall = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (!cs::forkguard::writeFileAtomic(dir, cs::roundlag::kStatusFile, roundLag_.statusJson(wall, now))) {
+            csdebug() << "ROUND LAG: cannot write " << cs::roundlag::kStatusFile << " in " << dir;
+        }
+    }
 }
 
 void Node::onPeerStatusBlock(const csdb::Pool& pool) {
@@ -3513,8 +3541,15 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         else {
             // more then 1 round lag, request round info
             if (round > 1 && subRound_ == 0) {
-                // not on the very start
-                cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                // not on the very start; the first message of a lagging round is logged, the others
+                // (one per message ahead, dozens a round) only at debug level
+                const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (roundLag_.onLag(now, round)) {
+                    cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                }
+                else {
+                    csdebug() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                }
                 roundPackRequest(sender, rNum);
             }
 
