@@ -54,11 +54,9 @@ void Neighbourhood::pingNeighbours() {
     }
 }
 
-void Neighbourhood::pingOthers(const std::vector<cs::PublicKey>& peers) {
+void Neighbourhood::pingKnown(const std::vector<cs::PublicKey>& peers) {
     for (const auto& p : peers) {
-        if (!contains(p)) {
-            sendPing(p);
-        }
+        transport_->sendDirectIfKnown(formPacket(BaseFlags::NetworkMsg, NetworkCommand::Ping), p);
     }
 }
 

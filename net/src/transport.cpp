@@ -17,6 +17,7 @@
 
 #include <net/hostdata.hpp>
 
+#include <keepalive.hpp>
 #include <packetvalidator.hpp>
 
 namespace {
@@ -245,20 +246,29 @@ void Transport::sendBroadcastIfNoConnection(Packet&& pack, const cs::PublicKey& 
 // through a connection it opened. Official nodes record the source port of such a connection as its
 // TCP port (an ephemeral port of the NAT), so once the connection closes they cannot dial it again and
 // drop what they send it, relayed round packages included, until it leaves their routing table. The
-// node pings every peer of its routing table (its neighbours already are, every 2 s), which keeps a
-// connection of its own open to each of them; a peer answers anyone's ping.
+// node pings the peers of its routing table (its neighbours already are, every 2 s), which keeps a
+// connection of its own open to each of them; a peer answers anyone's ping. Only the k-buckets (nodes
+// whose datagrams came from the endpoint recorded, not ids other nodes named), at most
+// kMaxPeersPerIteration a time, in turn, and only to a node still there when sent: no queue, no lookup.
 void Transport::keepReachable() {
     if (!net::Network::Instance().BehindNAT()) {
         return;
     }
-    std::vector<net::NodeEntrance> known;
-    host_.GetKnownNodes(known);
+    std::vector<net::NodeEntrance> table;
+    host_.GetRoutingTableNodes(table);
     std::vector<cs::PublicKey> peers;
-    peers.reserve(known.size());
-    for (const auto& n : known) {
+    peers.reserve(table.size());
+    for (const auto& n : table) {
         peers.push_back(toPublicKey(n.id));
     }
-    neighbourhood_.pingOthers(peers);
+    const auto picked = cs::keepalive::select<cs::PublicKey>(
+        peers, [this](const cs::PublicKey& key) { return neighbourhood_.contains(key); },
+        cs::keepalive::kMaxPeersPerIteration, keepaliveOffset_);
+    neighbourhood_.pingKnown(picked);
+}
+
+bool Transport::sendDirectIfKnown(Packet&& pack, const cs::PublicKey& receiver) {
+    return host_.SendDirectIfKnown(toNodeId(receiver), pack.moveData());
 }
 
 void Transport::resetNetwork() {

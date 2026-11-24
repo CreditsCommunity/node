@@ -34,8 +34,9 @@ public:
     void peerDisconnected(const cs::PublicKey&);
 
     void pingNeighbours();
-    // pings the peers that are not neighbours (a node behind a NAT, see Transport::run)
-    void pingOthers(const std::vector<cs::PublicKey>& peers);
+    // pings these peers of the routing table (a node behind a NAT, see Transport::keepReachable):
+    // only if they are still in its k-buckets, never queued or looked up
+    void pingKnown(const std::vector<cs::PublicKey>& peers);
 
     void forEachNeighbour(NeighboursCallback);
     uint32_t getNeighboursCount() const;

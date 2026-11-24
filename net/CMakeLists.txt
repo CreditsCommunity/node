@@ -5,6 +5,7 @@ project(net)
 add_library(net
   include/net/logger.hpp
   include/net/neighbourhood.hpp
+  include/net/keepalive.hpp
   include/net/networkcommands.hpp
   include/net/packet.hpp
   include/net/packetvalidator.hpp

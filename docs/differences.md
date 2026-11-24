@@ -475,9 +475,11 @@ consensus rules.
   the peers' routing tables (mainnet incident of 2026-11-24, five hours). The fork keeps the TCP
   port a peer announces, and erases only the connection that dropped (it erased every connection
   with that peer in the same direction, a newer one too). Official peers still record the source
-  port, so a node behind a NAT (private address, no UPnP mapping) pings every peer of its routing
+  port, so a node behind a NAT (private address, no UPnP mapping) pings the peers of its routing
   table every 2 s, not only its neighbours: it keeps a connection of its own open to each of them,
-  through which they reach it. `net::Host::Reset` rebuilds the p2p sessions as a restart would
+  through which they reach it. Only the k-buckets count (nodes whose datagrams came from the
+  endpoint recorded, never ids other nodes named), at most 32 a time in turn, and a ping goes only
+  to a node still there: nothing is queued or looked up for any other id. `net::Host::Reset` rebuilds the p2p sessions as a restart would
   (used by `ROUND LAG`, see above). Nothing changes on the wire but those pings, which any node
   answers.
 - **Smart-contract solver.** Fixed:

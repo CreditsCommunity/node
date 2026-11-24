@@ -54,6 +54,8 @@ public:
     void processPostponed(const cs::RoundNumber); // @TODO move to Node
 
     void sendDirect(Packet&&, const cs::PublicKey&);
+    // only to a node of the routing table's k-buckets: nothing queued or looked up for another id
+    bool sendDirectIfKnown(Packet&&, const cs::PublicKey&);
     void sendMulticast(Packet&&, const std::vector<cs::PublicKey>&);
     void sendBroadcast(Packet&&);
     void sendBroadcastIfNoConnection(Packet&&, const cs::PublicKey&);
@@ -66,7 +68,7 @@ public:
     // what a restart rebuilds in the network layer, without one (net::Host::Reset): connections closed,
     // the routing table looked up again, so the neighbours go and come back with a fresh handshake
     void resetNetwork();
-    // a node behind a NAT keeps a connection of its own open to every peer of its routing table
+    // a node behind a NAT keeps a connection of its own open to the peers of its routing table
     void keepReachable();
 
     // neighbours interface
@@ -128,6 +130,8 @@ private:
     PacketsQueue inboxQueue_;
 
     std::atomic<bool> stopped_{false};
+    // where the next keepalive round starts among the routing table peers (keepReachable, run thread)
+    size_t keepaliveOffset_ = 0;
     std::mutex shutdownMux_;
     std::condition_variable shutdownCv_;
 
