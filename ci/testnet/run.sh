@@ -251,8 +251,14 @@
 #        REJOIN_MINUTES (default 20) after the network is back, then reports for every node, from
 #        60 s after it, the round lag (episodes of "detect round lag"), the slow rounds, the trusted
 #        share and the gray-listings of its own key. The outage node fails the run when it lags in
-#        more than REJOIN_MAX_LAG episodes (default 5) or its key is gray-listed REJOIN_MAX_GRAY times
-#        or more (default 2): a node must recover by itself, without a restart
+#        more than REJOIN_MAX_LAG episodes (default 5), its key is gray-listed REJOIN_MAX_GRAY times
+#        or more (default 2), it has more than REJOIN_MAX_SLOW slow rounds (default 10) or fewer than
+#        90 % of the median rounds of the others (no round package at all, blocks by SYNC only): a node
+#        must recover by itself, without a restart
+#        INFLATED_ROUNDS_AT (default 0 = off): from that sequence inflated_rounds.py, one peer with a
+#        random id, sends INFLATED_ROUNDS_NODE (default 3) two messages a second with rounds far ahead
+#        of the network's for INFLATED_ROUNDS_SECONDS (default 900). The node logs the round lag it
+#        claims, but must not see a ROUND LAG in it nor reset its network: one peer is no quorum
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -381,6 +387,10 @@ OUTAGE_NEW_ADDRESS=${OUTAGE_NEW_ADDRESS:-0}
 REJOIN_MINUTES=${REJOIN_MINUTES:-20}
 REJOIN_MAX_LAG=${REJOIN_MAX_LAG:-5}
 REJOIN_MAX_GRAY=${REJOIN_MAX_GRAY:-2}
+REJOIN_MAX_SLOW=${REJOIN_MAX_SLOW:-10}
+INFLATED_ROUNDS_AT=${INFLATED_ROUNDS_AT:-0}
+INFLATED_ROUNDS_NODE=${INFLATED_ROUNDS_NODE:-3}
+INFLATED_ROUNDS_SECONDS=${INFLATED_ROUNDS_SECONDS:-900}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
@@ -902,11 +912,20 @@ start_node() {
         PIDS[$i]=$!
         return 0
     fi
-    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
+    # the outage node joins its cgroup before it starts: a socket belongs to the cgroup its process was
+    # in when it opened it, and the node opens its UDP socket within milliseconds
+    local early_cg=""
+    if [ "$i" -eq "$OUTAGE_NODE" ]; then
+        early_cg="/sys/fs/cgroup/cstest-$i"
+        sudo mkdir -p "$early_cg"
+    fi
+    (cd "$WORK/n$i" && ulimit -c unlimited \
+        && { [ -z "$early_cg" ] || echo "$BASHPID" | sudo tee "$early_cg/cgroup.procs" > /dev/null || echo "could not move n$i to its cgroup" >&2; } \
+        && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
     # marked for the network fault (its executor, started later, inherits the cgroup)
-    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || [ "$i" -eq "$OUTAGE_NODE" ]; then
+    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
         sudo mkdir -p "/sys/fs/cgroup/cstest-$i"
         if [[ ",$SLOW_NODES," == *",$i,"* ]]; then
             echo "$((SLOW_CPU * 1000)) 100000" | sudo tee "/sys/fs/cgroup/cstest-$i/cpu.max" > /dev/null
@@ -1057,6 +1076,7 @@ stop_all() {
     [ "$NODE_NETS" != 1 ] || node_nets_off
     if [ "$OUTAGE_NODE" -gt 0 ]; then outage_off; outage_new_address_off; [ "$OUTAGE_NAT" != 1 ] || outage_nat_off; fi
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
+    [ -z "${INFLATED_PID:-}" ] || kill "$INFLATED_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
 trap stop_all EXIT
@@ -1177,6 +1197,8 @@ net_fault_done=0
 outage_at=0               # when the outage began (epoch s), 0 before
 outage_end=0              # when the network came back (epoch s)
 outage_end_stamp=""       # the same as node.log prints it
+INFLATED_PID=
+inflated_from=""          # node.log time when inflated_rounds.py started
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
@@ -1771,6 +1793,13 @@ while :; do
         outage_end_stamp=$(date '+%F %T')
         echo "outage: n$OUTAGE_NODE has its network back at sequence $min ($dropped packets dropped)$([ "$OUTAGE_NEW_ADDRESS" = 1 ] && echo ", public address now 127.0.$OUTAGE_NODE.2")"
     fi
+    if [ "$INFLATED_ROUNDS_AT" -gt 0 ] && [ -z "$INFLATED_PID" ] && [ "$min" -ge "$INFLATED_ROUNDS_AT" ]; then
+        inflated_from=$(date '+%F %T')
+        echo "inflated rounds: one peer sends n$INFLATED_ROUNDS_NODE messages of rounds from $((min + 100000)) on for $INFLATED_ROUNDS_SECONDS s, from sequence $min"
+        python3 "$HERE/inflated_rounds.py" "$(pub_ip "$INFLATED_ROUNDS_NODE")" $((BASE_PORT + INFLATED_ROUNDS_NODE)) \
+            "${KEYS[$((INFLATED_ROUNDS_NODE - 1))]}" $((min + 100000)) --seconds "$INFLATED_ROUNDS_SECONDS" > "$WORK/inflated-rounds.log" 2>&1 &
+        INFLATED_PID=$!
+    fi
     if [ -n "$NET_FAULT" ] && [ "$net_fault_at" -eq 0 ] && [ "$min" -ge "$NET_FAULT_AT" ]; then
         net_fault_on
         net_fault_at=$(date +%s)
@@ -2280,7 +2309,8 @@ PY
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; } \
         && { [ "$SAMPLE_CONTRACTS" != "1" ] || [ -n "$SAMPLES_PID" ]; } \
-        && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ]; }; }; then break; fi
+        && { [ "$OUTAGE_NODE" -eq 0 ] || { [ "$outage_end" -gt 0 ] && [ "$(date +%s)" -ge $((outage_end + REJOIN_MINUTES * 60)) ]; }; } \
+        && { [ "$INFLATED_ROUNDS_AT" -eq 0 ] || { [ -n "$INFLATED_PID" ] && ! kill -0 "$INFLATED_PID" 2>/dev/null; }; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
@@ -2294,13 +2324,14 @@ done
 if [ "$OUTAGE_NODE" -gt 0 ]; then
     from_stamp=$(date -d "$outage_end_stamp 60 seconds" '+%F %T')
     rejoin_status=0
-    python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" <<'PY' || rejoin_status=$?
+    python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" "$REJOIN_MAX_SLOW" <<'PY' || rejoin_status=$?
 import re, sys
-work, nodes, x, since, max_lag, max_gray = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
-lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)\)")
+work, nodes, x, since, max_lag, max_gray, max_slow = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4],
+                                                      int(sys.argv[5]), int(sys.argv[6]), int(sys.argv[7]))
+lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)[;)]")
 rows = {}
 for i in range(1, nodes + 1):
-    r = dict(rounds=0, trusted=0, lag_lines=0, episodes=set(), slow=0, gray=0, removed=0, warn=0)
+    r = dict(rounds=0, trusted=0, lag_lines=0, episodes=set(), slow=0, gray=0, removed=0, warn=0, sync=0)
     with open(f"{work}/n{i}/node.log", errors="replace") as f:
         for line in f:
             if line[1:20] < since:
@@ -2322,22 +2353,46 @@ for i in range(1, nodes + 1):
                 r["removed"] += 1
             elif "ROUND LAG" in line:
                 r["warn"] += 1
+            elif "SYNC: requesting" in line:
+                r["sync"] += 1
     rows[i] = r
 print(f"REJOIN: from {since} (60 s after n{x} got its network back)")
-print("REJOIN: node  rounds  trusted%  lag-episodes  lag-lines  slow-rounds  own-key-gray  neighbours-removed  lag-warnings")
+print("REJOIN: node  rounds  trusted%  lag-episodes  lag-lines  slow-rounds  own-key-gray  neighbours-removed  lag-warnings  sync-requests")
 for i, r in rows.items():
     share = 100.0 * r["trusted"] / r["rounds"] if r["rounds"] else 0.0
     print(f"REJOIN: n{i:<3}{'*' if i == x else ' '} {r['rounds']:6d}  {share:7.1f}%  {len(r['episodes']):12d}  {r['lag_lines']:9d}  "
-          f"{r['slow']:11d}  {r['gray']:12d}  {r['removed']:18d}  {r['warn']:12d}")
+          f"{r['slow']:11d}  {r['gray']:12d}  {r['removed']:18d}  {r['warn']:12d}  {r['sync']:13d}")
 others = [len(r["episodes"]) for i, r in rows.items() if i != x]
+rounds = sorted(r["rounds"] for i, r in rows.items() if i != x)
+median = rounds[len(rounds) // 2] if rounds else 0
+syncs = sorted(r["sync"] for i, r in rows.items() if i != x)
 rx = rows[x]
-ok = len(rx["episodes"]) <= max_lag and rx["gray"] < max_gray
+# a node that gets no round package at all lags in no round of its own: it follows by SYNC only, with
+# fewer rounds than the others and slow ones
+ok = (len(rx["episodes"]) <= max_lag and rx["gray"] < max_gray and rx["rounds"] * 10 >= median * 9
+      and rx["slow"] <= max_slow)
 print(f"REJOIN RESULT: n{x} {'recovered' if ok else 'did NOT recover'}: {len(rx['episodes'])} round lag episodes "
       f"(others at most {max(others) if others else 0}, limit {max_lag}), own key gray-listed {rx['gray']} times (limit {max_gray - 1}), "
-      f"trusted in {rx['trusted']} of {rx['rounds']} rounds")
+      f"{rx['rounds']} rounds against a median of {median} (at least 90 %), {rx['slow']} slow rounds (limit {max_slow}), "
+      f"{rx['sync']} SYNC requests (others at most {syncs[-1] if syncs else 0}), trusted in {rx['trusted']} of {rx['rounds']} rounds")
 sys.exit(0 if ok else 1)
 PY
     [ "$rejoin_status" -eq 0 ] || { echo "FAIL: n$OUTAGE_NODE did not recover from the outage by itself"; exit 1; }
+fi
+
+# INFLATED_ROUNDS_AT: the round lag one peer claimed was seen and logged, never taken for a ROUND LAG
+if [ "$INFLATED_ROUNDS_AT" -gt 0 ]; then
+    status=0; wait "$INFLATED_PID" 2>/dev/null || status=$?
+    cat "$WORK/inflated-rounds.log"
+    [ "$status" -eq 0 ] || { echo "FAIL: inflated_rounds.py could not keep its connection to n$INFLATED_ROUNDS_NODE"; exit 1; }
+    log="$WORK/n$INFLATED_ROUNDS_NODE/node.log"
+    seen=$(awk -v f="$inflated_from" 'substr($0, 2, 19) >= f' "$log" | grep -ac 'detect round lag' || true)
+    unconfirmed=$(awk -v f="$inflated_from" 'substr($0, 2, 19) >= f' "$log" | grep -a 'detect round lag' | grep -ac '; 0 of ' || true)
+    lag=$(grep -ac 'ROUND LAG:' "$log" || true)
+    resets=$(grep -ac 'TRANSPORT> network reset' "$log" || true)
+    echo "INFLATED ROUNDS RESULT: n$INFLATED_ROUNDS_NODE logged $seen lagging round(s) ($unconfirmed with no neighbour ahead), $lag ROUND LAG warning(s), $resets network reset(s)"
+    [ "$seen" -ge 10 ] || { echo "FAIL: n$INFLATED_ROUNDS_NODE did not see the inflated rounds (the test sent nothing it read)"; exit 1; }
+    [ "$lag" -eq 0 ] && [ "$resets" -eq 0 ] || { echo "FAIL: one peer with inflated rounds made n$INFLATED_ROUNDS_NODE see a ROUND LAG or reset its network"; exit 1; }
 fi
 
 # network identity for clients: GetNodeInfo on the diag port of every node, the same networkUuid on

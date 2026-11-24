@@ -282,13 +282,17 @@ jobs:
           # 2026-11-24): it must catch up and keep up by itself, without round lag or a gray-listed key,
           # for 20 min. A network the size of mainnet (19 nodes, 7 trusted, 16 neighbours at most)
           - name: net-outage-rejoin
-            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_NAT=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_NAT=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
           # the same, and the provider hands out a new public address: the old one stays dead
           - name: net-outage-new-address
-            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_NAT=1 OUTAGE_NEW_ADDRESS=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_NAT=1 OUTAGE_NEW_ADDRESS=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+          # one peer claims rounds far ahead for 15 min: the node logs it, but it is no ROUND LAG and
+          # never a network reset (a quorum of neighbours must confirm the lag)
+          - name: net-inflated-rounds
+            env: INFLATED_ROUNDS_AT=300 INFLATED_ROUNDS_SECONDS=900 RESTART_AT=0
           # comparison: the same outage on a node with a public address (no NAT)
           - name: net-outage-rejoin-public
-            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=12 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
+            env: NODES=19 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_AT=600 OUTAGE_SECONDS=150 RESTART_AT=0
             manual: true
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
