@@ -66,6 +66,8 @@ public:
     // what a restart rebuilds in the network layer, without one (net::Host::Reset): connections closed,
     // the routing table looked up again, so the neighbours go and come back with a fresh handshake
     void resetNetwork();
+    // a node behind a NAT keeps a connection of its own open to every peer of its routing table
+    void keepReachable();
 
     // neighbours interface
     void setPermanentNeighbours(const std::set<cs::PublicKey>&);

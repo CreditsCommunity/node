@@ -34,6 +34,8 @@ public:
     void peerDisconnected(const cs::PublicKey&);
 
     void pingNeighbours();
+    // pings the peers that are not neighbours (a node behind a NAT, see Transport::run)
+    void pingOthers(const std::vector<cs::PublicKey>& peers);
 
     void forEachNeighbour(NeighboursCallback);
     uint32_t getNeighboursCount() const;
