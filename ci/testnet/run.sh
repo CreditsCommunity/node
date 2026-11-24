@@ -253,8 +253,10 @@
 #        share and the gray-listings of its own key. The outage node fails the run when it lags in
 #        more than REJOIN_MAX_LAG episodes (default 5), its key is gray-listed REJOIN_MAX_GRAY times
 #        or more (default 2), it has more than REJOIN_MAX_SLOW slow rounds (default 10) or fewer than
-#        90 % of the median rounds of the others (no round package at all, blocks by SYNC only): a node
-#        must recover by itself, without a restart
+#        90 % of the median rounds of the others (no round package at all, blocks by SYNC only), or
+#        when the peers failed to dial it more than REJOIN_MAX_DIAL_FAILURES times (default 3; their
+#        p2p debug.log: a peer that recorded a port where nothing listens drops what it sends the node,
+#        relayed round packages included): a node must recover by itself, without a restart
 #        OUTAGE_BLIP_AFTER (seconds, default 0 = off): that long after the outage the node loses its
 #        network once more, for OUTAGE_BLIP_SECONDS (default 15): its connections time out, but it is
 #        too short for the peers to drop it from their routing tables, as on a flaky home line. The
@@ -394,6 +396,7 @@ OUTAGE_BLIP_SECONDS=${OUTAGE_BLIP_SECONDS:-15}
 REJOIN_MAX_LAG=${REJOIN_MAX_LAG:-5}
 REJOIN_MAX_GRAY=${REJOIN_MAX_GRAY:-2}
 REJOIN_MAX_SLOW=${REJOIN_MAX_SLOW:-10}
+REJOIN_MAX_DIAL_FAILURES=${REJOIN_MAX_DIAL_FAILURES:-3}
 INFLATED_ROUNDS_AT=${INFLATED_ROUNDS_AT:-0}
 INFLATED_ROUNDS_NODE=${INFLATED_ROUNDS_NODE:-3}
 INFLATED_ROUNDS_SECONDS=${INFLATED_ROUNDS_SECONDS:-900}
@@ -2348,10 +2351,28 @@ done
 if [ "$OUTAGE_NODE" -gt 0 ]; then
     from_stamp=$(date -d "$outage_end_stamp 60 seconds" '+%F %T')
     rejoin_status=0
-    python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" "$REJOIN_MAX_SLOW" <<'PY' || rejoin_status=$?
+    python3 - "$WORK" "$NODES" "$OUTAGE_NODE" "$from_stamp" "$REJOIN_MAX_LAG" "$REJOIN_MAX_GRAY" "$REJOIN_MAX_SLOW" \
+        "${KEYS[$((OUTAGE_NODE - 1))]}" "$REJOIN_MAX_DIAL_FAILURES" <<'PY' || rejoin_status=$?
 import re, sys
 work, nodes, x, since, max_lag, max_gray, max_slow = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4],
                                                       int(sys.argv[5]), int(sys.argv[6]), int(sys.argv[7]))
+key, max_dial = sys.argv[8], int(sys.argv[9])
+# the peers that could not dial the node (p2p debug.log, "2026-11-24 10:06:43,496 DEBUG ..."): a peer
+# that recorded a port where nothing listens drops what it sends the node (relayed round packages)
+dial_failures = {}
+for i in range(1, nodes + 1):
+    if i == x:
+        continue
+    n = 0
+    try:
+        with open(f"{work}/n{i}/debug.log", errors="replace") as f:
+            for line in f:
+                if line[:19] >= since and key in line and "Cannot connect to remote node" in line:
+                    n += 1
+    except OSError:
+        pass
+    if n:
+        dial_failures[i] = n
 lag_re = re.compile(r"detect round lag \(global (\d+), local (\d+)[;)]")
 rows = {}
 for i in range(1, nodes + 1):
@@ -2393,12 +2414,16 @@ syncs = sorted(r["sync"] for i, r in rows.items() if i != x)
 rx = rows[x]
 # a node that gets no round package at all lags in no round of its own: it follows by SYNC only, with
 # fewer rounds than the others and slow ones
+failed_dials = sum(dial_failures.values())
+print(f"REJOIN: peers that could not dial n{x}: " +
+      (", ".join(f"n{i} {c} time(s)" for i, c in sorted(dial_failures.items())) or "none"))
 ok = (len(rx["episodes"]) <= max_lag and rx["gray"] < max_gray and rx["rounds"] * 10 >= median * 9
-      and rx["slow"] <= max_slow)
+      and rx["slow"] <= max_slow and failed_dials <= max_dial)
 print(f"REJOIN RESULT: n{x} {'recovered' if ok else 'did NOT recover'}: {len(rx['episodes'])} round lag episodes "
       f"(others at most {max(others) if others else 0}, limit {max_lag}), own key gray-listed {rx['gray']} times (limit {max_gray - 1}), "
       f"{rx['rounds']} rounds against a median of {median} (at least 90 %), {rx['slow']} slow rounds (limit {max_slow}), "
-      f"{rx['sync']} SYNC requests (others at most {syncs[-1] if syncs else 0}), trusted in {rx['trusted']} of {rx['rounds']} rounds")
+      f"{rx['sync']} SYNC requests (others at most {syncs[-1] if syncs else 0}), {failed_dials} failed dials by "
+      f"{len(dial_failures)} peer(s) (limit {max_dial}), trusted in {rx['trusted']} of {rx['rounds']} rounds")
 sys.exit(0 if ok else 1)
 PY
     [ "$rejoin_status" -eq 0 ] || { echo "FAIL: n$OUTAGE_NODE did not recover from the outage by itself"; exit 1; }
