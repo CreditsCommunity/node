@@ -250,3 +250,49 @@ TEST(RoundLag, Settings) {
     EXPECT_TRUE(tick.reset);
     EXPECT_TRUE(m.persistent());
 }
+
+TEST(RoundLag, NoResetWhileForkHeld) {
+    // FORK HELD: the neighbours are ahead on the chain the node refuses; hours of confirmed lag give
+    // warnings that say so, never a reset, and nothing counted towards the backoff or the hourly cap
+    Monitor m;
+    std::vector<std::string> lines;
+    size_t resets = 0;
+    uint64_t round = 10;
+    for (int64_t t = 1000; t < 1000 + 3 * 3600; t += 5) {
+        if ((t - 1000) % 60 == 0) {
+            m.onLag(t, round++, "peer-a", true);
+        }
+        const auto tick = m.tick(t, false);
+        resets += tick.reset ? 1 : 0;
+        if (!tick.text.empty()) {
+            lines.push_back(tick.text);
+        }
+    }
+    EXPECT_EQ(resets, 0u);
+    EXPECT_EQ(m.resets(), 0u);
+    EXPECT_TRUE(m.persistent());
+    ASSERT_FALSE(lines.empty());
+    for (const auto& l : lines) {
+        EXPECT_NE(l.find("FORK HELD"), std::string::npos) << l;
+        EXPECT_EQ(l.find("rebuilding"), std::string::npos) << l;
+    }
+    // the fork resolved, the lag goes on: the first reset at once
+    const auto tick = m.tick(1000 + 3 * 3600, true);
+    EXPECT_TRUE(tick.reset);
+}
+
+TEST(RoundLag, TestSettingsFromText) {
+    const auto s = cs::roundlag::settingsFromText("60,3,30,20,45");
+    EXPECT_EQ(s.window, 60);
+    EXPECT_EQ(s.episodes, 3u);
+    EXPECT_EQ(s.persistAfter, 30);
+    EXPECT_EQ(s.warnEvery, 20);
+    EXPECT_EQ(s.resetEvery, 45);
+    const Settings defaults;
+    for (const char* bad : {"", "60,3,30", "60,0,30,20,45", "a,b,c,d,e", "-1,3,30,20,45"}) {
+        const auto d = cs::roundlag::settingsFromText(bad);
+        EXPECT_EQ(d.window, defaults.window) << bad;
+        EXPECT_EQ(d.episodes, defaults.episodes) << bad;
+    }
+    EXPECT_EQ(cs::roundlag::settingsFromText(nullptr).resetEvery, defaults.resetEvery);
+}

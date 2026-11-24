@@ -1,6 +1,7 @@
 #include <csnode/roundlag.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <ctime>
 #include <iterator>
 #include <sstream>
@@ -43,6 +44,11 @@ Monitor::Monitor(Settings settings)
 : settings_(settings) {
 }
 
+void Monitor::setSettings(const Settings& settings) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    settings_ = settings;
+}
+
 void Monitor::pruneLocked(int64_t nowSeconds) const {
     for (auto it = episodes_.begin(); it != episodes_.end();) {
         it = nowSeconds - it->second.time > settings_.window ? episodes_.erase(it) : std::next(it);
@@ -73,7 +79,29 @@ bool Monitor::onLag(int64_t nowSeconds, uint64_t round, const std::string& sende
     return res.second;
 }
 
-Tick Monitor::tick(int64_t nowSeconds) {
+Settings settingsFromText(const char* text) {
+    Settings s;
+    if (text == nullptr) {
+        return s;
+    }
+    long long v[5] = {0, 0, 0, 0, 0};
+    if (std::sscanf(text, "%lld,%lld,%lld,%lld,%lld", &v[0], &v[1], &v[2], &v[3], &v[4]) != 5) {
+        return s;
+    }
+    for (const auto x : v) {
+        if (x <= 0) {
+            return Settings{};
+        }
+    }
+    s.window = v[0];
+    s.episodes = static_cast<size_t>(v[1]);
+    s.persistAfter = v[2];
+    s.warnEvery = v[3];
+    s.resetEvery = v[4];
+    return s;
+}
+
+Tick Monitor::tick(int64_t nowSeconds, bool resetAllowed) {
     std::lock_guard<std::mutex> lock(mutex_);
     pruneLocked(nowSeconds);
     while (!resetTimes_.empty() && nowSeconds - resetTimes_.front() >= 3600) {
@@ -125,8 +153,21 @@ Tick Monitor::tick(int64_t nowSeconds) {
     interval = std::min(interval, settings_.resetMaxInterval);
     const bool resetDue = (resets_ == 0 ? (lastReset_ == 0 || nowSeconds - lastReset_ >= settings_.resetEvery)
                                         : nowSeconds - lastReset_ >= interval) &&
-                          resetTimes_.size() < settings_.resetsPerHour;
+                          resetTimes_.size() < settings_.resetsPerHour && resetAllowed;
     const bool warnDue = lastWarning_ == 0 || nowSeconds - lastWarning_ >= settings_.warnEvery;
+    if (!resetAllowed) {
+        if (!warnDue) {
+            return result;
+        }
+        std::ostringstream held;
+        held << "ROUND LAG: " << count << " confirmed lag episodes in the last " << minutes(settings_.window) << ", for "
+             << minutes(nowSeconds - lagSince_) << ", while the node holds a fork (FORK HELD): no network reset, "
+             << "its neighbours are on the chain it refuses";
+        lastWarning_ = nowSeconds;
+        result.warning = true;
+        result.text = held.str();
+        return result;
+    }
     if (!resetDue && !warnDue) {
         return result;
     }

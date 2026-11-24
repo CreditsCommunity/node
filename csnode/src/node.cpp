@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <numeric>
 #include <random>
@@ -302,8 +303,19 @@ void Node::onForkGuardTick() {
 // every 5 s (fork guard's timer): round lag that persists is logged with what the node does about it,
 // the network sessions are rebuilt (at most every 15 min) and round-lag.json is kept for the healthcheck
 void Node::onRoundLagTick() {
+#ifdef CREDITS_TESTNET
+    // private test network builds only: shorter settings from CS_TEST_ROUNDLAG, so CI sees a reset
+    if (!roundLagConfigured_) {
+        roundLagConfigured_ = true;
+        if (const char* text = std::getenv("CS_TEST_ROUNDLAG")) {
+            roundLag_.setSettings(cs::roundlag::settingsFromText(text));
+            cslog() << "ROUND LAG: test settings " << text << " (CS_TEST_ROUNDLAG, test network build)";
+        }
+    }
+#endif
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    const auto tick = roundLag_.tick(now);
+    // no network reset while a fork is held: the neighbours are ahead on the chain the node refuses
+    const auto tick = roundLag_.tick(now, !blockChain_.forkHeldRecord().has_value());
     if (!tick.text.empty()) {
         if (tick.warning) {
             cswarning() << tick.text;

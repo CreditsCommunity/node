@@ -10,7 +10,7 @@
 
 // Round lag that does not go away. A node that keeps missing round packages sees messages of rounds
 // ahead of its own ("detect round lag") and catches up by SYNC, round after round; after a network
-// outage this went on for hours on a node behind a NAT until it was restarted (incident 2026-11-24).
+// outage this went on for hours on a mainnet node behind a NAT until it was restarted (2026-11-24).
 // Log, status file and the decision to rebuild the network sessions only: nothing here is sent,
 // signed, hashed or validated.
 //
@@ -26,7 +26,11 @@
 //   one at once, then after `resetEvery` seconds, doubling up to `resetMaxInterval`, and never more
 //   than `resetsPerHour` in an hour; every reset is logged with its reason; ROUND LAG over when it stops;
 // - round-lag.json next to the db folder (like fork-held.json): the Docker healthcheck reports the
-//   container unhealthy while "persistent" is "true".
+//   container unhealthy while "persistent" is "true";
+// - no reset while the node holds a fork (FORK HELD): its neighbours are ahead on the chain it refuses.
+//
+// Settings can be shortened in a private test network build only (CREDITS_TESTNET, environment
+// variable CS_TEST_ROUNDLAG, see settingsFromTestEnv), so that CI sees a real reset in minutes.
 namespace cs::roundlag {
 
 inline constexpr const char* kStatusFile = "round-lag.json";
@@ -43,6 +47,10 @@ struct Settings {
 
 // whether the node is really behind, from what it can check itself: its own last block against
 // the last blocks its neighbours announced (distinct peers)
+// CREDITS_TESTNET builds: "window,episodes,persistAfter,warnEvery,resetEvery" (seconds) from
+// CS_TEST_ROUNDLAG; otherwise, or when malformed, the defaults
+Settings settingsFromText(const char* text);
+
 bool quorumAhead(uint64_t ownLastSeq, const std::vector<uint64_t>& neighbourLastSeqs, size_t* ahead = nullptr);
 
 struct Tick {
@@ -55,14 +63,17 @@ struct Tick {
 class Monitor {
 public:
     explicit Monitor(Settings settings = Settings{});
+    void setSettings(const Settings& settings);
 
     // a message two or more rounds ahead seen at local round `round` from `sender` (any stable id of
     // the peer); confirmed: quorumAhead held at that moment. nowSeconds: a monotonic clock.
     // Returns true for the first message of that round (the one to log)
     bool onLag(int64_t nowSeconds, uint64_t round, const std::string& sender, bool confirmed);
 
-    // every few seconds: what to log and whether to reset the network sessions
-    Tick tick(int64_t nowSeconds);
+    // every few seconds: what to log and whether to reset the network sessions. resetAllowed false
+    // (FORK HELD: the node refuses the chain its neighbours are on, so it "lags" by design): the lag is
+    // reported, the status kept, but no reset is made or counted
+    Tick tick(int64_t nowSeconds, bool resetAllowed = true);
 
     bool lagging() const;
     bool persistent() const;
