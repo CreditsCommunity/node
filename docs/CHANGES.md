@@ -42,7 +42,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #198 | net, csnode: a node behind a NAT stays reachable after a network outage, and a round lag that persists is reported and acted on. Prompted by a mainnet NAS node 2-10 rounds behind for 5 hours after an outage on 2026-11-24 until restarted, probably for the reason below (seen on mainnet: that node, behind a NAT without UPnP, failed to dial another NAT'd community node 229 times in 8 hours at the port recorded from its connection; its p2p log does not cover the start of the lag). p2p bumped to 111f8ca (CreditsCommunity/p2p#4): the routing table keeps the TCP port a peer announces instead of the source port of the connection it opened (an ephemeral port nothing listens on, official since 2020: once that connection closed the peer could not dial the node again and dropped what it sent it, round packages included; seen on mainnet and in the test network), a dropped connection erases only itself, `net::Host::Reset` (pending dials abandoned). A node behind a NAT pings the k-bucket peers of its routing table every 2 s (at most 32 non-neighbours a time, about 160 peers covered; no queue for unknown ids, no lookup), so that official peers, which still record the source port, reach it through its own connection. `ROUND LAG` safety net: rounds in which the node saw messages two or more rounds ahead count only when a quorum of distinct neighbours announced blocks ahead of its own; 5 of them in 10 minutes, for 10 minutes, give a `ROUND LAG` warning, a network reset as a restart would (at once, then after 15 min, doubling up to 4 h, at most 2 an hour) and `ROUND LAG over` when it ends; `round-lag.json` makes the Docker healthcheck unhealthy while it persists; no reset while FORK HELD; `detect round lag` once per round. CI: robustness `net-outage-rejoin`, `net-outage-new-address`, `net-inflated-rounds`, `net-round-lag-reset` (the network reset on a live network; test-network builds only read `CS_TEST_ROUNDLAG` and `CS_TEST_RESET_AT_SEQ`) and `net-outage-rejoin-public` (manual). No consensus change, no new option |
 
 ## community.20 — 2026-11-23
 

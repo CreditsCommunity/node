@@ -2,6 +2,8 @@
 # Healthy while the last written block advances: fails when it has not changed for 10 minutes.
 # Unhealthy while the node reports FORK HELD (fork-held.json with "held": "true"): it refused a
 # competing chain and waits for the operator.
+# Unhealthy while the node reports a persistent ROUND LAG (round-lag.json with "persistent": "true"): it
+# keeps missing round packages; it rebuilds its network sessions by itself, a restart is the next step.
 # Prints the latest PEERS summary and the official-nodes state from peer-status.json (information only:
 # official nodes gone never makes the container unhealthy).
 peers=/data/peer-status.json
@@ -22,6 +24,16 @@ if [ -f "$fork" ] && grep -q '"held": "true"' "$fork"; then
     echo "FORK HELD since $since: the node refused a competing chain (fork point #$at) and keeps its own."
     echo "Check with other nodes or the monitor first. Our chain is right: docker compose exec node touch /data/dismiss-fork."
     echo "The other chain is right: docker compose stop && docker compose run --rm node resolve-fork && docker compose up -d"
+    exit 1
+fi
+lag=/data/round-lag.json
+if [ -f "$lag" ] && grep -q '"persistent": "true"' "$lag"; then
+    since=$(sed -nE 's/.*"since": "([^"]+)".*/\1/p' "$lag")
+    episodes=$(sed -nE 's/.*"episodes": "([0-9]+)".*/\1/p' "$lag")
+    window=$(sed -nE 's/.*"window_minutes": "([0-9]+)".*/\1/p' "$lag")
+    resets=$(sed -nE 's/.*"resets": "([0-9]+)".*/\1/p' "$lag")
+    echo "ROUND LAG since $since: $episodes lag episodes in the last $window min, round packages arrive late or not at all."
+    echo "The node rebuilt its network sessions $resets time(s) by itself. If it lasts: docker compose restart, and check the network of this host."
     exit 1
 fi
 # the two newest log files, the older first: with the newest first, a rotated log made the last line

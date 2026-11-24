@@ -430,6 +430,22 @@ into the plan's BootstrapSignature protocol.
   Docker healthcheck (never unhealthy for this), and the FORK HELD detail line says whether the
   refused peer is an official or a community node. Log and status only: nothing is sent, signed,
   hashed or validated differently, and there is no new option.
+- **Round lag that does not go away.** The official node logs `detect round lag` for every message
+  of a round ahead of its own (dozens a round) and does nothing more about it; after a network
+  outage a node behind a NAT kept missing round packages for hours, until it was restarted. This node
+  logs the first such message of a round (the others at debug level) and counts the rounds. A round
+  counts only if, at that moment, a quorum of distinct neighbours (at least 3 and more than half)
+  announced a last block at least two above the node's own: the round number in a packet header is
+  the sender's word, and one peer sending inflated rounds must not make the node reset its network.
+  When it lags in at least 5 such rounds in 10 minutes, for 10 minutes, it warns `ROUND LAG` with
+  what it does about it and rebuilds its network sessions as a restart would (`net::Host::Reset`:
+  every connection closed, the routing table looked up again, the neighbours handshaked again): the
+  first reset at once, the next one 15 minutes later at the earliest, the interval doubling up to 4
+  hours, never more than 2 in an hour, each logged with its reason; `ROUND LAG over` when it keeps up
+  again. No reset while the node holds a fork (FORK HELD: its neighbours are ahead on the chain it
+  refuses); the warning says so, and the healthcheck reports the fork. The state is in `round-lag.json` next to
+  the `db` folder, and the Docker healthcheck reports the container unhealthy while the lag persists.
+  Nothing is sent, signed, hashed or validated differently, and there is no new option.
 
 ## Security and correctness fixes
 
@@ -451,6 +467,30 @@ consensus rules.
   refreshed from its answers to our pings, instead of the first one seen; passes each received
   datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
   host at exit.
+- **Nodes behind a NAT stay reachable.** When a node behind a NAT (a home router, Docker) opened a
+  connection to a peer, the official p2p library (since 2020-01-15, commit 4705c36) recorded the
+  connection's source port as the node's TCP port: an ephemeral port the node's socket never bound
+  (outgoing connections bind no port) and where nothing listens. Once that connection closed (an
+  idle timeout, a network outage, a new address) the peer could not dial the node again, marked it
+  unreachable every 120 s and dropped what it sent it, relayed round packages included, until the
+  node left the peer's routing table (a restart). It is seen on mainnet: a community node behind a
+  NAT (UPnP not found, port forwarded by hand) failed to dial another NAT'd community node 229 times
+  in 8 hours, "Connection refused" every 120 s, at the port it had recorded from that node's
+  connection; and in the private test network (robustness `net-outage-new-address`). The same NAS
+  node lagged for five hours after an outage on 2026-11-24 until it was restarted, probably for this
+  reason (its p2p log does not cover the start of the lag). The fork keeps the TCP port a peer announces, and erases only the connection that dropped
+  (it erased every connection with that peer in the same direction, a newer one too). Official peers
+  still record the source port, so a node behind a NAT (private address, no UPnP mapping; with a
+  UPnP mapping the peers do not rewrite the port and this does not run) pings the peers of its
+  routing table every 2 s, not only its neighbours: it keeps a connection of its own open to each of
+  them, through which they reach it. Only the k-buckets count (nodes whose datagrams came from the
+  endpoint recorded, never ids other nodes named), at most 32 a time in turn: with the 10 s idle
+  timeout that covers about 160 routing-table peers (mainnet has about 25). A ping goes only to a
+  node still in the k-buckets: no queue for unknown ids and no lookup (to a known node not yet
+  connected it waits in the send queue until the dial ends, as any message). `net::Host::Reset`
+  rebuilds the p2p sessions as a restart would (used by `ROUND LAG`, see above; pending dials are
+  abandoned without marking their peers unreachable). Nothing changes on the wire but those pings,
+  which any node answers.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;

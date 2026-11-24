@@ -278,6 +278,28 @@ jobs:
             env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
           - name: net-partition
             env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
+          # a node at home behind a NAT loses its connection for 150 s and gets it back, then for 15 s
+          # once more 5 min later (incident of 2026-11-24): it must catch up and keep up by itself,
+          # without round lag or a gray-listed key, for 20 min. A network the size of mainnet (23 nodes,
+          # 7 trusted, 16 neighbours at most: some peers are not its neighbours)
+          - name: net-outage-rejoin
+            env: NODES=23 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_NAT=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 OUTAGE_BLIP_AFTER=300 RESTART_AT=0
+          # the same, and the provider hands out a new public address: the old one stays dead
+          - name: net-outage-new-address
+            env: NODES=23 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_NAT=1 OUTAGE_NEW_ADDRESS=1 OUTAGE_AT=600 OUTAGE_SECONDS=150 OUTAGE_BLIP_AFTER=300 RESTART_AT=0
+          # one peer claims rounds far ahead for 15 min: the node logs it, but it is no ROUND LAG and
+          # never a network reset (a quorum of neighbours must confirm the lag)
+          - name: net-inflated-rounds
+            env: INFLATED_ROUNDS_AT=300 INFLATED_ROUNDS_SECONDS=900 RESTART_AT=0
+          # the network reset of a persistent ROUND LAG (net::Host::Reset) on a live network: n9 resets at
+          # blocks 400 and 700 (CS_TEST_RESET_AT_SEQ, test builds only); its neighbours must come back
+          # after each reset, and it must keep up and be trusted again for 10 min after the last one
+          - name: net-round-lag-reset
+            env: NODES=9 TRUSTED_NODES=7 RESET_NODE=9 RESET_AT_SEQ=400,700 RESTART_AT=0
+          # comparison: the same outage on a node with a public address (no NAT)
+          - name: net-outage-rejoin-public
+            env: NODES=23 TRUSTED_NODES=7 OUTAGE_NODE=13 OUTAGE_AT=600 OUTAGE_SECONDS=150 OUTAGE_BLIP_AFTER=300 RESTART_AT=0
+            manual: true
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
             env: SLOW_NODES=3,6 SLOW_CPU=5

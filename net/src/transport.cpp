@@ -17,6 +17,7 @@
 
 #include <net/hostdata.hpp>
 
+#include <keepalive.hpp>
 #include <packetvalidator.hpp>
 
 namespace {
@@ -142,6 +143,7 @@ void Transport::run() {
         if (stopped_.load(std::memory_order_acquire) || Transport::gSignalStatus != 0) break;
 
         neighbourhood_.pingNeighbours();
+        keepReachable();
         emit mainThreadIterated();
 
         std::unique_lock<std::mutex> lock(shutdownMux_);
@@ -238,6 +240,41 @@ void Transport::sendBroadcast(Packet&& pack) {
 
 void Transport::sendBroadcastIfNoConnection(Packet&& pack, const cs::PublicKey& receiver) {
     host_.SendBroadcastIfNoConnection(toNodeId(receiver), pack.moveData());
+}
+
+// A node behind a NAT (private address, no UPnP mapping) cannot be dialled reliably: a peer reaches it
+// through a connection it opened. Official nodes record the source port of such a connection as its
+// TCP port (an ephemeral port of the NAT), so once the connection closes they cannot dial it again and
+// drop what they send it, relayed round packages included, until it leaves their routing table. The
+// node pings the peers of its routing table (its neighbours already are, every 2 s), which keeps a
+// connection of its own open to each of them; a peer answers anyone's ping. Only the k-buckets (nodes
+// whose datagrams came from the endpoint recorded, not ids other nodes named), at most
+// kMaxPeersPerIteration a time, in turn (32 every 2 s against the 10 s idle timeout: about 160 peers
+// covered), and only to a node still there when sent: no queue for an unknown id, no lookup.
+void Transport::keepReachable() {
+    if (!net::Network::Instance().BehindNAT()) {
+        return;
+    }
+    std::vector<net::NodeEntrance> table;
+    host_.GetRoutingTableNodes(table);
+    std::vector<cs::PublicKey> peers;
+    peers.reserve(table.size());
+    for (const auto& n : table) {
+        peers.push_back(toPublicKey(n.id));
+    }
+    const auto picked = cs::keepalive::select<cs::PublicKey>(
+        peers, [this](const cs::PublicKey& key) { return neighbourhood_.contains(key); },
+        cs::keepalive::kMaxPeersPerIteration, keepaliveOffset_);
+    neighbourhood_.pingKnown(picked);
+}
+
+bool Transport::sendDirectIfKnown(Packet&& pack, const cs::PublicKey& receiver) {
+    return host_.SendDirectIfKnown(toNodeId(receiver), pack.moveData());
+}
+
+void Transport::resetNetwork() {
+    cswarning() << "TRANSPORT> network reset: closing every connection and looking the peers up again";
+    host_.Reset();
 }
 
 void Transport::clearInbox() {

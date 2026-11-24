@@ -341,6 +341,25 @@ grep -q 'PEERS: 6 neighbours (0 official, 6 community)' <<<"$out" && grep -q 'OF
 printf '{\n    "held": "true",\n    "since": "2026-11-19 10:00:00 UTC",\n    "fork_point": "4899"\n}\n' > "$d/fork-held.json"
 set +e; out=$(health "$d"); rc=$?; set -e
 [ "$rc" = 1 ] && grep -q 'FORK HELD since' <<<"$out" && grep -q 'PEERS:' <<<"$out" || { echo "$out"; fail "healthcheck with a fork held and peer status: exit $rc"; }
-pass "resolve-fork (also to-located), set-bc-top and dismiss-fork; the healthcheck reports FORK HELD and the peer status"
+# round-lag.json: unhealthy while the lag persists, healthy when it only lags or is over
+rm -f "$d/fork-held.json"
+cat > "$d/round-lag.json" <<'EOF2'
+{
+    "lagging": "true",
+    "persistent": "true",
+    "since": "2026-11-24 03:54:38 UTC",
+    "episodes": "23",
+    "window_minutes": "10",
+    "resets": "1",
+    "resets_total": "1",
+    "last_reset": "2026-11-24 04:04:40 UTC"
+}
+EOF2
+set +e; out=$(health "$d"); rc=$?; set -e
+[ "$rc" = 1 ] && grep -q 'ROUND LAG since 2026-11-24 03:54:38 UTC: 23 lag episodes in the last 10 min' <<<"$out" \
+    && grep -q 'rebuilt its network sessions 1 time' <<<"$out" || { echo "$out"; fail "healthcheck with a persistent round lag: exit $rc"; }
+printf '{\n    "lagging": "true",\n    "persistent": "false",\n    "episodes": "6",\n    "window_minutes": "10",\n    "resets": "0",\n    "resets_total": "0"\n}\n' > "$d/round-lag.json"
+out=$(health "$d") || { echo "$out"; fail "healthcheck with a round lag that does not persist must stay healthy"; }
+pass "resolve-fork (also to-located), set-bc-top and dismiss-fork; the healthcheck reports FORK HELD, a persistent ROUND LAG and the peer status"
 
 echo "PASS: entrypoint"

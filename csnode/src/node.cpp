@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <functional>
 #include <numeric>
 #include <stdexcept>
 
@@ -296,6 +298,66 @@ void Node::onForkGuardTick() {
     tickForkLocator();
     logForkHeldDetail(blockChain_.forkHeldRecord());
     onPeerStatusTick();
+    onRoundLagTick();
+}
+
+// every 5 s (fork guard's timer): round lag that persists is logged with what the node does about it,
+// the network sessions are rebuilt (at most every 15 min) and round-lag.json is kept for the healthcheck
+void Node::onRoundLagTick() {
+#ifdef CREDITS_TESTNET
+    // private test network builds only: shorter settings from CS_TEST_ROUNDLAG, so CI sees a reset
+    if (!roundLagConfigured_) {
+        roundLagConfigured_ = true;
+        if (const char* text = std::getenv("CS_TEST_ROUNDLAG")) {
+            roundLag_.setSettings(cs::roundlag::settingsFromText(text));
+            cslog() << "ROUND LAG: test settings " << text << " (CS_TEST_ROUNDLAG, test network build)";
+        }
+        // CS_TEST_RESET_AT_SEQ=s1,s2,...: a network reset once the node has stored each of these
+        // blocks, the reset ROUND LAG makes, so that CI checks the node rebuilds its sessions on a live
+        // network (a real lag is hard to produce in the test network)
+        if (const char* text = std::getenv("CS_TEST_RESET_AT_SEQ")) {
+            std::stringstream ss(text);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                try {
+                    testResetAt_.push_back(static_cast<cs::Sequence>(std::stoull(item)));
+                }
+                catch (...) {
+                }
+            }
+            std::sort(testResetAt_.begin(), testResetAt_.end(), std::greater<cs::Sequence>());
+        }
+    }
+    if (!testResetAt_.empty() && blockChain_.getLastSeq() >= testResetAt_.back()) {
+        cswarning() << "ROUND LAG: test network reset at block " << blockChain_.getLastSeq()
+                    << " (CS_TEST_RESET_AT_SEQ, test network build)";
+        testResetAt_.pop_back();
+        transport_->resetNetwork();
+    }
+#endif
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    // no network reset while a fork is held: the neighbours are ahead on the chain the node refuses
+    const auto tick = roundLag_.tick(now, !blockChain_.forkHeldRecord().has_value());
+    if (!tick.text.empty()) {
+        if (tick.warning) {
+            cswarning() << tick.text;
+        }
+        else {
+            cslog() << tick.text;
+        }
+    }
+    if (tick.reset) {
+        transport_->resetNetwork();
+    }
+    // written at the start too: a file left by an earlier run must not keep the container unhealthy
+    if (tick.statusChanged || !roundLagStatusWritten_) {
+        roundLagStatusWritten_ = true;
+        const auto dir = cs::forkguard::stateDirFor(cs::ConfigHolder::instance().config()->getPathToDB());
+        const auto wall = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (!cs::forkguard::writeFileAtomic(dir, cs::roundlag::kStatusFile, roundLag_.statusJson(wall, now))) {
+            csdebug() << "ROUND LAG: cannot write " << cs::roundlag::kStatusFile << " in " << dir;
+        }
+    }
 }
 
 void Node::onPeerStatusBlock(const csdb::Pool& pool) {
@@ -3513,8 +3575,25 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         else {
             // more then 1 round lag, request round info
             if (round > 1 && subRound_ == 0) {
-                // not on the very start
-                cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                // not on the very start; the first message of a lagging round is logged, the others
+                // (one per message ahead, dozens a round) only at debug level
+                // the round in the header is the sender's word: the episode counts towards ROUND LAG (and a
+                // network reset) only if a quorum of distinct neighbours announced blocks ahead of ours
+                const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                std::vector<uint64_t> announced;
+                transport_->forEachNeighbour([&announced](const cs::PublicKey&, cs::Sequence lastSeq, cs::RoundNumber) {
+                    announced.push_back(lastSeq);
+                });
+                size_t ahead = 0;
+                const bool confirmed = cs::roundlag::quorumAhead(blockChain_.getLastSeq(), announced, &ahead);
+                const std::string senderId(reinterpret_cast<const char*>(sender.data()), sender.size());
+                if (roundLag_.onLag(now, round, senderId, confirmed)) {
+                    cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << "; " << ahead << " of "
+                                << announced.size() << " neighbours ahead)";
+                }
+                else {
+                    csdebug() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
+                }
                 roundPackRequest(sender, rNum);
             }
 
