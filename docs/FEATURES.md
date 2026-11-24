@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.20 or earlier.
+Everything listed here is in release 4.2.532-community.20.1 or earlier.
 
 ## Storage
 
@@ -170,6 +170,16 @@ Everything listed here is in release 4.2.532-community.20 or earlier.
   `stall_minutes=`): after a long stall, nodes with the list may restart the network with a signed
   table of initial and listed keys; official nodes then sync the blocks. Not for normal operation.
   [#188](https://github.com/CreditsCommunity/node/pull/188)
+
+- **Nodes behind a NAT recover after an outage.** The p2p layer records the port a peer announces,
+  not the ephemeral port of its outgoing connection, and a closing connection no longer drops healthy
+  ones. A node behind a NAT pings the peers of its routing table to keep its connections open, so
+  that peers can still reach it and relay round packages.
+  [#198](https://github.com/CreditsCommunity/node/pull/198)
+- **Round lag safety net.** When several neighbours confirm that the node has been rounds behind for
+  10 minutes, it logs `ROUND LAG` and rebuilds its network connections, with backoff and never while
+  FORK HELD. The Docker healthcheck reports unhealthy while the lag lasts.
+  [#198](https://github.com/CreditsCommunity/node/pull/198)
 
 ## Diagnostics
 
