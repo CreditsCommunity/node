@@ -3363,7 +3363,14 @@ if [ "$COMMUNITY_BOOTSTRAP" = config ] && [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$O
     [ -z "$used" ] || { grep -ah 'COMMUNITY BOOTSTRAP' "$WORK"/n*/node.log | head -5; echo "FAIL: the community bootstrap acted on $used"; exit 1; }
     echo "community bootstrap: never used ($(grep -ah 'NODE> Bootstrap on' "$WORK"/n*/node.log | wc -l) regular bootstrap lines on all nodes)"
 fi
-[ "$OFFICIAL_PARTITION_AT" -eq 0 ] || echo "PARTITION RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    held_end=$(part_held_nodes)
+    if [ -n "${held_end// /}" ]; then
+        echo "PARTITION RESULT: one chain on every node that does not hold the fork (all blocks compared); $(printf 'n%s ' $held_end)hold the fork on the other side, COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+    else
+        echo "PARTITION RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
+    fi
+fi
 [ "$OFFICIAL_STOP_AT" -eq 0 ] || echo "OFFICIAL STOP RESULT: one chain: every node holds the same blocks (all compared), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
 
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
