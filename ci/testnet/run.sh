@@ -1000,9 +1000,13 @@ net_fault_off() {
 }
 # OFFICIAL_PARTITION_AT, SPLIT_AT: nothing passes between a node of side $1 and one of side $2 (lists
 # of node numbers), both ways. UDP by the p2p ports (a node sends its datagrams from its own port), TCP
-# by the sender's cgroup
+# by the sender's cgroup and the receiver's p2p port. What a node sends back on a connection the other
+# side opened goes to an ephemeral port that no rule names, so the connections open at the cut are
+# closed (ss -K, every TCP connection on a p2p port, both sides redial): otherwise they went on
+# carrying data one way until they timed out, and blocks of one side reached the other for minutes
+# after the cut (forks 100+ blocks above it, or none at all)
 partition_on() {
-    local i j
+    local i j lo=$((BASE_PORT + 1)) hi=$((BASE_PORT + ALL_NODES)) closed
     partition_off  # a chain left by an earlier cut: -N would fail, and its rules would stay
     sudo iptables -N CSPART
     sudo iptables -I OUTPUT 1 -o lo -j CSPART
@@ -1016,6 +1020,10 @@ partition_on() {
                 || echo "partition: no cgroup match, TCP from n$j to n$i still passes"
         done
     done
+    closed=$(sudo ss -tnH state established "( sport >= :$lo and sport <= :$hi ) or ( dport >= :$lo and dport <= :$hi )" 2>/dev/null | wc -l || true)
+    sudo ss -tnK state established "( sport >= :$lo and sport <= :$hi ) or ( dport >= :$lo and dport <= :$hi )" > /dev/null 2>&1 \
+        || echo "partition: ss -K failed, the TCP connections open at the cut stay open"
+    echo "partition: $closed TCP connection end(s) on p2p ports closed at the cut"
 }
 partition_off() {
     sudo iptables -D OUTPUT -o lo -j CSPART 2>/dev/null || true
