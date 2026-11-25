@@ -271,9 +271,14 @@ for 6 minutes, `stall_minutes=2`, the official nodes run the official build), wi
 
 - the community side restarts by the fallback 120-180 s after its last block; both sides then
   write blocks (fork at #533-#563);
-- after the cut is lifted the two sides do not look each other up again: every node keeps only
-  the 4 neighbours of its own side, nothing is refused, and both chains go on until the end of the
-  run (`official-partition`);
+- before #200, after the cut was lifted the two sides did not look each other up again: every node
+  kept only the 4 neighbours of its own side, nothing was refused, and both chains went on until the
+  end of the run (`official-partition`). With #200 (lost peers pinged again, see "Security and
+  correctness fixes") the community nodes' lost peers answered 78 s after the lift, the official
+  nodes took the community nodes back as neighbours on those pings, every node had all 5 nodes of
+  the other side as neighbours within 102 s, and the five community nodes, on the shorter chain,
+  reported FORK HELD 79-95 s after the lift without a restart, while the official nodes went on
+  (run 45568086459); the scenario now checks exactly this;
 - with the community nodes restarted after the reconnection (they dial every host again,
   `official-partition-restart`), all five report FORK HELD within 20 s and refuse every block of
   the official chain: the community side is no longer unwound part of the way and left stuck
@@ -491,6 +496,27 @@ consensus rules.
   rebuilds the p2p sessions as a restart would (used by `ROUND LAG`, see above; pending dials are
   abandoned without marking their peers unreachable). Nothing changes on the wire but those pings,
   which any node answers.
+- **The two sides of a network cut find each other again.** The p2p routing table evicts a peer
+  that misses three pings (about 30 s). After a longer cut every node of the other side is evicted,
+  and the official code never sends it a datagram again: lookups ask only the nodes still in the
+  table, which name only their own side, and the boot nodes are looked up again only when the table
+  is empty. Both sides then stay apart after the connection comes back, each on its own chain, without
+  noticing (robustness `official-partition`: 4 own-side neighbours on every node, two chains to the
+  end). The fork keeps such a peer (one that had answered our pings at that endpoint) and pings it
+  again at its recorded endpoint: one datagram 30 s after the loss, then after 60 and 120 s, then every
+  180 s, for 24 hours; at most 64 peers, 4 endpoints per id, 16 pings every 8 s. When it answers it
+  comes back into the routing table, and our ping makes it add us too (official nodes as well), so
+  neighbours, block requests and FORK HELD see the other side again. A lookup through the first peer
+  that comes back reaches the rest of its side. The configured boot nodes missing from the table are
+  pinged every 10 minutes, and the node's hosts file (written at stop, the boot list of the next start)
+  also keeps the lost peers. A peer becomes a neighbour through the version request the node sends
+  when the peer enters its routing table, and only then; if that request is lost (a cut, a link that
+  works one way), the peer stayed out of the neighbours for good. Every 60 s, while below the
+  neighbour limit, the routing-table peers that are neither neighbours nor waiting in the compatible
+  pool are asked again (at most 16, only peers of the k-buckets, no lookup). Node ids are not authenticated in this protocol (an official peer's ping
+  answer carries no nonce or signature), so a ping answer counts only from the endpoint pinged within
+  8 s, a lost peer is kept per endpoint, and a returning endpoint never displaces an entry that still
+  answers. Nothing else changes on the wire, and there is no new option.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
