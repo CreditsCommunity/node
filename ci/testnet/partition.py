@@ -4,12 +4,22 @@
     partition.py dump --from 395 --port 9090 > community.txt   # "seq hash transactions" per block
     partition.py report --community community.txt --official official.txt --port 9090 --port 9102
     partition.py fork --community community.txt --official official.txt   # the first block that differs
+    partition.py neighbours --work testnet-run --keys testnet-run/keys.txt --side 1,3,5 --side 2,4 \
+        --since "2026-11-25 10:00:00"   # does every node have a neighbour of the other side again?
 
 dump: the blocks of one node from a sequence to its head, taken just before the reconnection.
 report: where the two sides forked, and which side's blocks the nodes hold after the reconnection
 (each port given, every block of both sides compared); the side whose blocks are gone was unwound,
 and the transactions of its blocks above the fork with them (unless written again on the other side).
+A node given with --held-port holds the fork (FORK HELD: a community node that refuses the other
+chain and waits for its operator): it must keep the side the other nodes left, all of it.
+neighbours: from node.log ("new neighbour added <key>", "neighbour removed <key>", logged by this
+build and the official one) the neighbours each node has now among the nodes of the other side,
+counting only what was logged since --since (the time the cut was lifted); exit 1 unless every
+node has at least one.
 """
+import os
+import re
 import argparse
 import sys
 
@@ -82,6 +92,7 @@ def report(args):
           f"({len(o_side)} blocks, {sum(t for _, t in o_side.values())} transactions)")
     failed = False
     verdicts = set()
+    held = {}
     for port in args.port:
         client = client_of(port)
         last = max(c_head, o_head)
@@ -102,12 +113,63 @@ def report(args):
         else:
             verdict = f"mixed: {kept_c}/{len(c_side)} community and {kept_o}/{len(o_side)} official blocks kept"
             failed = True
+        if port in (args.held_port or []):
+            # a node holding the fork keeps its side whole: it neither unwound it nor took the other one
+            if c_side and kept_c == len(c_side) and kept_o == 0:
+                held[port] = "community"
+            elif o_side and kept_o == len(o_side) and kept_c == 0:
+                held[port] = "official"
+            else:
+                failed = True
+            print(f"PARTITION RESULT: port {port} (head #{head(client)}): holds the fork (FORK HELD): {verdict}")
+            continue
         verdicts.add(verdict)
         print(f"PARTITION RESULT: port {port} (head #{head(client)}): {verdict}")
     if len(verdicts) > 1:
         print("PARTITION RESULT: the nodes compared did not keep the same side")
         failed = True
+    if held:
+        kept = next(iter(verdicts)) if len(verdicts) == 1 else ""
+        others_kept = "official" if "community side was unwound" in kept else "community" if "official side was unwound" in kept else ""
+        if not others_kept or any(side == others_kept for side in held.values()):
+            print("PARTITION RESULT: a node holding the fork kept the side the other nodes kept")
+            failed = True
+        else:
+            print(f"PARTITION RESULT: the split is surfaced: {len(held)} node(s) hold the fork on the {next(iter(held.values()))} "
+                  f"side (FORK HELD, their operators decide), the {len(args.port) - len(held)} others kept the {others_kept} side")
+    longer = "community" if c_head > o_head else "official" if o_head > c_head else "neither"
+    print(f"PARTITION RESULT: at the reconnection the longer chain was the {longer} side's (#{c_head} vs #{o_head})")
     sys.exit(1 if failed else 0)
+
+
+NEIGHBOUR_LINE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[^\]]*\].*NODE: (new neighbour added|neighbour removed) (\S+)")
+
+
+def neighbours(args):
+    keys = {}
+    with open(args.keys) as f:
+        for line in f:
+            if line.strip():
+                i, key = line.split()
+                keys[key] = int(i)
+    sides = [{int(x) for x in side.split(",") if x} for side in args.side]
+    ok = True
+    for own, other in ((sides[0], sides[1]), (sides[1], sides[0])):
+        for i in sorted(own):
+            now = {}
+            path = os.path.join(args.work, f"n{i}", "node.log")
+            with open(path, errors="replace") as f:
+                for line in f:
+                    m = NEIGHBOUR_LINE.match(line)
+                    if not m or m.group(1) < args.since:
+                        continue
+                    node = keys.get(m.group(3))
+                    if node in other:
+                        now[node] = m.group(2) == "new neighbour added"
+            found = sorted(n for n, present in now.items() if present)
+            ok = ok and bool(found)
+            print(f"n{i}: {len(found)} neighbour(s) of the other side{' (' + ' '.join(f'n{n}' for n in found) + ')' if found else ''}")
+    sys.exit(0 if ok else 1)
 
 
 def main():
@@ -120,11 +182,21 @@ def main():
     r.add_argument("--community", required=True)
     r.add_argument("--official", required=True)
     r.add_argument("--port", action="append", required=True)
+    r.add_argument("--held-port", action="append")
     f = sub.add_parser("fork")
     f.add_argument("--community", required=True)
     f.add_argument("--official", required=True)
+    n = sub.add_parser("neighbours")
+    n.add_argument("--work", required=True)
+    n.add_argument("--keys", required=True)
+    n.add_argument("--side", action="append", required=True)
+    n.add_argument("--since", required=True)
     args = parser.parse_args()
-    if args.command == "dump":
+    if args.command == "neighbours":
+        if len(args.side) != 2:
+            parser.error("neighbours needs two --side lists")
+        neighbours(args)
+    elif args.command == "dump":
         dump(args)
     elif args.command == "fork":
         print(fork_of(read(args.community), read(args.official)))

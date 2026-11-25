@@ -229,9 +229,13 @@
 #        OFFICIAL_PARTITION_MINUTES (default 6), then reconnected. With COMMUNITY_BOOTSTRAP=config the
 #        community side restarts on its own after stall_minutes: two chains until the reconnection.
 #        partition.py reports where they forked, which side the nodes kept and how many blocks and
-#        transactions the other side lost; every node must then end on one chain. The nodes only
-#        reconnect if they look each other up again: 120 s after the cut is lifted the run reports
-#        how many neighbours each node has. OFFICIAL_PARTITION_RESTART=1: then the community nodes are
+#        transactions the other side lost. Within REDISCOVER_MINUTES (default 5) after the cut is
+#        lifted every node must have a neighbour of the other side again (the p2p layers look each other
+#        up again: REDISCOVERY RESULT). Then the split must show: every node ends on the chain the
+#        official nodes kept (official nodes follow the longer chain), except community nodes that
+#        hold the fork (FORK HELD: they refuse the longer chain of the other side and wait for their
+#        operator, option A of #189), which keep their side whole and no longer count for TARGET_SEQ.
+#        OFFICIAL_PARTITION_RESTART=1: then the community nodes are
 #        restarted (they dial every node of hosts.txt again), as an operator would.
 #        RESOLVE_FORK_AFTER=1: then, as an operator choosing the official chain, wait up to
 #        RESOLVE_FORK_WAIT minutes (default 5) for FORK HELD on the community nodes (the bounded-rollback
@@ -240,6 +244,13 @@
 #        was only an upper bound and that holds the fork again lower is cut with --set-bc-top at the
 #        last common block (docs/quick-start.md, "If your node reports FORK HELD"). A start right after
 #        a cut that stops at once is reported and repeated. Every node must then end on one chain
+#        SPLIT_AT (default 0 = off, Linux): at that sequence the nodes of SPLIT_NODES (comma separated)
+#        are cut off from all the others (iptables as OFFICIAL_PARTITION_AT, both ways; each side keeps
+#        its own links) for SPLIT_MINUTES (default 6), then reconnected. Every node must have a
+#        neighbour of the other side again within REDISCOVER_MINUTES (REDISCOVERY RESULT), and the run
+#        goes on as usual: a side without enough confidants waits, then takes the other side's blocks
+#        (every node at TARGET_SEQ, the same state digests). NET_FAULT=partition is checked the same way
+#        once lifted (NET_FAULT_NODES against the others)
 #        OUTAGE_NODE (default 0 = off, Linux): that node loses its network at sequence OUTAGE_AT
 #        (default 600) for OUTAGE_SECONDS (default 150), as when a home connection goes down:
 #        everything it sends and everything sent to it is dropped (iptables, no reset), then the
@@ -388,6 +399,10 @@ OFFICIAL_PARTITION_AT=${OFFICIAL_PARTITION_AT:-0}
 OFFICIAL_PARTITION_MINUTES=${OFFICIAL_PARTITION_MINUTES:-6}
 OFFICIAL_PARTITION_RESTART=${OFFICIAL_PARTITION_RESTART:-0}
 RESOLVE_FORK_AFTER=${RESOLVE_FORK_AFTER:-0}
+REDISCOVER_MINUTES=${REDISCOVER_MINUTES:-5}
+SPLIT_AT=${SPLIT_AT:-0}
+SPLIT_NODES=${SPLIT_NODES:-}
+SPLIT_MINUTES=${SPLIT_MINUTES:-6}
 RESOLVE_LOCATE_WAIT=${RESOLVE_LOCATE_WAIT:-6}   # minutes to wait for the located fork point
 RESOLVE_FORK_WAIT=${RESOLVE_FORK_WAIT:-5}
 OUTAGE_NODE=${OUTAGE_NODE:-0}
@@ -667,9 +682,19 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
     [ $(( (NODES + 1) / 2 )) -ge 5 ] || { echo "FAIL: OFFICIAL_PARTITION_AT needs at least 5 community (odd) nodes, NODES >= 9"; exit 1; }
 fi
 [ "$RESOLVE_FORK_AFTER" = 0 ] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || { echo "FAIL: RESOLVE_FORK_AFTER needs OFFICIAL_PARTITION_AT"; exit 1; }
+if [ "$SPLIT_AT" -gt 0 ]; then
+    [ "$OS_KIND" = linux ] || { echo "FAIL: SPLIT_AT needs Linux (iptables, cgroups)"; exit 1; }
+    echo "$SPLIT_NODES" | grep -qE '^[0-9]+(,[0-9]+)*$' || { echo "FAIL: SPLIT_AT needs SPLIT_NODES (comma separated)"; exit 1; }
+    for i in ${SPLIT_NODES//,/ }; do [ "$i" -ge 1 ] && [ "$i" -le "$NODES" ] || { echo "FAIL: SPLIT_NODES: n$i is not one of n1..n$NODES"; exit 1; }; done
+    [ "$(tr ',' '\n' <<<"$SPLIT_NODES" | sort -u | grep -c .)" -lt "$NODES" ] || { echo "FAIL: SPLIT_NODES must leave nodes on the other side"; exit 1; }
+    [ "$OFFICIAL_PARTITION_AT" -eq 0 ] && [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$CRASH_ALL_AT" -eq 0 ] && [ "$JOIN_NODE" -eq 0 ] && [ -z "$NET_FAULT" ] \
+        || { echo "FAIL: SPLIT_AT runs without OFFICIAL_PARTITION_AT, OFFICIAL_STOP_AT, CRASH_ALL_AT, NET_FAULT and a joining node"; exit 1; }
+fi
 [ "$COMMUNITY_STALL_STARTER" -eq 0 ] || [ "$COMMUNITY_BOOTSTRAP" = config ] \
     || { echo "FAIL: COMMUNITY_STALL_STARTER needs COMMUNITY_BOOTSTRAP=config"; exit 1; }
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
+# node number and public key, for partition.py neighbours
+for i in $(seq 1 "$ALL_NODES"); do echo "$i ${KEYS[$((i - 1))]}"; done > "$WORK/keys.txt"
 
 if [ "$FUND" = "1" ]; then
     read -r MASTER_SEED MASTER_PUB < <(python3 -c "import base58, nacl.signing; k = nacl.signing.SigningKey.generate(); print(base58.b58encode(bytes(k)).decode(), base58.b58encode(bytes(k.verify_key)).decode())")
@@ -945,7 +970,7 @@ start_node() {
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
     # marked for the network fault (its executor, started later, inherits the cgroup)
-    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
+    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]] || [ "$OFFICIAL_PARTITION_AT" -gt 0 ] || [ "$SPLIT_AT" -gt 0 ]; then
         sudo mkdir -p "/sys/fs/cgroup/cstest-$i"
         if [[ ",$SLOW_NODES," == *",$i,"* ]]; then
             echo "$((SLOW_CPU * 1000)) 100000" | sudo tee "/sys/fs/cgroup/cstest-$i/cpu.max" > /dev/null
@@ -973,15 +998,16 @@ net_fault_off() {
     sudo tc qdisc del dev lo root 2>/dev/null || true
     sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
 }
-# OFFICIAL_PARTITION_AT: nothing passes between a community and an official node, both ways. UDP by
-# the p2p ports (a node sends its datagrams from its own port), TCP by the sender's cgroup
+# OFFICIAL_PARTITION_AT, SPLIT_AT: nothing passes between a node of side $1 and one of side $2 (lists
+# of node numbers), both ways. UDP by the p2p ports (a node sends its datagrams from its own port), TCP
+# by the sender's cgroup
 partition_on() {
     local i j
     partition_off  # a chain left by an earlier cut: -N would fail, and its rules would stay
     sudo iptables -N CSPART
     sudo iptables -I OUTPUT 1 -o lo -j CSPART
-    for i in $COMMUNITY_NODES; do
-        for j in $OFFICIAL_NODES; do
+    for i in $1; do
+        for j in $2; do
             sudo iptables -A CSPART -p udp --sport $((BASE_PORT + i)) --dport $((BASE_PORT + j)) -j DROP
             sudo iptables -A CSPART -p udp --sport $((BASE_PORT + j)) --dport $((BASE_PORT + i)) -j DROP
             sudo iptables -A CSPART -p tcp -m cgroup --path "cstest-$i" --dport $((BASE_PORT + j)) -j DROP \
@@ -1092,7 +1118,7 @@ stop_all() {
         echo "net fault: until the end ($(net_fault_stats))"
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
-    [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || partition_off
+    [ "$OFFICIAL_PARTITION_AT" -eq 0 ] && [ "$SPLIT_AT" -eq 0 ] || partition_off
     [ "$NODE_NETS" != 1 ] || node_nets_off
     if [ "$OUTAGE_NODE" -gt 0 ]; then outage_off; outage_new_address_off; [ "$OUTAGE_NAT" != 1 ] || outage_nat_off; fi
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
@@ -1407,6 +1433,54 @@ reorg_report() {
     [ -z "$held" ] || echo "FORK HELD on: $held"
 }
 
+# After a cut is lifted, every node must have a neighbour of the other side again within
+# REDISCOVER_MINUTES: the p2p layers of the two sides look each other up again (lost peers pinged
+# again, p2p fix of 2026-11-25). From node.log, "new neighbour added" / "neighbour removed" since the
+# cut was lifted ($4, as node.log prints the time); sides $2 and $3 are lists of node numbers.
+rediscovery_fail=""
+rediscovery_wait() {
+    local t0 out status
+    t0=$(date +%s)
+    while :; do
+        status=0
+        out=$(cd "$HERE" && python3 partition.py neighbours --work "$WORK" --keys "$WORK/keys.txt" \
+            --side "$(echo $2 | tr ' ' ',')" --side "$(echo $3 | tr ' ' ',')" --since "$4") || status=$?
+        [ "$status" -ne 0 ] || break
+        [ $(( $(date +%s) - t0 )) -lt $(( REDISCOVER_MINUTES * 60 )) ] || break
+        sleep 10
+    done
+    echo "$out" | sed "s/^/$1: /"
+    if [ "$status" -eq 0 ]; then
+        echo "REDISCOVERY RESULT: $1: every node has a neighbour of the other side $(( $(date +%s) - t0 )) s after the cut was lifted"
+    else
+        echo "REDISCOVERY RESULT: $1: not every node has a neighbour of the other side $REDISCOVER_MINUTES min after the cut was lifted"
+        rediscovery_fail="${rediscovery_fail:+$rediscovery_fail; }$1: $(echo "$out" | grep -c ': 0 neighbour' || true) node(s) without a neighbour of the other side $REDISCOVER_MINUTES min after the cut was lifted"
+    fi
+}
+
+# SPLIT_AT: the nodes of SPLIT_NODES cut off from the others, then reconnected
+split_done=0
+split_side_max() {
+    local m=0 s i
+    for i in "$@"; do s=$(seq_of "$i"); s=${s:-0}; [ "$s" -le "$m" ] || m=$s; done
+    echo "$m"
+}
+split_partition() {
+    local a="" b="" i lift_stamp
+    for i in $(seq 1 "$NODES"); do
+        if [[ ",$SPLIT_NODES," == *",$i,"* ]]; then a+="$i "; else b+="$i "; fi
+    done
+    partition_on "$a" "$b"
+    echo "split: $(printf 'n%s ' $a)cut off from $(printf 'n%s ' $b)for $SPLIT_MINUTES min (heads $(split_side_max $a) and $(split_side_max $b))"
+    sleep $(( SPLIT_MINUTES * 60 ))
+    echo "SPLIT RESULT: after $SPLIT_MINUTES min the heads are $(split_side_max $a) ($(printf 'n%s ' $a| sed 's/ $//')) and $(split_side_max $b) ($(printf 'n%s ' $b | sed 's/ $//')); $(partition_stats) packets dropped"
+    lift_stamp=$(date '+%F %T')
+    partition_off
+    split_done=2
+    echo "split: reconnected"
+    rediscovery_wait split "$a" "$b" "$lift_stamp"
+}
+
 # OFFICIAL_PARTITION_AT: the community nodes cut off from the running official nodes
 part_done=0               # 1 while partitioned, 2 once reconnected
 part_fail=""
@@ -1415,6 +1489,17 @@ official_max() {
     local m=0 s i
     for i in $OFFICIAL_NODES; do s=$(seq_of "$i"); s=${s:-0}; [ "$s" -le "$m" ] || m=$s; done
     echo "$m"
+}
+# a community node holding the fork after an official partition (FORK HELD, fork-held.json): it waits
+# for its operator, so it no longer counts for TARGET_SEQ nor for the comparisons of one chain; with
+# RESOLVE_FORK_AFTER=1 the operator resolves it and it counts as any node
+fork_held_after_partition() {
+    [ "$OFFICIAL_PARTITION_AT" -gt 0 ] && [ "${part_done:-0}" -eq 2 ] && [ "$RESOLVE_FORK_AFTER" != 1 ] \
+        && ! official_node "$1" && [ -f "$WORK/n$1/fork-held.json" ]
+}
+part_held_nodes() {
+    local i
+    for i in $(seq 1 "$NODES"); do ! fork_held_after_partition "$i" || echo "$i"; done | tr '\n' ' '
 }
 official_partition() {
     local t_cut s0 o0 first_t=0 c o end i
@@ -1425,7 +1510,7 @@ official_partition() {
     done
     s0=$(community_max); o0=$(official_max)
     part_from=$(( s0 > 5 ? s0 - 5 : 0 ))
-    partition_on
+    partition_on "$COMMUNITY_NODES" "$OFFICIAL_NODES"
     t_cut=$(date +%s)
     echo "partition: $(printf 'n%s ' $COMMUNITY_NODES)cut off from $(printf 'n%s ' $OFFICIAL_NODES)for $OFFICIAL_PARTITION_MINUTES min (community head $s0, official head $o0), COMMUNITY_BOOTSTRAP=$COMMUNITY_BOOTSTRAP"
     end=$(( t_cut + OFFICIAL_PARTITION_MINUTES * 60 ))
@@ -1450,13 +1535,15 @@ official_partition() {
         || part_fail="${part_fail:+$part_fail; }no chain dump of n$cn"
     (cd "$HERE" && python3 partition.py dump --from "$part_from" --port "$(api_port "$on")") > "$WORK/partition-official.txt" \
         || part_fail="${part_fail:+$part_fail; }no chain dump of n$on"
+    local lift_stamp
+    lift_stamp=$(date '+%F %T')
     partition_off
     part_done=2
     echo "partition: reconnected (community head $c, official head $o)"
-    # have the two sides found each other again? (each node logs its neighbour count with its blocks)
-    sleep 120
+    # have the two sides found each other again?
+    rediscovery_wait partition "$COMMUNITY_NODES" "$OFFICIAL_NODES" "$lift_stamp"
     for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
-        echo "partition: 120 s after the reconnection n$i has $(grep -a 'neighbour nodes = ' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*neighbour nodes = ([0-9]+).*/\1/') neighbours, head $(seq_of "$i")"
+        echo "partition: n$i has $(grep -a 'neighbour nodes = ' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*neighbour nodes = ([0-9]+).*/\1/') neighbours, head $(seq_of "$i")"
     done
     if [ "$OFFICIAL_PARTITION_RESTART" = 1 ]; then
         echo "partition: restarting $(printf 'n%s ' $COMMUNITY_NODES)(community head $(community_max), official head $(official_max))"
@@ -1638,6 +1725,7 @@ while :; do
                 done
             fi
         fi
+        if fork_held_after_partition "$i"; then line+="(fork held)"; continue; fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
         if [ "$s" -gt "$max" ]; then max=$s; fi
     done
@@ -1775,6 +1863,10 @@ while :; do
         part_done=1
         official_partition
     fi
+    if [ "$SPLIT_AT" -gt 0 ] && [ "$split_done" -eq 0 ] && [ "$min" -ge "$SPLIT_AT" ]; then
+        split_done=1
+        split_partition
+    fi
     if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$off_done" -eq 0 ] && [ "$min" -ge "$OFFICIAL_STOP_AT" ]; then
         off_done=1
         official_stop
@@ -1851,8 +1943,13 @@ while :; do
     if [ "$net_fault_at" -gt 0 ] && [ "$net_fault_done" -eq 0 ] && [ "$NET_FAULT_SECONDS" -gt 0 ] \
         && [ "$(date +%s)" -ge $((net_fault_at + NET_FAULT_SECONDS)) ]; then
         echo "net fault: lifted at sequence $min ($(net_fault_stats))"
+        lift_stamp=$(date '+%F %T')
         net_fault_off
         net_fault_done=1
+        if [ "$NET_FAULT" = partition ]; then
+            others=$(for i in $(seq 1 "$NODES"); do [[ ",$NET_FAULT_NODES," == *",$i,"* ]] || echo "$i"; done | tr '\n' ' ')
+            rediscovery_wait "net partition" "${NET_FAULT_NODES//,/ }" "$others" "$lift_stamp"
+        fi
     fi
     if [ "$GARBAGE_AT" -gt 0 ] && [ -z "$GARBAGE_PID" ] && [ "$min" -ge "$GARBAGE_AT" ]; then
         echo "garbage: $GARBAGE_RATE random datagrams a second to every node for $GARBAGE_SECONDS s, from sequence $min"
@@ -2358,6 +2455,7 @@ PY
         && { [ "$RESET_NODE" -eq 0 ] || { [ "$reset_seen" -gt 0 ] && [ "$(date +%s)" -ge $((reset_seen + RESET_CHECK_MINUTES * 60)) ]; }; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         [ "$OFFICIAL_PARTITION_AT" -eq 0 ] || reorg_report
+        [ -z "$rediscovery_fail" ] || echo "REDISCOVERY: $rediscovery_fail"
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
@@ -3030,15 +3128,18 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$({ [ "$SNAPSHOT_AT" -gt 0 ] || [ "$JOIN_FETCH" = p2p ]; } && echo 1 || echo 0)" "$BIN_ALT_OFFICIAL" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$({ [ "$SNAPSHOT_AT" -gt 0 ] || [ "$JOIN_FETCH" = p2p ]; } && echo 1 || echo 0)" "$BIN_ALT_OFFICIAL" "$(part_held_nodes)" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 # official nodes (the even ones with BIN_ALT_OFFICIAL) log no digest: their blocks are compared below
 official = {i for i in range(2, nodes + 1, 2)} if sys.argv[6] == "1" else set()
+# community nodes holding the fork after a partition (FORK HELD): on the other chain, compared among
+# themselves, and not expected to reach block 1000
+held = {int(x) for x in sys.argv[7].split()}
 # a node that joins from a snapshot (imported or fetched over p2p) starts past block 1000: only the
 # initial nodes log it
 initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
-initial -= len([i for i in official if i <= initial])
+initial -= len([i for i in official | held if i <= initial])
 seen = collections.defaultdict(dict)
 for i in range(1, nodes + 1):
     if i in official:
@@ -3048,13 +3149,17 @@ for i in range(1, nodes + 1):
             seen[int(m.group(1))][i] = (m.group(2).lower(), int(m.group(3)))
 ok = True
 for seq in sorted(seen):
-    values = set(seen[seq].values())
-    status = "OK" if len(values) == 1 else "MISMATCH"
-    if len(values) != 1:
-        ok = False
-    print(f"STATE DIGEST #{seq}: {status} ({len(seen[seq])} nodes) {sorted(values)[:3]}")
-if 1000 not in seen or len(seen[1000]) < initial:
-    print(f"FAIL: expected a STATE DIGEST #1000 from all {initial} nodes, got {len(seen.get(1000, {}))}")
+    for group, name in ((set(seen[seq]) - held, ""), (set(seen[seq]) & held, " (nodes holding the fork)")):
+        if not group:
+            continue
+        values = {seen[seq][i] for i in group}
+        status = "OK" if len(values) == 1 else "MISMATCH"
+        if len(values) != 1:
+            ok = False
+        print(f"STATE DIGEST #{seq}{name}: {status} ({len(group)} nodes) {sorted(values)[:3]}")
+got = len(set(seen.get(1000, {})) - held)
+if initial > 0 and got < initial:
+    print(f"FAIL: expected a STATE DIGEST #1000 from all {initial} nodes, got {got}")
     ok = False
 if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     print("FAIL: funding did not change the wallet state by block 1000")
@@ -3194,9 +3299,12 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
     [ "$part_done" -eq 2 ] || part_fail="${part_fail:+$part_fail; }the partition never ended"
     if [ "$part_done" -eq 2 ]; then
         ports=""
-        for i in $COMMUNITY_NODES $OFFICIAL_NODES; do ports="$ports --port $(api_port "$i")"; done
+        for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
+            ports="$ports --port $(api_port "$i")"
+            ! fork_held_after_partition "$i" || ports="$ports --held-port $(api_port "$i")"
+        done
         (cd "$HERE" && python3 partition.py report --community "$WORK/partition-community.txt" --official "$WORK/partition-official.txt" $ports) \
-            || part_fail="${part_fail:+$part_fail; }the nodes did not all keep the blocks of one side"
+            || part_fail="${part_fail:+$part_fail; }the nodes did not all keep the blocks of one side (or a node holding the fork did not keep the other one)"
     fi
     for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
         echo "partition: n$i logged $(grep -ac 'NODE> Bootstrap on' "$WORK/n$i/node.log" || true) bootstraps," \
@@ -3205,12 +3313,15 @@ if [ "$OFFICIAL_PARTITION_AT" -gt 0 ]; then
     [ "$RESOLVE_FORK_AFTER" != 1 ] || echo "RESOLVE FORK: cut back to the official chain:$([ -n "$part_resolved" ] && printf ' n%s' $part_resolved || echo ' none'); $part_restart_fail start(s) right after a cut stopped with an error and were repeated"
     if [ -n "$part_fail" ]; then echo "FAIL: partition: $part_fail"; exit 1; fi
 fi
+if [ -n "$rediscovery_fail" ]; then echo "FAIL: rediscovery: $rediscovery_fail"; exit 1; fi
 
 # official nodes: the same block hashes as n1 (every 100th sequence up to the lowest head)
 if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     ports=""
     head=""
     for i in $(seq 1 "$ALL_NODES"); do
+        # a node holding the fork after a partition is on the other chain (checked above)
+        ! fork_held_after_partition "$i" || continue
         ports="$ports $i:$(api_port "$i")"
         s=$(seq_of "$i"); s=${s:-0}
         if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
@@ -3223,7 +3334,8 @@ fi
 
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's
 # (csnode/src/blockchain.cpp updateLastBlock logs it), a fork that nothing reconciles
-forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' \
+    | while read -r n; do fork_held_after_partition "${n#n}" || echo "$n"; done | tr '\n' ' ' || true)
 if [ -n "$forks" ]; then
     grep -ah 'this node keeps its own (fork)' "$WORK"/n*/node.log | head -5
     echo "FAIL: fork, nodes on another block of the same sequence: $forks"
@@ -3260,8 +3372,11 @@ fi
 
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
 # round, R-x.1 and up, that never gives way to R-(x+1).0): the last three round headers of n1
-stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -3 | grep -vc '\.0 ' || true)
-[ "$stuck" -lt 3 ] || { echo "FAIL: the network ended stuck in a bootstrap round ($(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -1 | sed -E 's/.*(R-[^ ]*).*/\1/'))"; exit 1; }
+# (n1, or the first node that does not hold the fork after a partition)
+ref=1
+while fork_held_after_partition "$ref" && [ "$ref" -lt "$NODES" ]; do ref=$((ref + 1)); done
+stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n$ref/node.log" | tail -3 | grep -vc '\.0 ' || true)
+[ "$stuck" -lt 3 ] || { echo "FAIL: the network ended stuck in a bootstrap round ($(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n$ref/node.log" | tail -1 | sed -E 's/.*(R-[^ ]*).*/\1/'))"; exit 1; }
 
 # who signs the blocks, per node and, with mixed binaries, per binary (node 1's API, needs FUND=1)
 if [ "$FUND" = "1" ]; then
