@@ -5,15 +5,15 @@
 
 #include <p2p_network.h>
 
-// net::LostPeers, net::PingRegistry, net::MayTakeOver, net::Liveness and KBucket::ReplaceEndpoint of the p2p fork
+// net::LostPeers and net::PingRegistry of the p2p fork
 // (CreditsCommunity/p2p): the peers the routing table lost because they stopped answering, pinged
 // again with a backoff so that the two sides of a network cut find each other again when it ends.
 //
 // Trust model: node ids are unauthenticated (an official peer's ping response carries no nonce or
 // signature and cannot be made to), so what is bound is the endpoint. One test per attack the
 // security reviews raised: reflection (a response from elsewhere), squatting (an id taken at another
-// endpoint), first-writer pinning (an endpoint recorded first for an id), metadata overwrite (a
-// verified endpoint taking more than its address and port), and a refreshed loss time.
+// endpoint: never displaced), first-writer pinning (an endpoint recorded first for an id), and a
+// refreshed loss time. Nothing writes a k-bucket entry from a lost peer (no takeover, no metadata).
 namespace {
 
 using namespace net;
@@ -137,9 +137,9 @@ TEST(LostPeers, OnlyTheRecordedEndpointAnsweringTheLatestPingVerifies) {
     EXPECT_EQ(*v, t0);
     EXPECT_TRUE(lost.Contains(NodeId(1)));
     // removing another endpoint of the id removes nothing
-    lost.Remove(at(p, "10.1.2.3", p.udp_port));
+    EXPECT_FALSE(lost.Remove(at(p, "10.1.2.3", p.udp_port)).has_value());
     EXPECT_TRUE(lost.Contains(NodeId(1)));
-    lost.Remove(p);
+    EXPECT_TRUE(lost.Remove(p).has_value());
     EXPECT_FALSE(lost.Contains(NodeId(1)));
 }
 
@@ -179,7 +179,7 @@ TEST(LostPeers, EachEndpointOfAnIdHasItsOwnEntryNoneCanPinTheId) {
     EXPECT_EQ(ofId1, LostPeers::kMaxEndpointsPerId);
     EXPECT_TRUE(lost.Contains(NodeId(2)));
     ASSERT_FALSE(all.empty());
-    // the longest-answering first (the hosts file takes the first endpoint of an id)
+    // the most recently lost first: the real peer (lost 10 s after the others)
     EXPECT_EQ(all.front().address, real.address);
     EXPECT_EQ(all.front().udp_port, real.udp_port);
 }
@@ -198,118 +198,62 @@ TEST(LostPeers, ReAddingAnEntryNeitherRefreshesItsLossNorItsSchedule) {
     EXPECT_EQ(lost.Size(), 0u);
 }
 
-// The routing table's bookkeeping for a k-bucket entry, as RoutingTable does it under its k-bucket
-// lock: a verified answer (PingRegistry::Answer) sets the last answer and clears the misses; the
-// pinger's timer, when it fires for a ping, counts a miss only if that ping's whole window passed
-// unanswered at the entry's own endpoint (PingRegistry::Overdue), never from the pings sent.
-struct Holder {
-    NodeEntrance entry;
-    PingRegistry pings{kWindow};
-    std::optional<Liveness> liveness;
-
-    void ping(Clock::time_point t, uint8_t initial = 0) { pings.Sent(entry, initial, t); }
-    void answer(Clock::time_point t) {
-        if (pings.Answer(entry, t)) {
-            liveness = Liveness{t, 0};
-        }
-    }
-    void timer(Clock::time_point t) {
-        if (pings.Overdue(entry, t)) {
-            if (!liveness) liveness = Liveness{};
-            ++liveness->missed;
-        }
-    }
-    bool mayTakeOver(Clock::time_point t) const { return MayTakeOver(liveness, t, kWindow); }
-};
-
-// squatting / a live node taken over: a live, answering entry is never replaced, also when someone
-// provokes replacement pings to it (they start at the eviction count of pings sent)
-TEST(LostPeers, ALiveAnsweringEntryIsNeverTakenOverEvenUnderReplacementPings) {
-    Holder live;
-    live.entry = peer(1);
-    const auto t0 = Clock::now();
-    live.ping(t0);
-    live.answer(t0 + seconds(1));
-    ASSERT_TRUE(live.liveness.has_value());
-
-    for (int i = 0; i < 20; ++i) {
-        const auto t = t0 + seconds(10) + seconds(3 * i);
-        // a datagram from a new id into a full bucket makes the pinger ping the least recently
-        // seen entry for a replacer: the ping starts at kMaxPingsBeforeRemove sent
-        live.ping(t, 3);
-        ASSERT_TRUE(live.pings.Unanswered(live.entry.id).has_value());
-        EXPECT_GE(*live.pings.Unanswered(live.entry.id), 1);
-        // a stale timer of an earlier ping fires now: this ping's window has not passed
-        live.timer(t + seconds(1));
-        EXPECT_FALSE(live.mayTakeOver(t + seconds(1)));
-        // the node answers within the window, as a live node does
-        live.answer(t + seconds(2));
-        live.timer(t + kWindow);  // its own timer: answered, nothing outstanding
-        EXPECT_FALSE(live.mayTakeOver(t + kWindow));
-    }
-    // a holder nothing has expired for yet stays as well
-    EXPECT_FALSE(MayTakeOver(std::nullopt, t0, kWindow));
-}
-
-// squatting: a takeover only after a response window has really expired unanswered
-TEST(LostPeers, ATakeoverOnlyAfterAWindowExpiredUnanswered) {
-    const auto t0 = Clock::now();
-
-    // a squatter that never answers a ping of ours (one forged datagram got it in)
-    Holder silent;
-    silent.entry = at(peer(1), "10.6.6.6", 9999);
-    silent.ping(t0);
-    EXPECT_FALSE(silent.mayTakeOver(t0 + seconds(7)));
-    silent.timer(t0 + seconds(7));  // early: not a whole window
-    EXPECT_FALSE(silent.mayTakeOver(t0 + seconds(7)));
-    silent.timer(t0 + kWindow);     // the window expired unanswered
-    EXPECT_TRUE(silent.mayTakeOver(t0 + kWindow));
-
-    // a holder that answered, then stopped: only once its last answer is a window old and a window
-    // expired after it
-    Holder stopped;
-    stopped.entry = at(peer(2), "10.6.6.6", 9998);
-    stopped.ping(t0);
-    stopped.answer(t0 + seconds(1));
-    stopped.ping(t0 + seconds(2));
-    EXPECT_FALSE(stopped.mayTakeOver(t0 + seconds(5)));
-    stopped.timer(t0 + seconds(2) + kWindow);
-    EXPECT_TRUE(stopped.mayTakeOver(t0 + seconds(2) + kWindow));
-    // a response from another endpoint does not count as its answer, nor clear the miss
-    EXPECT_FALSE(stopped.pings.Answer(at(stopped.entry, "10.7.7.7", 1), t0 + seconds(11)));
-    // its own answer to a new ping does
-    stopped.ping(t0 + seconds(12));
-    stopped.answer(t0 + seconds(13));
-    EXPECT_FALSE(stopped.mayTakeOver(t0 + seconds(14)));
-}
-
-// metadata overwrite: the entry takes the verified address and UDP port and the TCP port it
-// announces; user data is cleared, taken later from the answer to the pinger's own ping
-TEST(LostPeers, ATakenBackEntryTakesOnlyTheVerifiedEndpoint) {
-    const auto real = peer(1);
-    auto squatter = at(real, "10.6.6.6", 9999);
-    squatter.tcp_port = 4444;
-    squatter.user_data = 0xBAD;
-
+// squatting: a lost peer never displaces an entry of the k-buckets. Whoever holds its id there at
+// another endpoint keeps it (the routing table's endpoint check drops the lost peer's answer, as in
+// the official code) until the pinger evicts the holder; the lost entry is still pinged meanwhile,
+// verified only at its own endpoint, and leaves only once that endpoint is back in the k-buckets.
+TEST(LostPeers, ALostPeerNeverDisplacesAnEntryOfTheKBuckets) {
+    LostPeers lost;
     KBucket bucket;
-    bucket.AddNode(squatter);
-    // nothing for the same endpoint, nor for an id not there
-    EXPECT_FALSE(bucket.ReplaceEndpoint(squatter));
-    EXPECT_FALSE(bucket.ReplaceEndpoint(peer(2)));
-    EXPECT_EQ(bucket.Size(), 1u);
+    const auto t0 = Clock::now();
+    const auto real = peer(1);
+    const auto holder = at(real, "10.6.6.6", 9999);
+    ASSERT_TRUE(lost.Add(real, hours(1), t0));
+    bucket.AddNode(holder);
 
-    auto answer = real;
-    answer.tcp_port = 6001;
-    answer.user_data = 0x1234;
-    ASSERT_TRUE(bucket.ReplaceEndpoint(answer));
-    NodeEntrance held;
-    ASSERT_TRUE(bucket.Get(real.id, held));
-    EXPECT_EQ(held.address, real.address);
-    EXPECT_EQ(held.udp_port, real.udp_port);
-    EXPECT_EQ(held.tcp_port, 6001);
-    // neither the squatter's user data nor the returning endpoint's unverified one
-    EXPECT_EQ(held.user_data, 0u);
-    EXPECT_EQ(bucket.Size(), 1u);
+    for (int i = 0; i < 10; ++i) {
+        const auto t = t0 + minutes(1 + 3 * i);
+        const auto due = lost.Due(t);
+        if (due.empty()) {
+            continue;
+        }
+        // its answer is verified at its own endpoint, but the k-buckets hold the id elsewhere: the
+        // endpoint check of the routing table keeps it out, nothing changes there or here
+        EXPECT_TRUE(lost.Verified(real, t + seconds(1), kWindow).has_value());
+        NodeEntrance held;
+        ASSERT_TRUE(bucket.Get(real.id, held));
+        EXPECT_EQ(held.address, holder.address);
+        EXPECT_EQ(held.udp_port, holder.udp_port);
+        EXPECT_TRUE(lost.Contains(real.id));
+    }
+
+    // the pinger evicts the holder (it stopped answering); the lost peer's next answer adds it as any
+    // sender, and its entry leaves once that endpoint is held and answered there
+    bucket.Evict(real.id);
+    bucket.AddNode(real);
+    auto back = lost.Remove(holder);  // another endpoint of the id: nothing
+    EXPECT_FALSE(back.has_value());
+    back = lost.Remove(real);
+    ASSERT_TRUE(back.has_value());
+    EXPECT_EQ(*back, t0);
+    EXPECT_FALSE(lost.Contains(real.id));
+}
+
+// the hosts file keeps one endpoint per id, the first Get gives: the one the id was last lost at
+TEST(LostPeers, GetGivesTheMostRecentlyLostEndpointOfAnIdFirst) {
+    LostPeers lost;
+    const auto t0 = Clock::now();
+    const auto old = at(peer(1), "10.1.1.1", 7000);
+    const auto recent = peer(1);
+    ASSERT_TRUE(lost.Add(old, hours(5), t0));
+    ASSERT_TRUE(lost.Add(peer(2), hours(1), t0 + minutes(1)));
+    ASSERT_TRUE(lost.Add(recent, minutes(5), t0 + minutes(2)));
+    std::vector<NodeEntrance> all;
+    lost.Get(all);
+    ASSERT_EQ(all.size(), 3u);
+    EXPECT_EQ(all[0].id, recent.id);
+    EXPECT_EQ(all[0].address, recent.address);
+    EXPECT_EQ(all[0].udp_port, recent.udp_port);
 }
 
 TEST(PingRegistry, OnlyTheEndpointPingedAnswersWithinTheWindow) {
