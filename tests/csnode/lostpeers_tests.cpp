@@ -5,11 +5,15 @@
 
 #include <p2p_network.h>
 
-// net::LostPeers and net::PingRegistry of the p2p fork (CreditsCommunity/p2p): the peers the routing
-// table lost because they stopped answering, pinged again with a backoff so that the two sides of a
-// network cut find each other again when it ends (RoutingTable::PingLostAndBootNodes), and the pings
-// outstanding, each bound to the endpoint it went to. A ping response carries no nonce (official wire
-// format): only one from the endpoint pinged, within the window, counts as an answer.
+// net::LostPeers, net::PingRegistry, net::MayTakeOver and KBucket::ReplaceEndpoint of the p2p fork
+// (CreditsCommunity/p2p): the peers the routing table lost because they stopped answering, pinged
+// again with a backoff so that the two sides of a network cut find each other again when it ends.
+//
+// Trust model: node ids are unauthenticated (an official peer's ping response carries no nonce or
+// signature and cannot be made to), so what is bound is the endpoint. One test per attack the
+// security reviews raised: reflection (a response from elsewhere), squatting (an id taken at another
+// endpoint), first-writer pinning (an endpoint recorded first for an id), metadata overwrite (a
+// verified endpoint taking more than its address and port), and a refreshed loss time.
 namespace {
 
 using namespace net;
@@ -17,6 +21,8 @@ using Clock = LostPeers::Clock;
 using std::chrono::hours;
 using std::chrono::minutes;
 using std::chrono::seconds;
+
+constexpr auto kWindow = seconds(8);
 
 NodeEntrance peer(uint32_t n) {
     NodeEntrance e;
@@ -31,8 +37,6 @@ NodeEntrance at(NodeEntrance e, const char* address, uint16_t port) {
     e.udp_port = port;
     return e;
 }
-
-constexpr auto kWindow = seconds(8);
 
 std::vector<uint32_t> ids(const std::vector<NodeEntrance>& nodes) {
     std::vector<uint32_t> result;
@@ -109,68 +113,134 @@ TEST(LostPeers, AtMostAFewPingsACallTheLongestWaitingFirst) {
     EXPECT_TRUE(lost.Due(t + seconds(16)).empty());
 }
 
-TEST(LostPeers, APeerLeavesOnlyWhenItsRecordedEndpointAnswersTheLatestPing) {
+// reflection: only the recorded endpoint, answering the latest ping within the window, verifies
+TEST(LostPeers, OnlyTheRecordedEndpointAnsweringTheLatestPingVerifies) {
     LostPeers lost;
     const auto t0 = Clock::now();
     const auto p = peer(1);
     ASSERT_TRUE(lost.Add(p, minutes(10), t0));
 
-    // not pinged yet: even its own endpoint cannot answer
-    EXPECT_FALSE(lost.Answered(p, t0 + seconds(1), kWindow).has_value());
+    // not pinged yet: even its own endpoint does not verify
+    EXPECT_FALSE(lost.Verified(p, t0 + seconds(1), kWindow).has_value());
 
     const auto t = t0 + seconds(30);
     ASSERT_EQ(ids(lost.Due(t)), std::vector<uint32_t>{1});
     // the id claimed from another address or another port (anyone may send a datagram with any id)
-    EXPECT_FALSE(lost.Answered(at(p, "10.1.2.3", p.udp_port), t + seconds(1), kWindow).has_value());
-    EXPECT_FALSE(lost.Answered(at(p, "127.0.0.1", p.udp_port + 1), t + seconds(1), kWindow).has_value());
+    EXPECT_FALSE(lost.Verified(at(p, "10.1.2.3", p.udp_port), t + seconds(1), kWindow).has_value());
+    EXPECT_FALSE(lost.Verified(at(p, "127.0.0.1", p.udp_port + 1), t + seconds(1), kWindow).has_value());
     // late
-    EXPECT_FALSE(lost.Answered(p, t + kWindow + seconds(1), kWindow).has_value());
-    EXPECT_TRUE(lost.Contains(NodeId(1)));
-    // still pinged at its recorded endpoint
-    const auto t2 = t + seconds(60);
-    auto again = lost.Due(t2);
-    ASSERT_EQ(ids(again), std::vector<uint32_t>{1});
-    EXPECT_EQ(again[0].address, p.address);
-    EXPECT_EQ(again[0].udp_port, p.udp_port);
+    EXPECT_FALSE(lost.Verified(p, t + kWindow + seconds(1), kWindow).has_value());
 
-    // its own endpoint within the window: it leaves the list, and when it was lost comes back
-    auto back = lost.Answered(p, t2 + seconds(2), kWindow);
-    ASSERT_TRUE(back.has_value());
-    EXPECT_EQ(*back, t0);
+    // its own endpoint within the window: verified (when it was lost); it leaves only once back
+    auto v = lost.Verified(p, t + seconds(2), kWindow);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(*v, t0);
+    EXPECT_TRUE(lost.Contains(NodeId(1)));
+    // removing another endpoint of the id removes nothing
+    lost.Remove(at(p, "10.1.2.3", p.udp_port));
+    EXPECT_TRUE(lost.Contains(NodeId(1)));
+    lost.Remove(p);
     EXPECT_FALSE(lost.Contains(NodeId(1)));
-    EXPECT_FALSE(lost.Answered(p, t2 + seconds(3), kWindow).has_value());
 }
 
-TEST(LostPeers, APeerLostADayAgoIsNoLongerPinged) {
+// first-writer pinning: an endpoint recorded first for an id neither blocks nor replaces another one
+TEST(LostPeers, EachEndpointOfAnIdHasItsOwnEntryNoneCanPinTheId) {
     LostPeers lost;
     const auto t0 = Clock::now();
-    ASSERT_TRUE(lost.Add(peer(2), minutes(10), t0));
+    const auto real = peer(1);
+    const auto squatter = at(real, "10.6.6.6", 9999);
 
+    // the squatter's endpoint is recorded first, then the real one: both kept, both pinged
+    ASSERT_TRUE(lost.Add(squatter, minutes(1), t0));
+    ASSERT_TRUE(lost.Add(real, hours(5), t0 + seconds(10)));
+    EXPECT_EQ(lost.Size(), 2u);
+    const auto t = t0 + minutes(1);
+    auto due = lost.Due(t);
+    ASSERT_EQ(due.size(), 2u);
+
+    // the squatter's answer verifies only its own entry, the real peer's its own
+    EXPECT_TRUE(lost.Verified(squatter, t + seconds(1), kWindow).has_value());
+    auto v = lost.Verified(real, t + seconds(1), kWindow);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(*v, t0 + seconds(10));
+
+    // at most kMaxEndpointsPerId endpoints for one id: more of them push out only the shortest tenure
+    // of that id, never the real peer's five hours, and never other ids
+    ASSERT_TRUE(lost.Add(peer(2), seconds(30), t0));
+    for (uint16_t port = 1; port <= 20; ++port) {
+        lost.Add(at(real, "10.6.6.7", port), minutes(2), t0);
+    }
+    size_t ofId1 = 0;
+    std::vector<NodeEntrance> all;
+    lost.Get(all);
+    for (const auto& e : all) {
+        ofId1 += e.id == real.id ? 1 : 0;
+    }
+    EXPECT_EQ(ofId1, LostPeers::kMaxEndpointsPerId);
+    EXPECT_TRUE(lost.Contains(NodeId(2)));
+    ASSERT_FALSE(all.empty());
+    // the longest-answering first (the hosts file takes the first endpoint of an id)
+    EXPECT_EQ(all.front().address, real.address);
+    EXPECT_EQ(all.front().udp_port, real.udp_port);
+}
+
+// a refreshed loss time: re-adding an entry keeps its loss time and schedule
+TEST(LostPeers, ReAddingAnEntryNeitherRefreshesItsLossNorItsSchedule) {
+    LostPeers lost;
+    const auto t0 = Clock::now();
+    ASSERT_TRUE(lost.Add(peer(1), minutes(10), t0));
+    lost.Due(t0 + seconds(30));
+    ASSERT_TRUE(lost.Add(peer(1), hours(2), t0 + hours(20)));
+    EXPECT_EQ(lost.Size(), 1u);
+    // forgotten 24 h after the first loss
     EXPECT_FALSE(lost.Due(t0 + hours(23)).empty());
     EXPECT_TRUE(lost.Due(t0 + hours(24)).empty());
     EXPECT_EQ(lost.Size(), 0u);
 }
 
-TEST(LostPeers, LostAgainStartsOverAndKeepsTheLongerTenure) {
-    LostPeers lost;
-    const auto t0 = Clock::now();
-    ASSERT_TRUE(lost.Add(peer(1), hours(2), t0));
-    // pinged a few times
-    lost.Due(t0 + minutes(1));
-    lost.Due(t0 + minutes(3));
-    // the same peer lost again later (it came back without leaving the list, then stopped answering):
-    // its schedule starts over
-    const auto t1 = t0 + hours(1);
-    ASSERT_TRUE(lost.Add(peer(1), seconds(5), t1));
-    EXPECT_EQ(lost.Size(), 1u);
-    EXPECT_TRUE(lost.Due(t1 + seconds(29)).empty());
-    EXPECT_EQ(lost.Due(t1 + seconds(30)).size(), 1u);
-    // and with the two hours it had, a full list does not push it out for a short-lived id
-    for (uint32_t i = 2; i <= LostPeers::kMaxPeers; ++i) {
-        ASSERT_TRUE(lost.Add(peer(i), minutes(30), t1));
-    }
-    EXPECT_TRUE(lost.Add(peer(5000), hours(1), t1));
-    EXPECT_TRUE(lost.Contains(NodeId(1)));
+// squatting: a verified endpoint takes an id back from an entry at another endpoint only if that
+// entry has stopped answering; a live, answering entry is never evicted for a returning one
+TEST(LostPeers, AVerifiedEndpointTakesBackOnlyAnIdWhoseEntryStoppedAnswering) {
+    // never answered a ping of ours (one forged datagram is enough to get in): taken back
+    EXPECT_TRUE(MayTakeOver(false, std::nullopt));
+    // answered, and has now missed a ping: taken back
+    EXPECT_TRUE(MayTakeOver(true, uint8_t{1}));
+    // answered, and its latest ping is not overdue: it stays
+    EXPECT_FALSE(MayTakeOver(true, std::nullopt));
+    EXPECT_FALSE(MayTakeOver(true, uint8_t{0}));
+}
+
+// metadata overwrite: the entry takes the verified address and UDP port, the TCP port it announces,
+// and user data only when the response carried some
+TEST(LostPeers, ATakenBackEntryTakesOnlyTheVerifiedEndpoint) {
+    const auto real = peer(1);
+    auto squatter = at(real, "10.6.6.6", 9999);
+    squatter.tcp_port = 4444;
+    squatter.user_data = 0xBAD;
+
+    KBucket bucket;
+    bucket.AddNode(squatter);
+    // nothing for the same endpoint, nor for an id not there
+    EXPECT_FALSE(bucket.ReplaceEndpoint(squatter, true));
+    EXPECT_FALSE(bucket.ReplaceEndpoint(peer(2), true));
+    EXPECT_EQ(bucket.Size(), 1u);
+
+    auto answer = real;
+    answer.tcp_port = 6001;
+    answer.user_data = 0x1234;
+    ASSERT_TRUE(bucket.ReplaceEndpoint(answer, false));
+    NodeEntrance held;
+    ASSERT_TRUE(bucket.Get(real.id, held));
+    EXPECT_EQ(held.address, real.address);
+    EXPECT_EQ(held.udp_port, real.udp_port);
+    EXPECT_EQ(held.tcp_port, 6001);
+    EXPECT_EQ(held.user_data, 0xBADu);  // no user data in the response: not taken
+
+    KBucket other;
+    other.AddNode(squatter);
+    ASSERT_TRUE(other.ReplaceEndpoint(answer, true));
+    ASSERT_TRUE(other.Get(real.id, held));
+    EXPECT_EQ(held.user_data, 0x1234u);
 }
 
 TEST(PingRegistry, OnlyTheEndpointPingedAnswersWithinTheWindow) {
@@ -214,70 +284,4 @@ TEST(PingRegistry, OnePingPerIdTheLatestEndpointAndTimeCount) {
     EXPECT_EQ(*pings.Unanswered(NodeId(3)), 3);
     pings.Erase(NodeId(3));
     EXPECT_FALSE(pings.Unanswered(NodeId(3)).has_value());
-}
-
-TEST(LostPeers, TheIdEvictedAtAnotherEndpointNeitherReplacesTheEntryNorInheritsItsTenure) {
-    LostPeers lost;
-    const auto t0 = Clock::now();
-    const auto real = peer(1);
-    const auto squatter = at(real, "10.6.6.6", 9999);
-    ASSERT_TRUE(lost.Add(real, hours(5), t0));
-
-    // whoever took the id meanwhile is evicted in turn: the entry stays the real endpoint's
-    EXPECT_FALSE(lost.Add(squatter, seconds(40), t0 + minutes(2)));
-    EXPECT_EQ(lost.Size(), 1u);
-    auto due = lost.Due(t0 + seconds(30));
-    ASSERT_EQ(due.size(), 1u);
-    EXPECT_EQ(due[0].address, real.address);
-    EXPECT_EQ(due[0].udp_port, real.udp_port);
-    EXPECT_FALSE(lost.Answered(squatter, t0 + seconds(31), kWindow).has_value());
-
-    // and it did not inherit the five hours: a full list pushes it out before the real peer
-    LostPeers other;
-    ASSERT_TRUE(other.Add(squatter, seconds(40), t0));
-    EXPECT_FALSE(other.Add(real, hours(5), t0));  // other endpoint for the same id: the first stays
-    for (uint32_t i = 2; i <= LostPeers::kMaxPeers; ++i) {
-        ASSERT_TRUE(other.Add(peer(i), minutes(30), t0));
-    }
-    EXPECT_TRUE(other.Add(peer(7000), minutes(10), t0));
-    EXPECT_FALSE(other.Contains(NodeId(1)));
-}
-
-// The squatting case of RoutingTable::OnPacketReceived: while a peer is lost, another node claims its
-// id from its own endpoint and gets into the k-buckets (anyone may claim any id). The real peer's ping
-// response then fails the endpoint check of the k-buckets, so it is verified against the lost entry
-// first (LostPeers::Answered), and the k-bucket entry takes the verified endpoint (KBucket::ReplaceEndpoint).
-TEST(LostPeers, ASquattedIdIsTakenBackByTheVerifiedEndpoint) {
-    LostPeers lost;
-    KBucket bucket;
-    const auto t0 = Clock::now();
-    const auto real = peer(1);
-    const auto squatter = at(real, "10.6.6.6", 9999);
-
-    ASSERT_TRUE(lost.Add(real, hours(1), t0));
-    bucket.AddNode(squatter);
-
-    // the routing table's endpoint check alone would refuse the real peer
-    NodeEntrance held;
-    ASSERT_TRUE(bucket.Get(real.id, held));
-    EXPECT_FALSE(held.address == real.address && held.udp_port == real.udp_port);
-
-    // the squatter answering a retry ping does not count: it is not the recorded endpoint
-    const auto t = t0 + seconds(30);
-    ASSERT_EQ(lost.Due(t).size(), 1u);
-    EXPECT_FALSE(lost.Answered(squatter, t + seconds(1), kWindow).has_value());
-    // nor a replacement with the endpoint already there
-    EXPECT_FALSE(bucket.ReplaceEndpoint(squatter));
-
-    // the real peer answers at its recorded endpoint: verified, and the entry is its own again
-    ASSERT_TRUE(lost.Answered(real, t + seconds(2), kWindow).has_value());
-    EXPECT_TRUE(bucket.ReplaceEndpoint(real));
-    ASSERT_TRUE(bucket.Get(real.id, held));
-    EXPECT_EQ(held.address, real.address);
-    EXPECT_EQ(held.udp_port, real.udp_port);
-    EXPECT_EQ(bucket.Size(), 1u);
-    EXPECT_FALSE(bucket.ReplaceEndpoint(real));
-    // an id that is not in the bucket is not added by it
-    EXPECT_FALSE(bucket.ReplaceEndpoint(peer(2)));
-    EXPECT_EQ(bucket.Size(), 1u);
 }
