@@ -1444,7 +1444,7 @@ rediscovery_wait() {
     while :; do
         status=0
         out=$(cd "$HERE" && python3 partition.py neighbours --work "$WORK" --keys "$WORK/keys.txt" \
-            --side "$(echo $2 | tr ' ' ',')" --side "$(echo $3 | tr ' ' ',')") || status=$?
+            --side "$(echo $2 | tr ' ' ',')" --side "$(echo $3 | tr ' ' ',')" --official "$(echo $OFFICIAL_NODES | tr ' ' ',')") || status=$?
         [ "$status" -ne 0 ] || break
         [ $(( $(date +%s) - t0 )) -lt $(( REDISCOVER_MINUTES * 60 )) ] || break
         sleep 10

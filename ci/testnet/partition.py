@@ -16,7 +16,10 @@ chain and waits for its operator): it must keep the side the other nodes left, a
 neighbours: from node.log ("new neighbour added <key>", "neighbour removed <key>", logged by this
 build and the official one, replayed from the node's latest start, "blockHashes initialization
 started") the neighbours each node has now among the nodes of the other side, whether they came back
-after the cut or never left; exit 1 unless every node has at least one.
+after the cut or never left; exit 1 unless every node has at least one. A node of --official (the
+official build, which asks a peer for its version only once, when the peer enters its routing table)
+also counts when a node of the other side has it as a neighbour: the link is up, and the one-sided
+handshake is the official code's.
 """
 import os
 import re
@@ -158,7 +161,8 @@ def neighbours(args):
                 i, key = line.split()
                 keys[key] = int(i)
     sides = [{int(x) for x in side.split(",") if x} for side in args.side]
-    ok = True
+    official = {int(x) for x in (args.official or "").split(",") if x}
+    found = {}
     for own, other in ((sides[0], sides[1]), (sides[1], sides[0])):
         for i in sorted(own):
             now = {}
@@ -174,9 +178,18 @@ def neighbours(args):
                     node = keys.get(m.group(2))
                     if node in other:
                         now[node] = m.group(1) == "new neighbour added"
-            found = sorted(n for n, present in now.items() if present)
-            ok = ok and bool(found)
-            print(f"n{i}: {len(found)} neighbour(s) of the other side{' (' + ' '.join(f'n{n}' for n in found) + ')' if found else ''}")
+            found[i] = sorted(n for n, present in now.items() if present)
+    ok = True
+    for own in sides:
+        for i in sorted(own):
+            mine = found[i]
+            theirs = sorted(j for j, ns in found.items() if i in ns and j not in own)
+            line = f"n{i}: {len(mine)} neighbour(s) of the other side{' (' + ' '.join(f'n{n}' for n in mine) + ')' if mine else ''}"
+            if not mine and i in official and theirs:
+                line += f"; official build, a neighbour of {' '.join(f'n{n}' for n in theirs)}"
+            elif not mine:
+                ok = False
+            print(line)
     sys.exit(0 if ok else 1)
 
 
@@ -198,6 +211,7 @@ def main():
     n.add_argument("--work", required=True)
     n.add_argument("--keys", required=True)
     n.add_argument("--side", action="append", required=True)
+    n.add_argument("--official", default="")
     args = parser.parse_args()
     if args.command == "neighbours":
         if len(args.side) != 2:
