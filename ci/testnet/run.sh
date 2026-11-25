@@ -1509,7 +1509,7 @@ part_held_nodes() {
     for i in $(seq 1 "$NODES"); do ! fork_held_after_partition "$i" || echo "$i"; done | tr '\n' ' '
 }
 official_partition() {
-    local t_cut s0 o0 first_t=0 c o end i
+    local t_cut s0 o0 first_t=0 c o end i o_late=-1
     for i in $COMMUNITY_NODES; do
         if grep -aq 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log"; then
             part_fail="${part_fail:+$part_fail; }n$i used the community bootstrap before the partition"
@@ -1524,6 +1524,8 @@ official_partition() {
     while [ "$(date +%s)" -lt "$end" ]; do
         sleep 5
         c=$(community_max)
+        # the official head a minute before the reconnection: did the official side stall?
+        [ "$o_late" -ge 0 ] || [ $(( end - $(date +%s) )) -gt 60 ] || o_late=$(official_max)
         if [ "$first_t" -eq 0 ] && [ "$c" -gt $((s0 + 1)) ]; then
             first_t=$(date +%s)
             echo "partition: community block $c $((first_t - t_cut)) s after the cut"
@@ -1532,6 +1534,12 @@ official_partition() {
     c=$(community_max); o=$(official_max)
     echo "PARTITION RESULT: after $OFFICIAL_PARTITION_MINUTES min the community head is $c ($((c - s0)) blocks, restart after" \
         "$([ "$first_t" -eq 0 ] && echo never || echo "$((first_t - t_cut)) s")), the official head $o ($((o - o0)) blocks); $(partition_stats) packets dropped"
+    if [ "$o_late" -ge 0 ] && [ "$o" -le "$o_late" ]; then
+        # a known variance: the cut can leave the official side fewer than 4 live initial confidants
+        echo "PARTITION RESULT: the official side stalled during the cut (no block in its last minute, head #$o):" \
+            "if the community side wrote blocks above it, the official nodes should take them (no fork), and" \
+            "community nodes have no fork to hold"
+    fi
     for i in $COMMUNITY_NODES; do
         { grep -a 'COMMUNITY BOOTSTRAP: \(starting\|taking\)' "$WORK/n$i/node.log" || true; } | tail -1 | sed "s/^/partition: n$i: /"
     done
