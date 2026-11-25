@@ -1435,8 +1435,8 @@ reorg_report() {
 
 # After a cut is lifted, every node must have a neighbour of the other side again within
 # REDISCOVER_MINUTES: the p2p layers of the two sides look each other up again (lost peers pinged
-# again, p2p fix of 2026-11-25). From node.log, "new neighbour added" / "neighbour removed" since the
-# cut was lifted ($4, as node.log prints the time); sides $2 and $3 are lists of node numbers.
+# again, p2p fix of 2026-11-25). From node.log, "new neighbour added" / "neighbour removed" since each
+# node's latest start (partition.py neighbours); sides $2 and $3 are lists of node numbers.
 rediscovery_fail=""
 rediscovery_wait() {
     local t0 out status
@@ -1444,7 +1444,7 @@ rediscovery_wait() {
     while :; do
         status=0
         out=$(cd "$HERE" && python3 partition.py neighbours --work "$WORK" --keys "$WORK/keys.txt" \
-            --side "$(echo $2 | tr ' ' ',')" --side "$(echo $3 | tr ' ' ',')" --since "$4") || status=$?
+            --side "$(echo $2 | tr ' ' ',')" --side "$(echo $3 | tr ' ' ',')") || status=$?
         [ "$status" -ne 0 ] || break
         [ $(( $(date +%s) - t0 )) -lt $(( REDISCOVER_MINUTES * 60 )) ] || break
         sleep 10
@@ -1466,7 +1466,7 @@ split_side_max() {
     echo "$m"
 }
 split_partition() {
-    local a="" b="" i lift_stamp
+    local a="" b="" i
     for i in $(seq 1 "$NODES"); do
         if [[ ",$SPLIT_NODES," == *",$i,"* ]]; then a+="$i "; else b+="$i "; fi
     done
@@ -1474,11 +1474,10 @@ split_partition() {
     echo "split: $(printf 'n%s ' $a)cut off from $(printf 'n%s ' $b)for $SPLIT_MINUTES min (heads $(split_side_max $a) and $(split_side_max $b))"
     sleep $(( SPLIT_MINUTES * 60 ))
     echo "SPLIT RESULT: after $SPLIT_MINUTES min the heads are $(split_side_max $a) ($(printf 'n%s ' $a| sed 's/ $//')) and $(split_side_max $b) ($(printf 'n%s ' $b | sed 's/ $//')); $(partition_stats) packets dropped"
-    lift_stamp=$(date '+%F %T')
     partition_off
     split_done=2
     echo "split: reconnected"
-    rediscovery_wait split "$a" "$b" "$lift_stamp"
+    rediscovery_wait split "$a" "$b"
 }
 
 # OFFICIAL_PARTITION_AT: the community nodes cut off from the running official nodes
@@ -1535,13 +1534,11 @@ official_partition() {
         || part_fail="${part_fail:+$part_fail; }no chain dump of n$cn"
     (cd "$HERE" && python3 partition.py dump --from "$part_from" --port "$(api_port "$on")") > "$WORK/partition-official.txt" \
         || part_fail="${part_fail:+$part_fail; }no chain dump of n$on"
-    local lift_stamp
-    lift_stamp=$(date '+%F %T')
     partition_off
     part_done=2
     echo "partition: reconnected (community head $c, official head $o)"
     # have the two sides found each other again?
-    rediscovery_wait partition "$COMMUNITY_NODES" "$OFFICIAL_NODES" "$lift_stamp"
+    rediscovery_wait partition "$COMMUNITY_NODES" "$OFFICIAL_NODES"
     for i in $COMMUNITY_NODES $OFFICIAL_NODES; do
         echo "partition: n$i has $(grep -a 'neighbour nodes = ' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*neighbour nodes = ([0-9]+).*/\1/') neighbours, head $(seq_of "$i")"
     done
@@ -1943,12 +1940,11 @@ while :; do
     if [ "$net_fault_at" -gt 0 ] && [ "$net_fault_done" -eq 0 ] && [ "$NET_FAULT_SECONDS" -gt 0 ] \
         && [ "$(date +%s)" -ge $((net_fault_at + NET_FAULT_SECONDS)) ]; then
         echo "net fault: lifted at sequence $min ($(net_fault_stats))"
-        lift_stamp=$(date '+%F %T')
         net_fault_off
         net_fault_done=1
         if [ "$NET_FAULT" = partition ]; then
             others=$(for i in $(seq 1 "$NODES"); do [[ ",$NET_FAULT_NODES," == *",$i,"* ]] || echo "$i"; done | tr '\n' ' ')
-            rediscovery_wait "net partition" "${NET_FAULT_NODES//,/ }" "$others" "$lift_stamp"
+            rediscovery_wait "net partition" "${NET_FAULT_NODES//,/ }" "$others"
         fi
     fi
     if [ "$GARBAGE_AT" -gt 0 ] && [ -z "$GARBAGE_PID" ] && [ "$min" -ge "$GARBAGE_AT" ]; then

@@ -4,8 +4,8 @@
     partition.py dump --from 395 --port 9090 > community.txt   # "seq hash transactions" per block
     partition.py report --community community.txt --official official.txt --port 9090 --port 9102
     partition.py fork --community community.txt --official official.txt   # the first block that differs
-    partition.py neighbours --work testnet-run --keys testnet-run/keys.txt --side 1,3,5 --side 2,4 \
-        --since "2026-11-25 10:00:00"   # does every node have a neighbour of the other side again?
+    partition.py neighbours --work testnet-run --keys testnet-run/keys.txt --side 1,3,5 --side 2,4
+        # does every node have a neighbour of the other side (again)?
 
 dump: the blocks of one node from a sequence to its head, taken just before the reconnection.
 report: where the two sides forked, and which side's blocks the nodes hold after the reconnection
@@ -14,9 +14,9 @@ and the transactions of its blocks above the fork with them (unless written agai
 A node given with --held-port holds the fork (FORK HELD: a community node that refuses the other
 chain and waits for its operator): it must keep the side the other nodes left, all of it.
 neighbours: from node.log ("new neighbour added <key>", "neighbour removed <key>", logged by this
-build and the official one) the neighbours each node has now among the nodes of the other side,
-counting only what was logged since --since (the time the cut was lifted); exit 1 unless every
-node has at least one.
+build and the official one, replayed from the node's latest start, "blockHashes initialization
+started") the neighbours each node has now among the nodes of the other side, whether they came back
+after the cut or never left; exit 1 unless every node has at least one.
 """
 import os
 import re
@@ -142,7 +142,9 @@ def report(args):
     sys.exit(1 if failed else 0)
 
 
-NEIGHBOUR_LINE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[^\]]*\].*NODE: (new neighbour added|neighbour removed) (\S+)")
+NEIGHBOUR_LINE = re.compile(r"NODE: (new neighbour added|neighbour removed) (\S+)")
+# logged once at every start of either build: the neighbours start over
+START_LINE = "blockHashes initialization started"
 
 
 def neighbours(args):
@@ -160,12 +162,15 @@ def neighbours(args):
             path = os.path.join(args.work, f"n{i}", "node.log")
             with open(path, errors="replace") as f:
                 for line in f:
-                    m = NEIGHBOUR_LINE.match(line)
-                    if not m or m.group(1) < args.since:
+                    if START_LINE in line:
+                        now = {}
                         continue
-                    node = keys.get(m.group(3))
+                    m = NEIGHBOUR_LINE.search(line)
+                    if not m:
+                        continue
+                    node = keys.get(m.group(2))
                     if node in other:
-                        now[node] = m.group(2) == "new neighbour added"
+                        now[node] = m.group(1) == "new neighbour added"
             found = sorted(n for n, present in now.items() if present)
             ok = ok and bool(found)
             print(f"n{i}: {len(found)} neighbour(s) of the other side{' (' + ' '.join(f'n{n}' for n in found) + ')' if found else ''}")
@@ -190,7 +195,6 @@ def main():
     n.add_argument("--work", required=True)
     n.add_argument("--keys", required=True)
     n.add_argument("--side", action="append", required=True)
-    n.add_argument("--since", required=True)
     args = parser.parse_args()
     if args.command == "neighbours":
         if len(args.side) != 2:
