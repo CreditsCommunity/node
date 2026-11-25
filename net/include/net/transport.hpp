@@ -81,6 +81,9 @@ public:
     void addToNeighbours(const std::set<cs::PublicKey>&);
 
     void getKnownPeers(std::vector<cs::PeerData>&);
+    // the peers the routing table lost because they stopped answering and still pings again (p2p
+    // LostPeers: each answered our pings at that endpoint before, at most 64, for 24 h at most)
+    void getLostPeers(std::vector<cs::PeerData>&);
     // the capability byte a peer of the routing table announces (cs::hostdata); false if unknown
     bool peerCapabilities(const cs::PublicKey& key, uint8_t& capabilities);
 

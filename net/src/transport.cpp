@@ -478,6 +478,32 @@ uint32_t Transport::getMaxNeighbours() const {
     return Neighbourhood::kMaxNeighbours;
 }
 
+namespace {
+cs::PeerData toPeerData(const net::NodeEntrance& p) {
+    cs::PeerData peerData;
+    auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
+    peerData.id = EncodeBase58(ptr, ptr + p.id.size());
+    peerData.key = toPublicKey(p.id);
+    peerData.ip = p.address.to_string();
+    peerData.port = p.udp_port;
+    if (p.user_data) {
+      peerData.version = static_cast<decltype(peerData.version)>(cs::hostdata::version(p.user_data));
+      peerData.platform = static_cast<decltype(peerData.platform)>(cs::hostdata::platform(p.user_data));
+      peerData.capabilities = cs::hostdata::capabilities(p.user_data);
+      peerData.minorVersion = cs::hostdata::minorVersion(p.user_data);
+    }
+    return peerData;
+}
+}  // namespace
+
+void Transport::getLostPeers(std::vector<cs::PeerData>& result) {
+    std::vector<net::NodeEntrance> lost;
+    host_.GetLostNodes(lost);
+    for (const auto& p : lost) {
+        result.push_back(toPeerData(p));
+    }
+}
+
 void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
     std::vector<net::NodeEntrance> knownPeers;
     host_.GetKnownNodes(knownPeers);
@@ -485,18 +511,7 @@ void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
     std::unordered_set<std::string> uniqueIds;
 
     for (auto& p : knownPeers) {
-        cs::PeerData peerData;
-        auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
-        peerData.id = EncodeBase58(ptr, ptr + p.id.size());
-        peerData.key = toPublicKey(p.id);
-        peerData.ip = p.address.to_string();
-        peerData.port = p.udp_port;
-        if (p.user_data) {
-          peerData.version = static_cast<decltype(peerData.version)>(cs::hostdata::version(p.user_data));
-          peerData.platform = static_cast<decltype(peerData.platform)>(cs::hostdata::platform(p.user_data));
-          peerData.capabilities = cs::hostdata::capabilities(p.user_data);
-          peerData.minorVersion = cs::hostdata::minorVersion(p.user_data);
-        }
+        cs::PeerData peerData = toPeerData(p);
 
         if (uniqueIds.insert(peerData.id).second) {
           result.push_back(peerData);
