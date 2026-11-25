@@ -276,8 +276,16 @@ jobs:
             env: NET_FAULT=delay NET_FAULT_NODES=3,5
           - name: net-reorder-duplicate
             env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
+          # (once lifted, every node must have a neighbour of the other side within REDISCOVER_MINUTES)
           - name: net-partition
             env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
+          # a community-only network split in two for 6 minutes, each side keeping its own links (n6, n7
+          # against n1-n5): the small side cannot bootstrap and waits. Once reconnected, every node must
+          # have a neighbour of the other side within REDISCOVER_MINUTES (the p2p layers ping their lost
+          # peers again), and the small side must take the other side's blocks: one chain
+          - name: net-partition-split
+            official: 'no'   # a community-only split
+            env: SPLIT_AT=300 SPLIT_NODES=6,7 SPLIT_MINUTES=6 RESTART_AT=0
           # a node at home behind a NAT loses its connection for 150 s and gets it back, then for 15 s
           # once more 5 min later (incident of 2026-11-24): it must catch up and keep up by itself,
           # without round lag or a gray-listed key, for 20 min. A network the size of mainnet (23 nodes,
@@ -557,14 +565,18 @@ jobs:
             fixed: true
             manual: true
           # the community nodes cut off from the RUNNING official nodes for 6 minutes (fallback on,
-          # stall_minutes=2): both sides write blocks; after the reconnection the run reports which
-          # side the nodes kept, how many blocks and transactions the other lost, and needs one chain
-          # (refusals and FORK HELD on the community side are expected: DEEP_ROLLBACK_EXPECTED=1)
+          # stall_minutes=2): both sides write blocks. After the reconnection every node must have a
+          # neighbour of the other side within REDISCOVER_MINUTES, and the split must show: the official
+          # nodes keep the longer chain, community nodes on the shorter one hold the fork (FORK HELD,
+          # their side whole, no longer counted for TARGET_SEQ) or follow it; the run reports which side
+          # the nodes kept and how many blocks and transactions the other lost (refusals and FORK HELD
+          # on the community side are expected: DEEP_ROLLBACK_EXPECTED=1)
           - name: official-partition
             env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
             fixed: true
             manual: true
           # the same, the community nodes restarted after the reconnection (they dial every host again)
+          # once the rediscovery check is over
           - name: official-partition-restart
             env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=6 OFFICIAL_PARTITION_RESTART=1 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=2 RESTART_AT=0 LOAD_SECONDS=1500 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
             fixed: true

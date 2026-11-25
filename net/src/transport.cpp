@@ -138,12 +138,17 @@ void Transport::run() {
                              [this] { return stopped_.load(std::memory_order_acquire); });
     }
 
+    constexpr auto kHandshakeRetryEvery = Neighbourhood::kHandshakeRetryInterval / Neighbourhood::kPingInterval;
+    uint64_t iteration = 0;
     while (!stopped_.load(std::memory_order_acquire) && Transport::gSignalStatus == 0) {
         pollSignalFlag();
         if (stopped_.load(std::memory_order_acquire) || Transport::gSignalStatus != 0) break;
 
         neighbourhood_.pingNeighbours();
         keepReachable();
+        if (++iteration % kHandshakeRetryEvery == 0) {
+            retryHandshakes();
+        }
         emit mainThreadIterated();
 
         std::unique_lock<std::mutex> lock(shutdownMux_);
@@ -266,6 +271,17 @@ void Transport::keepReachable() {
         peers, [this](const cs::PublicKey& key) { return neighbourhood_.contains(key); },
         cs::keepalive::kMaxPeersPerIteration, keepaliveOffset_);
     neighbourhood_.pingKnown(picked);
+}
+
+void Transport::retryHandshakes() {
+    std::vector<net::NodeEntrance> table;
+    host_.GetRoutingTableNodes(table);
+    std::vector<cs::PublicKey> peers;
+    peers.reserve(table.size());
+    for (const auto& n : table) {
+        peers.push_back(toPublicKey(n.id));
+    }
+    neighbourhood_.retryHandshakes(peers);
 }
 
 bool Transport::sendDirectIfKnown(Packet&& pack, const cs::PublicKey& receiver) {
@@ -478,6 +494,32 @@ uint32_t Transport::getMaxNeighbours() const {
     return Neighbourhood::kMaxNeighbours;
 }
 
+namespace {
+cs::PeerData toPeerData(const net::NodeEntrance& p) {
+    cs::PeerData peerData;
+    auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
+    peerData.id = EncodeBase58(ptr, ptr + p.id.size());
+    peerData.key = toPublicKey(p.id);
+    peerData.ip = p.address.to_string();
+    peerData.port = p.udp_port;
+    if (p.user_data) {
+      peerData.version = static_cast<decltype(peerData.version)>(cs::hostdata::version(p.user_data));
+      peerData.platform = static_cast<decltype(peerData.platform)>(cs::hostdata::platform(p.user_data));
+      peerData.capabilities = cs::hostdata::capabilities(p.user_data);
+      peerData.minorVersion = cs::hostdata::minorVersion(p.user_data);
+    }
+    return peerData;
+}
+}  // namespace
+
+void Transport::getLostPeers(std::vector<cs::PeerData>& result) {
+    std::vector<net::NodeEntrance> lost;
+    host_.GetLostNodes(lost);
+    for (const auto& p : lost) {
+        result.push_back(toPeerData(p));
+    }
+}
+
 void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
     std::vector<net::NodeEntrance> knownPeers;
     host_.GetKnownNodes(knownPeers);
@@ -485,18 +527,7 @@ void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
     std::unordered_set<std::string> uniqueIds;
 
     for (auto& p : knownPeers) {
-        cs::PeerData peerData;
-        auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
-        peerData.id = EncodeBase58(ptr, ptr + p.id.size());
-        peerData.key = toPublicKey(p.id);
-        peerData.ip = p.address.to_string();
-        peerData.port = p.udp_port;
-        if (p.user_data) {
-          peerData.version = static_cast<decltype(peerData.version)>(cs::hostdata::version(p.user_data));
-          peerData.platform = static_cast<decltype(peerData.platform)>(cs::hostdata::platform(p.user_data));
-          peerData.capabilities = cs::hostdata::capabilities(p.user_data);
-          peerData.minorVersion = cs::hostdata::minorVersion(p.user_data);
-        }
+        cs::PeerData peerData = toPeerData(p);
 
         if (uniqueIds.insert(peerData.id).second) {
           result.push_back(peerData);
