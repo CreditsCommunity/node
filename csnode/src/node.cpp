@@ -191,7 +191,8 @@ void Node::dumpKnownPeersToFile() {
     std::vector<cs::PeerData> peers;
     transport_->getKnownPeers(peers);
     // and the peers lost because they stopped answering (a network cut): the file is the boot list of
-    // the next start, which would otherwise know only the side this node could still reach
+    // the next start, which would otherwise know only the side this node could still reach. One line
+    // per id: the first endpoint getLostPeers gives for it, the one it was lost at most recently
     std::vector<cs::PeerData> lost;
     transport_->getLostPeers(lost);
     for (auto& p : lost) {
