@@ -6,6 +6,7 @@
 #include <csnode/datastream.hpp>
 #include <csnode/node.hpp>
 #include <transport.hpp>
+#include <keepalive.hpp>
 
 Neighbourhood::Neighbourhood(Transport* transport, Node* node)
 : transport_(transport)
@@ -57,6 +58,25 @@ void Neighbourhood::pingNeighbours() {
 void Neighbourhood::pingKnown(const std::vector<cs::PublicKey>& peers) {
     for (const auto& p : peers) {
         transport_->sendDirectIfKnown(formPacket(BaseFlags::NetworkMsg, NetworkCommand::Ping), p);
+    }
+}
+
+void Neighbourhood::retryHandshakes(const std::vector<cs::PublicKey>& tablePeers) {
+    if (isLimitReached()) {
+        return;
+    }
+    const auto picked = cs::keepalive::select<cs::PublicKey>(
+        tablePeers,
+        [this](const cs::PublicKey& key) {
+            if (contains(key)) {
+                return true;
+            }
+            std::lock_guard lock(peersMux_);
+            return compatiblePeers_.count(key) > 0;
+        },
+        kMaxHandshakeRetries, handshakeOffset_);
+    for (const auto& p : picked) {
+        transport_->sendDirectIfKnown(formPacket(BaseFlags::NetworkMsg, NetworkCommand::VersionRequest), p);
     }
 }
 

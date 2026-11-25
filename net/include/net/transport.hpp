@@ -71,6 +71,8 @@ public:
     void resetNetwork();
     // a node behind a NAT keeps a connection of its own open to the peers of its routing table
     void keepReachable();
+    // the routing-table peers that are not neighbours are asked for their version again (Neighbourhood)
+    void retryHandshakes();
 
     // neighbours interface
     void setPermanentNeighbours(const std::set<cs::PublicKey>&);

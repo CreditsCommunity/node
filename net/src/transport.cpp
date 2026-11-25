@@ -138,12 +138,17 @@ void Transport::run() {
                              [this] { return stopped_.load(std::memory_order_acquire); });
     }
 
+    constexpr auto kHandshakeRetryEvery = Neighbourhood::kHandshakeRetryInterval / Neighbourhood::kPingInterval;
+    uint64_t iteration = 0;
     while (!stopped_.load(std::memory_order_acquire) && Transport::gSignalStatus == 0) {
         pollSignalFlag();
         if (stopped_.load(std::memory_order_acquire) || Transport::gSignalStatus != 0) break;
 
         neighbourhood_.pingNeighbours();
         keepReachable();
+        if (++iteration % kHandshakeRetryEvery == 0) {
+            retryHandshakes();
+        }
         emit mainThreadIterated();
 
         std::unique_lock<std::mutex> lock(shutdownMux_);
@@ -266,6 +271,17 @@ void Transport::keepReachable() {
         peers, [this](const cs::PublicKey& key) { return neighbourhood_.contains(key); },
         cs::keepalive::kMaxPeersPerIteration, keepaliveOffset_);
     neighbourhood_.pingKnown(picked);
+}
+
+void Transport::retryHandshakes() {
+    std::vector<net::NodeEntrance> table;
+    host_.GetRoutingTableNodes(table);
+    std::vector<cs::PublicKey> peers;
+    peers.reserve(table.size());
+    for (const auto& n : table) {
+        peers.push_back(toPublicKey(n.id));
+    }
+    neighbourhood_.retryHandshakes(peers);
 }
 
 bool Transport::sendDirectIfKnown(Packet&& pack, const cs::PublicKey& receiver) {

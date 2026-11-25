@@ -24,6 +24,10 @@ public:
     constexpr static uint32_t kMinNeighbours = 1;
 
     constexpr static std::chrono::seconds kPingInterval{2};
+    // how often the routing-table peers that are not neighbours are asked for their version again,
+    // and how many at most each time
+    constexpr static std::chrono::seconds kHandshakeRetryInterval{60};
+    constexpr static size_t kMaxHandshakeRetries = 16;
 
     Neighbourhood(Transport*, Node*);
 
@@ -37,6 +41,13 @@ public:
     // pings these peers of the routing table (a node behind a NAT, see Transport::keepReachable):
     // only if they are still in its k-buckets: no queue for an unknown id, no lookup
     void pingKnown(const std::vector<cs::PublicKey>& peers);
+    // A peer becomes a neighbour through a version request sent when it enters the routing table, and
+    // only then: lost (a cut, a link that worked one way only), it is never repeated, and the peer
+    // stays out of the neighbours, so of block requests and fork detection, for good. While below the
+    // limit, these routing-table peers (k-buckets only) that are neither neighbours nor waiting in the
+    // compatible pool are asked again: at most kMaxHandshakeRetries a call, in turn, no queue for an
+    // unknown id and no lookup (Transport::sendDirectIfKnown).
+    void retryHandshakes(const std::vector<cs::PublicKey>& tablePeers);
 
     void forEachNeighbour(NeighboursCallback);
     uint32_t getNeighboursCount() const;
@@ -88,5 +99,8 @@ private:
 
     mutable std::mutex permNeighbourMux_;
     std::unordered_set<cs::PublicKey> permanentNeighbours_;
+
+    // where the next retryHandshakes round starts among the candidates (transport's run thread)
+    size_t handshakeOffset_ = 0;
 };
 #endif  // NEIGHBOURHOOD_HPP
