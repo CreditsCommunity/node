@@ -513,10 +513,13 @@ consensus rules.
   when the peer enters its routing table, and only then; if that request is lost (a cut, a link that
   works one way), the peer stayed out of the neighbours for good. Every 60 s, while below the
   neighbour limit, the routing-table peers that are neither neighbours nor waiting in the compatible
-  pool are asked again (at most 16, only peers of the k-buckets, no lookup). Node ids are not authenticated in this protocol (an official peer's ping
-  answer carries no nonce or signature), so a ping answer counts only from the endpoint pinged within
-  8 s, a lost peer is kept per endpoint, and a returning endpoint never displaces an entry that still
-  answers. Nothing else changes on the wire, and there is no new option.
+  pool are asked again (at most 16, only peers of the k-buckets, no lookup). Node ids are not
+  authenticated in this protocol (an official peer's ping answer carries no nonce or signature), so a
+  ping answer counts only from the endpoint pinged within 8 s, and a lost peer is kept per endpoint. A
+  returning peer never displaces an entry of the routing table: if the table holds its id at another
+  endpoint, it stays out, as in the official code, until the pinger evicts that entry (three
+  unanswered pings), and comes back at its next ping (about 24 s + 180 s at most). Nothing else
+  changes on the wire, and there is no new option.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
