@@ -214,8 +214,9 @@ def main():
     # the even nodes' amount (0 = --amount): with official even nodes, more stake takes them the seats
     parser.add_argument("--even-amount", type=int, default=0)
     parser.add_argument("--load-seconds", type=int, default=0)
-    # the chain of node 1 is cut back during the load (run.sh RESOLVE_FORK_AFTER): a transfer it took on
-    # the branch that was cut may come back expired, an answer and not a fault
+    # node 1 may leave its branch during the load (run.sh OFFICIAL_PARTITION_AT: it holds the fork once
+    # the two sides see each other again, or RESOLVE_FORK_AFTER cuts its chain back): a transfer it took
+    # on that branch may come back expired, an answer and not a fault
     parser.add_argument("--chain-cut", action="store_true")
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)

@@ -101,7 +101,10 @@ def report(args):
         kept_o = sum(1 for s, v in o_side.items() if now.get(s, (None,))[0] == v[0])
         lost_c_txs = sum(v[1] for s, v in c_side.items() if now.get(s, (None,))[0] != v[0])
         lost_o_txs = sum(v[1] for s, v in o_side.items() if now.get(s, (None,))[0] != v[0])
-        if not o_side and c_side and kept_c == len(c_side):
+        if not o_side and not c_side:
+            # neither side wrote a block of its own while cut off (both stalled at the same block)
+            verdict = "no fork: neither side wrote a block of its own, one chain"
+        elif not o_side and c_side and kept_c == len(c_side):
             # the official side wrote nothing while cut off (it stalled): no fork, one chain
             verdict = f"no fork: the official side wrote no block, the community blocks were kept ({len(c_side)} blocks)"
         elif not c_side and o_side and kept_o == len(o_side):

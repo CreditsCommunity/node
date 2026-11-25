@@ -2395,7 +2395,7 @@ PY
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
             --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
             --low-stake-nodes "$LOW_STAKE_NODES" --even-amount "$OFFICIAL_FUND" \
-            $([ "$DELEGATE" = "1" ] && echo --delegations) $([ "$RESOLVE_FORK_AFTER" = 1 ] && echo --chain-cut) > "$WORK/fund.log" 2>&1 &
+            $([ "$DELEGATE" = "1" ] && echo --delegations) $([ "$OFFICIAL_PARTITION_AT" -gt 0 ] && echo --chain-cut) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
 
