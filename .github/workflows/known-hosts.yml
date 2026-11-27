@@ -112,12 +112,21 @@ jobs:
           grep -ah 'Start contract executor\|Node initialized\|Last written sequence' log/log_*.txt | tail -3 || true
 
       # the snapshots the neighbours serve: the same folder, no chain opened; its output is data of
-      # untrusted peers, checked by the publishing job
+      # untrusted peers, checked by the publishing job. The survey starts the node again in this
+      # folder: it would replace log/log_0.txt and known_hosts.txt, which collect.py reads from the
+      # run above (from 2026-10-30 to 2026-11-27 every run listed 0 peers for this reason), so they
+      # are set aside and put back; the survey's own log is kept in log-survey/
       - name: Survey snapshots
         run: |
           cd csnode
+          mv log log-run
+          cp known_hosts.txt known_hosts.run.txt
           ./node --db-path db --config-file config.ini --survey-snapshots 600 </dev/null > survey.txt 2> survey.err || echo "the survey ended with an error"
           pkill -f '[c]ontract-executor[.]jar' 2>/dev/null || true
+          rm -rf log-survey
+          if [ -d log ]; then mv log log-survey; fi
+          mv log-run log
+          mv known_hosts.run.txt known_hosts.txt
           grep -a '^SURVEY' survey.txt | cut -c1-300 | tail -20 || true
 
       - name: Collect
@@ -139,6 +148,7 @@ jobs:
           path: |
             out/
             csnode/log/
+            csnode/log-survey/
             csnode/known_hosts.txt
             csnode/known_peers.json
             csnode/survey.txt
@@ -218,9 +228,14 @@ jobs:
           git checkout -B "$branch"
           git commit -qam "packaging: known hosts verified on $(date -u +%Y-%m-%d)"
           git push -f origin "$branch"
-          if ! gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # only an open pull request from this repository's own branch is updated: `gh pr view
+          # <branch>` also finds a merged or closed one (the new list then reached no open pull
+          # request), and --head also matches a fork's branch of the same name
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+            --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)][0].number // empty')
+          if [ -z "$open" ]; then
             gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$DEFAULT_BRANCH" \
               --title "packaging: update known hosts" --body-file notes.md
           else
-            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --body-file notes.md
+            gh pr edit "$open" --repo "$GITHUB_REPOSITORY" --body-file notes.md
           fi
