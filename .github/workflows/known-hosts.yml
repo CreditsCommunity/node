@@ -228,9 +228,11 @@ jobs:
           git checkout -B "$branch"
           git commit -qam "packaging: known hosts verified on $(date -u +%Y-%m-%d)"
           git push -f origin "$branch"
-          # only an open pull request is updated: `gh pr view <branch>` also finds a merged or closed
-          # one, and the new list then reached no open pull request
-          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          # only an open pull request from this repository's own branch is updated: `gh pr view
+          # <branch>` also finds a merged or closed one (the new list then reached no open pull
+          # request), and --head also matches a fork's branch of the same name
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+            --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)][0].number // empty')
           if [ -z "$open" ]; then
             gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$DEFAULT_BRANCH" \
               --title "packaging: update known hosts" --body-file notes.md
