@@ -228,9 +228,12 @@ jobs:
           git checkout -B "$branch"
           git commit -qam "packaging: known hosts verified on $(date -u +%Y-%m-%d)"
           git push -f origin "$branch"
-          if ! gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # only an open pull request is updated: `gh pr view <branch>` also finds a merged or closed
+          # one, and the new list then reached no open pull request
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$open" ]; then
             gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$DEFAULT_BRANCH" \
               --title "packaging: update known hosts" --body-file notes.md
           else
-            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --body-file notes.md
+            gh pr edit "$open" --repo "$GITHUB_REPOSITORY" --body-file notes.md
           fi
