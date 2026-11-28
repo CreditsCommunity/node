@@ -215,7 +215,11 @@
 #        until the official nodes are back; trusted - their own trusted.txt also lists every community
 #        node, the network must restart without them; config - the community nodes run the community
 #        bootstrap fallback ([community_bootstrap] confidants = every community key, stall_minutes =
-#        COMMUNITY_STALL_MINUTES, default 2), the network must restart without them. COMMUNITY_BOOTSTRAP=config
+#        COMMUNITY_STALL_MINUTES, default 2), the network must restart without them; default - as a
+#        community package ships it: no [community_bootstrap] section, every community key in the node's
+#        community_bootstrap.txt, the default stall_minutes (10), and each community node must log
+#        "COMMUNITY BOOTSTRAP: fallback armed" at its start. With config or default the restart must not
+#        come before stall_minutes after the stop. COMMUNITY_BOOTSTRAP=config (or default)
 #        also runs without OFFICIAL_STOP_AT: the fallback must then never act (no "COMMUNITY BOOTSTRAP:"
 #        table started or taken), and with OFFICIAL_STOP_AT never before the official nodes stop.
 #        COMMUNITY_STALL_STARTER (minutes, default 0 = off, with COMMUNITY_BOOTSTRAP=config): the
@@ -391,8 +395,11 @@ OFFICIAL_STOP_AT=${OFFICIAL_STOP_AT:-0}
 OFFICIAL_STOP_MINUTES=${OFFICIAL_STOP_MINUTES:-5}
 OFFICIAL_FUND=${OFFICIAL_FUND:-0}
 COMMUNITY_BOOTSTRAP=${COMMUNITY_BOOTSTRAP:-none}
-case "$COMMUNITY_BOOTSTRAP" in none|trusted|config) ;; *) echo "COMMUNITY_BOOTSTRAP must be none, trusted or config, got '$COMMUNITY_BOOTSTRAP'"; exit 1 ;; esac
+case "$COMMUNITY_BOOTSTRAP" in none|trusted|config|default) ;; *) echo "COMMUNITY_BOOTSTRAP must be none, trusted, config or default, got '$COMMUNITY_BOOTSTRAP'"; exit 1 ;; esac
 COMMUNITY_STALL_MINUTES=${COMMUNITY_STALL_MINUTES:-2}
+# the wait the community nodes use: COMMUNITY_STALL_MINUTES with config, the node's default (10) with default
+COMMUNITY_STALL_DEFAULT=10
+[ "$COMMUNITY_BOOTSTRAP" != default ] || COMMUNITY_STALL_MINUTES=$COMMUNITY_STALL_DEFAULT
 COMMUNITY_STALL_STARTER=${COMMUNITY_STALL_STARTER:-0}
 COMMUNITY_STARTER=0       # the node given COMMUNITY_STALL_STARTER, set with the configs
 OFFICIAL_PARTITION_AT=${OFFICIAL_PARTITION_AT:-0}
@@ -900,8 +907,9 @@ if [ "$OFFICIAL_STOP_AT" -gt 0 ] && [ "$COMMUNITY_BOOTSTRAP" = trusted ]; then
 fi
 
 # COMMUNITY_BOOTSTRAP=config: the community bootstrap fallback on every node of this build, listing
-# every node of this build (the official nodes, even, have no such option)
-if [ "$COMMUNITY_BOOTSTRAP" = config ]; then
+# every node of this build (the official nodes, even, have no such option); default: the same list in
+# each node's community_bootstrap.txt, as the packages ship it, and no section in config.ini
+if [ "$COMMUNITY_BOOTSTRAP" = config ] || [ "$COMMUNITY_BOOTSTRAP" = default ]; then
     listed=""
     for j in $(seq 1 "$NODES"); do alt_node "$j" || listed="$listed${listed:+,}${KEYS[$((j - 1))]}"; done
     # COMMUNITY_STALL_STARTER: the node of this build with the lowest key (bytes, as cs::PublicKey
@@ -914,9 +922,13 @@ if [ "$COMMUNITY_BOOTSTRAP" = config ]; then
         alt_node "$i" && continue
         stall=$COMMUNITY_STALL_MINUTES
         [ "$i" -ne "$COMMUNITY_STARTER" ] || stall=$COMMUNITY_STALL_STARTER
-        printf '\n[community_bootstrap]\nconfidants=%s\nstall_minutes=%s\n' "$listed" "$stall" >> "$WORK/n$i/config.ini"
+        if [ "$COMMUNITY_BOOTSTRAP" = default ]; then
+            { echo "# community nodes of this test network"; tr ',' '\n' <<<"$listed"; } > "$WORK/n$i/community_bootstrap.txt"
+        else
+            printf '\n[community_bootstrap]\nconfidants=%s\nstall_minutes=%s\n' "$listed" "$stall" >> "$WORK/n$i/config.ini"
+        fi
     done
-    echo "community bootstrap: on in every node of this build, $(tr ',' '\n' <<<"$listed" | grep -c .) keys listed, stall_minutes=$COMMUNITY_STALL_MINUTES" \
+    echo "community bootstrap ($COMMUNITY_BOOTSTRAP): on in every node of this build, $(tr ',' '\n' <<<"$listed" | grep -c .) keys listed, stall_minutes=$COMMUNITY_STALL_MINUTES" \
         "$([ "$COMMUNITY_STARTER" -eq 0 ] || echo "(n$COMMUNITY_STARTER, the starter: $COMMUNITY_STALL_STARTER)")"
 fi
 
@@ -1392,6 +1404,13 @@ official_stop() {
             off_fail="the community nodes did not restart the network in $OFFICIAL_STOP_MINUTES min"
         else
             echo "OFFICIAL STOP RESULT: restart after $((first_t - t_kill)) s (first block $first_seq), $((c - s0)) blocks in $OFFICIAL_STOP_MINUTES min"
+            # the fallback waits stall_minutes from the node's last progress, just before the stop (the
+            # starter's wait with COMMUNITY_STALL_STARTER); 20 s for the last round seen before the kill
+            local wait_min=$COMMUNITY_STALL_MINUTES
+            [ "$COMMUNITY_STALL_STARTER" -eq 0 ] || wait_min=$COMMUNITY_STALL_STARTER
+            if [ "$COMMUNITY_BOOTSTRAP" != trusted ] && [ $((first_t - t_kill)) -lt $((wait_min * 60 - 20)) ]; then
+                off_fail="${off_fail:+$off_fail; }the community restart came $((first_t - t_kill)) s after the stop, before stall_minutes ($wait_min min)"
+            fi
         fi
     fi
     # COMMUNITY_STALL_STARTER: the others dropped the starter's first tables (fallback still closed)
@@ -3373,8 +3392,18 @@ if [ "${DEEP_ROLLBACK_EXPECTED:-0}" != 1 ]; then
     fi
 fi
 
+# COMMUNITY_BOOTSTRAP=default: every node of this build armed the fallback from its list file, with the
+# default wait, at each start
+if [ "$COMMUNITY_BOOTSTRAP" = default ]; then
+    for i in $(seq 1 "$NODES"); do
+        alt_node "$i" && continue
+        armed=$(grep -ac "COMMUNITY BOOTSTRAP: fallback armed, [0-9]* keys from community_bootstrap.txt.*, wait $COMMUNITY_STALL_DEFAULT min" "$WORK/n$i/node.log" || true)
+        [ "$armed" -gt 0 ] || { grep -a 'COMMUNITY BOOTSTRAP: fallback' "$WORK/n$i/node.log" | head -2; echo "FAIL: n$i did not log the fallback armed from community_bootstrap.txt"; exit 1; }
+    done
+    echo "community bootstrap: $(grep -a 'COMMUNITY BOOTSTRAP: fallback armed' "$WORK"/n*/node.log | head -1 | sed -E 's/.*(COMMUNITY BOOTSTRAP: fallback armed, [0-9]+ keys)[^,]*(, wait [0-9]+ min).*/\1\2/') on every node of this build"
+fi
 # the community bootstrap fallback in a network that never lost its official nodes: never used
-if [ "$COMMUNITY_BOOTSTRAP" = config ] && [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$OFFICIAL_PARTITION_AT" -eq 0 ]; then
+if { [ "$COMMUNITY_BOOTSTRAP" = config ] || [ "$COMMUNITY_BOOTSTRAP" = default ]; } && [ "$OFFICIAL_STOP_AT" -eq 0 ] && [ "$OFFICIAL_PARTITION_AT" -eq 0 ]; then
     used=$(grep -alE 'COMMUNITY BOOTSTRAP: (starting|taking)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
     [ -z "$used" ] || { grep -ah 'COMMUNITY BOOTSTRAP' "$WORK"/n*/node.log | head -5; echo "FAIL: the community bootstrap acted on $used"; exit 1; }
     echo "community bootstrap: never used ($(grep -ah 'NODE> Bootstrap on' "$WORK"/n*/node.log | wc -l) regular bootstrap lines on all nodes)"

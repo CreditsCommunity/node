@@ -595,6 +595,30 @@ jobs:
           - name: community-bootstrap-quiet
             env: COMMUNITY_BOOTSTRAP=config COMMUNITY_STALL_MINUTES=1 NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 TARGET_SEQ=1500
             manual: true
+          # the fallback as the community packages ship it (COMMUNITY_BOOTSTRAP=default): no section in
+          # config.ini, every community key in community_bootstrap.txt, the default stall_minutes (10).
+          # Official nodes stopped for 14 min: the community nodes must restart the network, not
+          # before 10 min, and the official nodes must take the same blocks when they return
+          - name: official-stop-default
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_STOP_AT=400 OFFICIAL_STOP_MINUTES=14 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=default RESTART_AT=0 LOAD_SECONDS=2400
+            fixed: true
+            manual: true
+          # the same, official nodes running, under packet loss and the restart test: never used
+          - name: community-bootstrap-quiet-default
+            env: COMMUNITY_BOOTSTRAP=default NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 TARGET_SEQ=1500
+            manual: true
+          # two nodes cut off from the others for 12 min, longer than the wait: a minority of the list
+          # stalls past stall_minutes but must never restart on its own, and catches up once reconnected
+          - name: community-bootstrap-quiet-cut
+            env: COMMUNITY_BOOTSTRAP=default NET_FAULT=partition NET_FAULT_NODES=3,5 NET_FAULT_AT=300 NET_FAULT_SECONDS=720 TARGET_SEQ=2500 RESTART_AT=0
+            manual: true
+          # the community nodes cut off from the RUNNING official nodes for 14 min, longer than the
+          # default wait: the community side restarts after 10 min, the sides find each other again
+          # after the cut, and the community nodes, on the shorter chain, hold the fork (FORK HELD)
+          - name: official-partition-default
+            env: NODES=10 TRUSTED_NODES=5 INITIAL_NODES=1,2,3,4,6 OFFICIAL_PARTITION_AT=400 OFFICIAL_PARTITION_MINUTES=14 OFFICIAL_FUND=200000 COMMUNITY_BOOTSTRAP=default RESTART_AT=0 LOAD_SECONDS=2400 TARGET_SEQ=2000 DEEP_ROLLBACK_EXPECTED=1
+            fixed: true
+            manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
             official: 'no'   # needs a feature of this fork on an even node
