@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.20.1 or earlier.
+Everything listed here is in release 4.2.532-community.20.2 or earlier.
 
 ## Storage
 
@@ -180,6 +180,13 @@ Everything listed here is in release 4.2.532-community.20.1 or earlier.
   10 minutes, it logs `ROUND LAG` and rebuilds its network connections, with backoff and never while
   FORK HELD. The Docker healthcheck reports unhealthy while the lag lasts.
   [#198](https://github.com/CreditsCommunity/node/pull/198)
+- **The sides of a network partition find each other again.** A node remembers the peers it lost
+  in a cut after they had answered it and pings them again with backoff, contacts the boot nodes
+  missing from its routing table every 10 minutes, and asks routing-table peers that are not yet
+  neighbours for their version again every minute. The two sides see each other 1 to 2 minutes
+  after the cut is lifted; the official nodes follow the longer chain, and a community node on the
+  shorter side holds the fork until its operator decides.
+  [#200](https://github.com/CreditsCommunity/node/pull/200)
 
 ## Diagnostics
 
