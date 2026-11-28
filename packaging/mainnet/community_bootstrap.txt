@@ -1,0 +1,19 @@
+# Community bootstrap fallback: the keys of the mainnet nodes that run the community node.
+#
+# The node reads this file when config.ini sets no [community_bootstrap] confidants= (see
+# docs/differences.md, "Community bootstrap fallback"). If no block, round or regular bootstrap comes
+# for stall_minutes (default 10) and no neighbour is ahead, these nodes may restart the network
+# without the official nodes; a restart needs more than half of them (4 of 6) holding the last
+# block. Every node that should take part needs the same list: do not edit it by hand (a new
+# package replaces it); set confidants= in config.ini for your own list, or enabled=false to turn
+# the fallback off.
+#
+# Chosen on 2026-11-28 (owner decision: the nodes that today announce the community version), each
+# with at least 500,000 CS of stake (balance + delegations; MinStakeValue, 50,000, is what a key
+# needs to sign a round). Evidence: knowledge note "Community Bootstrap Fallback", 2026-11-28.
+6ZW39KmRu5RYrNrtP47N2qCp3YKEZg9SmXAeatZnPA2g   # 155.133.27.61
+7hWM6wvsojdPy3A2pQjqWKtfJM4hQRCWe3YC2hB2WzbE   # 173.212.209.28
+CGHoC52eRCdi61JN3bBd2DCFCVJrbSSfHXVS3PZ3nSXP   # 45.13.233.185
+E1nHTzEXfW3CRRek8DbahRGCrTMRKfsgn2XYS7sSxrxs   # 31.220.77.202
+EgTczcqqKy9jbn8xEVAkSKRFmzGJczhLm2uZyJHHL3HM   # 144.91.115.83
+KjLas6H5Se4mJNMwPazEwpktodRiJGhnu5uwAqMKSAQ    # 109.115.228.107

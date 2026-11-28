@@ -176,23 +176,58 @@ The official node has it only in its monitor and wallet builds. The cache follow
 standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
 rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
 
-### Community bootstrap fallback (expert option, off by default)
+### Community bootstrap fallback (on in the community packages)
 
 Only the initial confidants (the `init_trusted` list, or special order 2) may restart a stalled
 network with a bootstrap table, and a table with any other key needs the project's signature. If
 all official nodes become unavailable at once, the initial confidants still running may be too few
 (fewer than 4), and the network stays stalled until the official nodes are back.
 
-The `[community_bootstrap]` section of `config.ini` adds a liveness fallback. It is off unless
-`confidants` lists keys:
+The `[community_bootstrap]` section of `config.ini` adds a liveness fallback:
 
 ```ini
 [community_bootstrap]
-; community node keys (base58), comma or space separated; empty or missing: off
-confidants=<key1>,<key2>,...
-; minutes without progress before the fallback may act (1 to 10080, default 30)
-stall_minutes=30
+; false turns the fallback off whatever the list (default true)
+enabled=true
+; community node keys (base58), comma or space separated; when set, it replaces the file below and
+; an empty value turns the fallback off
+;confidants=<key1>,<key2>,...
+; the list when confidants= is not set: one or more keys per line, # starts a comment. No such file:
+; the fallback is off. An empty value names no file
+confidants_file=community_bootstrap.txt
+; minutes without progress before the fallback may act (1 to 10080, default 10)
+stall_minutes=10
 ```
+
+**Where the list comes from, and who has it on.** The community packages and the Docker image ship
+`community_bootstrap.txt` next to `config.ini`. The node reads it (or the file `confidants_file`
+names, when relative) only from the folder of the `config.ini` it was started with
+(`--config-file`), never from the working directory, so a file left in some other folder cannot
+arm the fallback; anyone who can write to that folder can change `config.ini` itself. The file holds the keys of the mainnet nodes that announced the
+community version when the release was made, each with the stake to sign a round (the file says
+when and how they were chosen; one place in the repository, `packaging/mainnet/community_bootstrap.txt`).
+So, without any setting:
+
+- a new install from a community package or the image has the fallback **on**, with the release's
+  list and a wait of 10 minutes;
+- a folder upgraded in place keeps its `config.ini`: without a `[community_bootstrap]` section, or
+  with one that sets neither `enabled=false` nor `confidants=`, it is on as soon as the folder holds
+  the package's `community_bootstrap.txt` (a package extracted over the folder, a new folder made
+  from the package as docs/quick-start.md says, or the file copied with the node; the Docker
+  entrypoint copies the image's list at every start). Each release brings its list: do not edit
+  the file, set `confidants=` for a list of your own;
+- a folder without the file, such as an official folder where only the node binary was replaced,
+  keeps the fallback **off**: the official `config.ini` behaves as before;
+- `enabled=false` turns it off, whatever the file. The guided set-up asks ("Arm the community
+  bootstrap fallback?") and writes `enabled`; in Docker, `CREDITS_COMMUNITY_BOOTSTRAP=off` (or `on`)
+  sets it at every start.
+
+At its start the node logs one line: `COMMUNITY BOOTSTRAP: fallback armed, <n> keys from <file or
+config.ini>, wait <m> min ...`, or `COMMUNITY BOOTSTRAP: fallback off (<why>)`.
+
+Until the community packages ship the file (release 4.2.532-community.20 and before), the option
+was off unless `confidants` listed keys, and `stall_minutes` defaulted to 30: a `config.ini` that
+set `confidants=` without `stall_minutes` now waits 10 minutes.
 
 With the list set, and only after `stall_minutes` in which the node saw no new block, no round
 package whose signatures it checked and accepted, and no regular bootstrap table, and while no
@@ -224,12 +259,13 @@ community table (it holds a key that is not an initial confidant and is not sign
 project); they then take the blocks written meanwhile through ordinary sync once they are back,
 as the `official-stop-*` scenarios of the robustness workflow check.
 
-**An expert option, not in the set-up.** Every node that should take part needs the same list: it
-only helps when more than half of the listed nodes are running, and mismatched lists weaken that
-majority rule. So `setup.sh`, `setup.ps1` and the Docker environment do not offer it until the
-option has been reviewed and a coordinated list exists (possibly shipped like `known_hosts.txt`);
-edit `config.ini` by hand (in Docker, `~/.credits/config.ini`, which the entrypoint writes only
-when it is missing).
+**One list for every node.** Every node that should take part needs the same list: it only helps
+when more than half of the listed nodes are running, and mismatched lists weaken that majority
+rule. Nodes of different releases may hold different lists while a new list spreads; a node takes a
+community table only if it holds more than half of its own list. The list names nodes, not
+operators: one operator running more than half of the listed nodes could restart the network alone
+after a stall, and listed nodes that are often down make the fallback unusable (a restart needs
+more than half of the list, and at least 4 keys, holding the last block).
 
 The risk it brings is a partition. If a network partition cuts more than half of the listed nodes
 off from the official nodes for longer than `stall_minutes`, while the official nodes keep
@@ -649,7 +685,7 @@ consensus rules.
   replaced (for example, it missed a bootstrap round): when the network's next block is not
   confirmed by the confidants of that block, the node waits for the operator instead of unwinding
   it. This is the deliberate choice of this change; `--resolve-fork` is the remedy. After a
-  partition with the opt-in community bootstrap fallback, the community side holds the fork in the
+  partition with the community bootstrap fallback, the community side holds the fork in the
   same way and its operator decides (see "Community bootstrap fallback").
 
 - **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it

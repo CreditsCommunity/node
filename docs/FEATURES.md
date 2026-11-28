@@ -166,10 +166,14 @@ Everything listed here is in release 4.2.532-community.20.1 or earlier.
   prefers the chosen branch once. See "If your node reports FORK HELD" in
   [quick-start.md](quick-start.md).
   [#189](https://github.com/CreditsCommunity/node/pull/189), [#192](https://github.com/CreditsCommunity/node/pull/192), [#193](https://github.com/CreditsCommunity/node/pull/193)
-- **Community bootstrap fallback (expert).** Off by default (`[community_bootstrap] confidants=`,
-  `stall_minutes=`): after a long stall, nodes with the list may restart the network with a signed
-  table of initial and listed keys; official nodes then sync the blocks. Not for normal operation.
-  [#188](https://github.com/CreditsCommunity/node/pull/188)
+- **Community bootstrap fallback.** If every official node stops, after 10 minutes without a block
+  more than half of the community nodes listed in `community_bootstrap.txt` may restart the network
+  with a table of initial and listed keys signed by its starter; official nodes then sync the
+  blocks. On in the community packages and the Docker image (the start-up log says `COMMUNITY
+  BOOTSTRAP: fallback armed`); a folder without the list file, such as an official one, keeps it off.
+  The set-up asks, `[community_bootstrap] enabled=false` or `CREDITS_COMMUNITY_BOOTSTRAP=off` turns
+  it off. Nothing changes while blocks come.
+  [#188](https://github.com/CreditsCommunity/node/pull/188), [#205](https://github.com/CreditsCommunity/node/pull/205)
 
 - **Nodes behind a NAT recover after an outage.** The p2p layer records the port a peer announces,
   not the ephemeral port of its outgoing connection, and a closing connection no longer drops healthy

@@ -321,6 +321,9 @@ Docker: `docker compose pull && docker compose up -d`. Native:
 2. **Extract** the new package into a **new** folder.
 3. **Copy** from the old `csnode` folder into the new one: `db/`, `caches/`, `qs/`,
    `NodePrivate.txt`, `NodePublic.txt`, `config.ini` (and `known_hosts.txt` if you edited it).
+   Keep the new folder's `community_bootstrap.txt`: each release brings its list of community nodes
+   for the community bootstrap fallback, on unless `config.ini` says `enabled=false` in its
+   `[community_bootstrap]` section (see docs/differences.md).
 4. **Run the set-up** in the new folder and give the **same storage answers** as before: pruned or
    full, and the same database. The node must open the database with the backend that wrote it.
 5. **Start the node.** The log shows the new version, then `checkpoint loaded` and

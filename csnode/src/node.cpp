@@ -817,6 +817,7 @@ bool Node::initRunning() {
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
     // full digest once here, before taking part in the network; incremental from now on
     logStateDigest(blockChain_.getLastSeq());
+    logCommunityBootstrapSettings();
 
 #ifdef NODE_API
     api_->run();
@@ -1543,6 +1544,21 @@ cs::BootstrapWeight Node::calculateBootStrapWeight(const cs::PublicKeys& confida
     return cs::bootstrapWeight(initialConfidants_, confidants);
 }
 
+
+// one line at the start: is the community bootstrap fallback armed, with how many keys and which wait
+void Node::logCommunityBootstrapSettings() const {
+    const auto& settings = cs::ConfigHolder::instance().config()->getCommunityBootstrapSettings();
+    if (settings.confidants.empty()) {
+        cslog() << "COMMUNITY BOOTSTRAP: fallback off (" << (settings.source.empty() ? std::string("no keys") : settings.source) << ")";
+        return;
+    }
+    const auto& keys = settings.confidants;
+    const bool listed = std::find(keys.begin(), keys.end(), solver_->getPublicKey()) != keys.end();
+    cslog() << "COMMUNITY BOOTSTRAP: fallback armed, " << keys.size() << " keys from " << settings.source
+            << (listed ? " (this node is listed)" : "") << ", wait " << settings.stallMinutes
+            << " min: after that long without a block, a round or a regular bootstrap, and with no neighbour ahead, "
+            << keys.size() / 2 + 1 << " or more of the listed nodes may restart the network; [community_bootstrap] enabled=false turns it off";
+}
 
 std::set<cs::PublicKey> Node::communityConfidants() const {
     const auto& keys = cs::ConfigHolder::instance().config()->getCommunityBootstrapSettings().confidants;

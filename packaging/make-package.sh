@@ -54,6 +54,9 @@ printf '%s\n' "$version" > "$dir/VERSION"
 install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 # the serving nodes the weekly survey found (ci/known-hosts/snapshot_sources.py), when it has found any
 [ ! -f "$here/mainnet/snapshot_sources.txt" ] || install -m 644 "$here/mainnet/snapshot_sources.txt" "$dir/snapshot_sources.txt"
+# the community bootstrap fallback's list: the node arms the fallback with it unless config.ini says
+# otherwise ([community_bootstrap] enabled=false or confidants=); a folder without it keeps it off
+install -m 644 "$here/mainnet/community_bootstrap.txt" "$dir/community_bootstrap.txt"
 
 # the guided set-up (setup.sh, or setup.bat with setup.ps1 on Windows): writes [snapshot] and [storage]
 if [ "$os" = windows ]; then
@@ -111,7 +114,12 @@ Differences from the official package:
 - The executor listens on 127.0.0.1 only (contract.executor.host in settings.properties
   changes it). Keep port 9080 closed to other hosts anyway.
 - The node itself: same protocol and database format by default, new opt-in storage options,
-  fixes and a state digest in the log. What changes from the official node:
+  fixes and a state digest in the log.
+- community_bootstrap.txt: the keys of the mainnet nodes that run the community node. With it the
+  node arms the community bootstrap fallback: if every official node stops and no block comes for
+  10 minutes, more than half of these nodes may restart the network (the log says "COMMUNITY
+  BOOTSTRAP: fallback armed" at the start). The set-up asks; [community_bootstrap] enabled=false
+  in config.ini turns it off. A folder without the file (an official one) keeps it off. What changes from the official node:
   https://github.com/CreditsCommunity/node/blob/master/docs/differences.md
 
 Changing the block database (db_backend)
@@ -143,8 +151,8 @@ Wallet: $wexe, the terminal wallet of https://github.com/CreditsCommunity/wallet
   closed to other hosts.
 
 Upgrading an existing folder (an official one too): stop the node, copy $exe, contract-executor.jar,
-  sc-api-support.jar, $setup_files, $wexe and the wallet guides from this package into it, then run
-  $setup there. Copying only
+  sc-api-support.jar, community_bootstrap.txt, $setup_files, $wexe and the wallet guides from this
+  package into it, then run $setup there. Copying only
   $exe keeps the old executor. The node starts an executor only if its build is within
   executor_commit_min..executor_commit_max of config.ini: with the official config.ini (1518..1518)
   it stops the community executor (build $commits) and runs no smart contract. The set-up shows the

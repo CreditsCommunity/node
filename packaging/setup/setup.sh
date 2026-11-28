@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Guided set-up of the node in this folder: storage (pruned or full), database, how the first start
 # gets the chain, whether a full node fetches the older blocks in the background (backfill), whether
-# to share snapshots, which contract executor to run, a wallet account, the token cache. Writes the
-# [snapshot] and [storage] sections of config.ini, the executor builds it accepts and tokens_cache
+# to share snapshots, the community bootstrap fallback, which contract executor to run, a wallet
+# account, the token cache. Writes the [snapshot], [community_bootstrap] and [storage] sections of
+# config.ini, the executor builds it accepts and tokens_cache
 # (the previous file is kept as config.ini.bak-<date>), can replace the executor jars, writes
 # wallet.toml (the wallet profile of this node, whose account is the node's own key), can make the
 # node's key from a 24-word phrase or create or import a wallet account with credits-wallet, and
@@ -205,6 +206,7 @@ cur_backend=$(current storage db_backend)
 [ -n "$cur_backend" ] || cur_backend=$(current storage block_db)
 cur_prune=$(current storage prune_keep_blocks)
 cur_serve=$(current snapshot serve)
+cur_cb=$(current community_bootstrap enabled | tr '[:upper:]' '[:lower:]')
 
 # 1. pruned or full
 storage_default=pruned
@@ -322,6 +324,28 @@ echo "   The node can share snapshots of the chain with new nodes, so that they 
 echo "   It uses at most 2 MB/s of upload, only while the node is synced, and about 200 MB of disk."
 ask "   Share snapshots with other nodes? (yes/no)" "$serve_default" yes no
 serve=$answer
+echo
+
+# the community bootstrap fallback: on unless config.ini says enabled=false; its keys come from
+# community_bootstrap.txt (shipped with the package) unless config.ini lists its own (confidants=)
+cb_default=yes
+case "$cur_cb" in false|off|no|0) cb_default=no ;; esac
+cb_keys=0
+[ ! -f community_bootstrap.txt ] || cb_keys=$(sed 's/#.*//' community_bootstrap.txt | tr ', \t\r' '\n\n\n\n' | grep -c . || true)
+echo "   If every official node stops at once, the network stalls until they are back. With the"
+echo "   community bootstrap fallback, after 10 minutes without a block (and no node ahead), more than"
+echo "   half of the community nodes listed in community_bootstrap.txt may restart it; the official"
+echo "   nodes take those blocks when they return. Nothing changes while blocks come."
+if awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[community_bootstrap\]/) } s' "$config" | grep -q '^[[:space:]]*confidants[[:space:]]*='; then
+    echo "   config.ini sets its own list ([community_bootstrap] confidants=, an empty one: off): it is kept."
+elif [ "$cb_keys" -gt 0 ]; then
+    echo "   community_bootstrap.txt lists $cb_keys keys."
+else
+    echo "   There is no community_bootstrap.txt in this folder (copy it from the package): without it"
+    echo "   the fallback stays off whatever the answer."
+fi
+ask "   Arm the community bootstrap fallback? (yes/no)" "$cb_default" yes no
+cb=$answer
 echo
 
 # 5. the contract executor (when config.ini runs one)
@@ -520,6 +544,7 @@ case "$first" in
 esac
 [ -z "$backfill" ] || echo "  backfill:     $backfill"
 echo "  share:        $serve"
+echo "  community bootstrap fallback: $cb"
 case "$executor_choice/$executor_action" in
     none/*)            ;;
     */keep)            echo "  executor:     $executor_choice, the jars in this folder are kept" ;;
@@ -547,10 +572,13 @@ cp -p "$config" "$backup"
 case "$first" in network) fetch=auto ;; *) fetch=off ;; esac
 [ "$serve" = yes ] && serve_value=on || serve_value=off
 
-# config.ini without its [snapshot] and [storage] sections, then the new ones ([snapshot] first)
+[ "$cb" = yes ] && cb_value=true || cb_value=false
+
+# config.ini without its [snapshot], [community_bootstrap] and [storage] sections, then the new ones
+# ([snapshot] first, [storage] last)
 tmp="$config.tmp.$$"
 awk '
-    /^[[:space:]]*\[/ { skip = ($0 ~ /^[[:space:]]*\[(snapshot|storage)\]/) }
+    /^[[:space:]]*\[/ { skip = ($0 ~ /^[[:space:]]*\[(snapshot|community_bootstrap|storage)\]/) }
     !skip && !/^; written by setup\.(sh|bat) on / { print }
 ' "$backup" | tr -d '\r' | awk 'NF { blank = 0; print; next } !blank++ { print }' > "$tmp"
 {
@@ -559,6 +587,12 @@ awk '
     echo "[snapshot]"
     echo "serve=$serve_value"
     echo "fetch=$fetch"
+    echo
+    echo "[community_bootstrap]"
+    echo "enabled=$cb_value"
+    # its other keys set by hand (confidants, confidants_file, stall_minutes...) are kept
+    awk '/^[[:space:]]*\[/ { in_s = ($0 ~ /^[[:space:]]*\[community_bootstrap\]/); next }
+         in_s && /^[[:space:]]*[a-z_]+[[:space:]]*=/ && !/^[[:space:]]*enabled[[:space:]]*=/ { sub(/^[[:space:]]+/, ""); print }' "$backup" | tr -d '\r'
     echo
     echo "[storage]"
     echo "db_backend=$backend"

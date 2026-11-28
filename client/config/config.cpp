@@ -1092,7 +1092,9 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.snapshotData_ = parseSnapshotData(config);
-        result.communityBootstrapData_ = parseCommunityBootstrapData(config);
+        // the list file next to config.ini (absolute: the working directory plays no part)
+        const auto configPath = boost::filesystem::absolute(boost::filesystem::path(fileName));
+        result.communityBootstrapData_ = parseCommunityBootstrapData(config, configPath.parent_path().string());
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -1369,35 +1371,40 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
     return result;
 }
 
-CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property_tree::ptree& config) {
-    CommunityBootstrapData result;
-    if (!config.count(BLOCK_NAME_COMMUNITY_BOOTSTRAP)) {
-        return result;
+const char* const kCommunityBootstrapFile = "community_bootstrap.txt";
+
+namespace {
+// adds the base58 node keys of text (comma, space or tab separated) to keys, once each
+void addCommunityKeys(const std::string& text, const std::string& where, std::vector<cs::PublicKey>& keys) {
+    std::vector<std::string> words;
+    boost::split(words, text, boost::is_any_of(", \t\r"), boost::token_compress_on);
+    for (const auto& word : words) {
+        if (word.empty()) {
+            continue;
+        }
+        std::vector<uint8_t> bytes;
+        if (!DecodeBase58(word, bytes) || bytes.size() != cscrypto::kPublicKeySize) {
+            cswarning() << "config: [community_bootstrap] " << where << ": " << word << " is not a node key, ignored";
+            continue;
+        }
+        cs::PublicKey publicKey;
+        std::copy(bytes.begin(), bytes.end(), publicKey.begin());
+        if (std::find(keys.begin(), keys.end(), publicKey) == keys.end()) {
+            keys.push_back(publicKey);
+        }
     }
-    const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_COMMUNITY_BOOTSTRAP);
-    static const std::set<std::string> known = {"confidants", "stall_minutes"};
+}
+}  // namespace
+
+CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property_tree::ptree& config, const std::string& configDir) {
+    CommunityBootstrapData result;
+    static const boost::property_tree::ptree kEmpty;
+    const bool hasSection = config.count(BLOCK_NAME_COMMUNITY_BOOTSTRAP) > 0;
+    const boost::property_tree::ptree& data = hasSection ? config.get_child(BLOCK_NAME_COMMUNITY_BOOTSTRAP) : kEmpty;
+    static const std::set<std::string> known = {"enabled", "confidants", "confidants_file", "stall_minutes"};
     for (const auto& [key, value] : data) {
         if (!known.count(key)) {
             cswarning() << "config: [community_bootstrap] " << key << " is not a setting of this version, ignored";
-        }
-    }
-    if (data.count("confidants")) {
-        std::vector<std::string> keys;
-        boost::split(keys, data.get<std::string>("confidants"), boost::is_any_of(", \t"), boost::token_compress_on);
-        for (const auto& key : keys) {
-            if (key.empty()) {
-                continue;
-            }
-            std::vector<uint8_t> bytes;
-            if (!DecodeBase58(key, bytes) || bytes.size() != cscrypto::kPublicKeySize) {
-                cswarning() << "config: [community_bootstrap] confidants: " << key << " is not a node key, ignored";
-                continue;
-            }
-            cs::PublicKey publicKey;
-            std::copy(bytes.begin(), bytes.end(), publicKey.begin());
-            if (std::find(result.confidants.begin(), result.confidants.end(), publicKey) == result.confidants.end()) {
-                result.confidants.push_back(publicKey);
-            }
         }
     }
     if (data.count("stall_minutes")) {
@@ -1414,6 +1421,57 @@ CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property
             cswarning() << "config: [community_bootstrap] stall_minutes=" << text << " is not 1..10080, using " << result.stallMinutes;
         }
     }
+    if (data.count("enabled")) {
+        std::string text = data.get<std::string>("enabled");
+        boost::algorithm::to_lower(text);
+        boost::algorithm::trim(text);
+        if (text == "false" || text == "off" || text == "no" || text == "0") {
+            result.enabled = false;
+        }
+        else if (!(text == "true" || text == "on" || text == "yes" || text == "1")) {
+            cswarning() << "config: [community_bootstrap] enabled=" << text << " is not true or false, taken as true";
+        }
+    }
+    if (!result.enabled) {
+        result.source = "[community_bootstrap] enabled=false";
+        return result;
+    }
+    // the list of config.ini wins; an empty one turns the fallback off
+    if (data.count("confidants")) {
+        addCommunityKeys(data.get<std::string>("confidants"), "confidants", result.confidants);
+        result.source = "[community_bootstrap] confidants= of config.ini";
+        return result;
+    }
+    const std::string name = data.count("confidants_file") ? data.get<std::string>("confidants_file") : std::string(kCommunityBootstrapFile);
+    if (name.empty()) {
+        result.source = "[community_bootstrap] confidants_file= names no file";
+        return result;
+    }
+    if (configDir.empty()) {
+        result.source = "the folder of config.ini is not known";
+        return result;
+    }
+    // a relative name is in the folder of config.ini, not in the working directory
+    boost::filesystem::path path(name);
+    if (path.is_relative()) {
+        path = boost::filesystem::path(configDir) / path;
+    }
+    const std::string file = path.string();
+    std::ifstream in(file);
+    if (!in) {
+        result.source = "no " + file;
+        return result;
+    }
+    // one or more keys per line; # starts a comment
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) {
+            line.erase(hash);
+        }
+        addCommunityKeys(line, file, result.confidants);
+    }
+    result.source = file;
     return result;
 }
 
@@ -1597,7 +1655,8 @@ bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs) {
 }
 
 bool operator==(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs) {
-    return lhs.confidants == rhs.confidants && lhs.stallMinutes == rhs.stallMinutes;
+    return lhs.confidants == rhs.confidants && lhs.stallMinutes == rhs.stallMinutes && lhs.enabled == rhs.enabled &&
+           lhs.source == rhs.source;
 }
 
 bool operator!=(const CommunityBootstrapData& lhs, const CommunityBootstrapData& rhs) {
