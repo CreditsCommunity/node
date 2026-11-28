@@ -104,8 +104,8 @@ struct SnapshotData {
 // stall_minutes without a block, a round or a regular bootstrap, the node may start and take a
 // bootstrap table of initial confidants and these keys, signed by its starter instead of the project.
 // The keys: confidants= when config.ini sets it (an empty value turns the fallback off), otherwise the
-// file confidants_file (default community_bootstrap.txt, shipped with the community packages); no
-// file: off, as with the official configuration. enabled=false turns it off whatever the list.
+// file confidants_file (default community_bootstrap.txt, shipped with the community packages) in the
+// folder of config.ini; no file: off, as with the official configuration. enabled=false turns it off whatever the list.
 // Read again by the config observer.
 constexpr size_t kCommunityStallMinutesDefault = 10;
 extern const char* const kCommunityBootstrapFile;  // "community_bootstrap.txt"
@@ -438,9 +438,11 @@ public:
     // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
     // the [community_bootstrap] section, off when it is missing or lists no valid key
-    // defaultFile: the list read when config.ini names none (relative to the working directory)
+    // configDir: the folder of the config.ini read. The list file (confidants_file, default
+    // community_bootstrap.txt) is read from there when its name is relative, never from the working
+    // directory: a file elsewhere cannot arm the fallback. Empty: no list file is read
     static CommunityBootstrapData parseCommunityBootstrapData(const boost::property_tree::ptree& config,
-                                                              const std::string& defaultFile = kCommunityBootstrapFile);
+                                                              const std::string& configDir);
     // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
     static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
     // the [params] keys of the bound on automatic chain reorganisations: max_auto_rollback (default

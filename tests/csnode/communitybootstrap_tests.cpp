@@ -409,26 +409,35 @@ TEST(CommunityBootstrap, ATableReplayedFromAnotherRoundDoesNotVerify) {
 }
 
 namespace {
-// a default list file that does not exist unless a test writes it
-const std::string kNoFile = "no-such-dir-for-tests/community_bootstrap.txt";
+// the folder of config.ini in a test: none unless a test makes one
+const std::string kNoDir = "no-such-dir-for-tests";
 
-CommunityBootstrapData parse(const std::string& ini, const std::string& defaultFile = kNoFile) {
+CommunityBootstrapData parse(const std::string& ini, const std::string& configDir = kNoDir) {
     std::istringstream in(ini);
     boost::property_tree::ptree tree;
     boost::property_tree::read_ini(in, tree);
-    return Config::parseCommunityBootstrapData(tree, defaultFile);
+    return Config::parseCommunityBootstrapData(tree, configDir);
 }
 
-// a list file in the temporary directory, removed with the object
-struct ListFile {
-    std::string path;
-    explicit ListFile(const std::string& text, const char* name = "community_bootstrap_test.txt")
-    : path((std::filesystem::temp_directory_path() / name).string()) {
-        std::ofstream(path) << text;
-    }
-    ~ListFile() {
+// a folder standing for the one of config.ini, with list files in it, removed with the object
+struct ConfigDir {
+    std::filesystem::path dir;
+    explicit ConfigDir(const char* name = "community_bootstrap_test")
+    : dir(std::filesystem::temp_directory_path() / name) {
         std::error_code ec;
-        std::filesystem::remove(path, ec);
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir);
+    }
+    ~ConfigDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+    std::string path() const {
+        return dir.string();
+    }
+    std::string write(const std::string& text, const char* name = "community_bootstrap.txt") const {
+        std::ofstream(dir / name) << text;
+        return (dir / name).string();
     }
 };
 
@@ -446,62 +455,86 @@ cs::PublicKey decoded(const char* text) {
 
 // an official-style folder: no section and no list file, the fallback stays off
 TEST(CommunityBootstrapConfig, OffWithoutTheSectionAndTheFile) {
-    const auto c = parse("[params]\nipv6=false\n");
+    const ConfigDir dir;
+    const auto c = parse("[params]\nipv6=false\n", dir.path());
     EXPECT_TRUE(c.confidants.empty());
     EXPECT_TRUE(c.enabled);
     EXPECT_EQ(c.stallMinutes, 10u);
-    EXPECT_EQ(c.source, "no " + kNoFile);
+    EXPECT_EQ(c.source, "no " + (dir.dir / "community_bootstrap.txt").string());
 }
 
-// a community package: no section, the shipped list file arms it with a 10 minute wait
+// a community package: no section, the shipped list file next to config.ini arms it with a 10 minute wait
 TEST(CommunityBootstrapConfig, OnFromTheListFileWithoutTheSection) {
-    const ListFile file(std::string("# community nodes\n") + kKeyA + "  # one\n\n" + kKeyB + "\r\n" + kKeyA + "\nnotakey\n");
-    const auto c = parse("[params]\nipv6=false\n", file.path);
+    const ConfigDir dir;
+    const auto file = dir.write(std::string("# community nodes\n") + kKeyA + "  # one\n\n" + kKeyB + "\r\n" + kKeyA + "\nnotakey\n");
+    const auto c = parse("[params]\nipv6=false\n", dir.path());
     ASSERT_EQ(c.confidants.size(), 2u);
     EXPECT_EQ(c.confidants[0], decoded(kKeyA));
     EXPECT_EQ(c.confidants[1], decoded(kKeyB));
     EXPECT_EQ(c.stallMinutes, 10u);
-    EXPECT_EQ(c.source, file.path);
+    EXPECT_EQ(c.source, file);
     // a section with only stall_minutes still takes the file
-    const auto d = parse("[community_bootstrap]\nstall_minutes=20\n", file.path);
+    const auto d = parse("[community_bootstrap]\nstall_minutes=20\n", dir.path());
     EXPECT_EQ(d.confidants.size(), 2u);
     EXPECT_EQ(d.stallMinutes, 20u);
 }
 
+// the list is read from the folder of config.ini only: a file in the working directory, or no known
+// folder, arms nothing
+TEST(CommunityBootstrapConfig, TheListIsNeverReadFromTheWorkingDirectory) {
+    const ConfigDir cwd("community_bootstrap_test_cwd");
+    cwd.write(kKeyA);
+    const ConfigDir dir;
+    const auto before = std::filesystem::current_path();
+    std::filesystem::current_path(cwd.dir);
+    const auto c = parse("[params]\nipv6=false\n", dir.path());
+    const auto d = parse("[params]\nipv6=false\n", "");
+    const auto e = parse("[community_bootstrap]\nconfidants_file=community_bootstrap.txt\n", dir.path());
+    std::filesystem::current_path(before);
+    EXPECT_TRUE(c.confidants.empty());
+    EXPECT_TRUE(d.confidants.empty());
+    EXPECT_TRUE(e.confidants.empty());
+}
+
 TEST(CommunityBootstrapConfig, EnabledFalseTurnsItOff) {
-    const ListFile file(kKeyA);
+    const ConfigDir dir;
+    dir.write(kKeyA);
     for (const char* off : {"false", "off", "no", "0", "False"}) {
-        const auto c = parse(std::string("[community_bootstrap]\nenabled=") + off + "\n", file.path);
+        const auto c = parse(std::string("[community_bootstrap]\nenabled=") + off + "\n", dir.path());
         EXPECT_TRUE(c.confidants.empty()) << off;
         EXPECT_FALSE(c.enabled) << off;
     }
     EXPECT_TRUE(parse(std::string("[community_bootstrap]\nenabled=false\nconfidants=") + kKeyA + "\n").confidants.empty());
-    EXPECT_EQ(parse("[community_bootstrap]\nenabled=true\n", file.path).confidants.size(), 1u);
+    EXPECT_EQ(parse("[community_bootstrap]\nenabled=true\n", dir.path()).confidants.size(), 1u);
     // anything else is taken as true
-    EXPECT_EQ(parse("[community_bootstrap]\nenabled=maybe\n", file.path).confidants.size(), 1u);
+    EXPECT_EQ(parse("[community_bootstrap]\nenabled=maybe\n", dir.path()).confidants.size(), 1u);
 }
 
 TEST(CommunityBootstrapConfig, TheListOfConfigIniWinsOverTheFile) {
-    const ListFile file(kKeyA);
-    const auto c = parse(std::string("[community_bootstrap]\nconfidants=") + kKeyB + "\n", file.path);
+    const ConfigDir dir;
+    dir.write(kKeyA);
+    const auto c = parse(std::string("[community_bootstrap]\nconfidants=") + kKeyB + "\n", dir.path());
     ASSERT_EQ(c.confidants.size(), 1u);
     EXPECT_EQ(c.confidants[0], decoded(kKeyB));
     // an empty confidants= turns it off, as before
-    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants=\n", file.path).confidants.empty());
-    // confidants_file names another file, or none
-    const ListFile other(kKeyB, "community_bootstrap_other.txt");
-    const auto d = parse("[community_bootstrap]\nconfidants_file=" + other.path + "\n", file.path);
-    ASSERT_EQ(d.confidants.size(), 1u);
-    EXPECT_EQ(d.confidants[0], decoded(kKeyB));
-    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants_file=\n", file.path).confidants.empty());
+    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants=\n", dir.path()).confidants.empty());
+    // confidants_file names another file (relative: in the folder of config.ini; or absolute), or none
+    const auto other = dir.write(kKeyB, "other.txt");
+    for (const std::string& name : {std::string("other.txt"), other}) {
+        const auto d = parse("[community_bootstrap]\nconfidants_file=" + name + "\n", dir.path());
+        ASSERT_EQ(d.confidants.size(), 1u) << name;
+        EXPECT_EQ(d.confidants[0], decoded(kKeyB)) << name;
+    }
+    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants_file=\n", dir.path()).confidants.empty());
 }
 
 // the config observer compares the settings: turning it off is a change
 TEST(CommunityBootstrapConfig, EqualityFollowsEverySetting) {
-    const ListFile file(kKeyA);
-    EXPECT_EQ(parse("", file.path), parse("", file.path));
-    EXPECT_NE(parse("", file.path), parse("[community_bootstrap]\nenabled=false\n", file.path));
-    EXPECT_NE(parse("", file.path), parse("[community_bootstrap]\nstall_minutes=11\n", file.path));
+    const ConfigDir dir;
+    dir.write(kKeyA);
+    EXPECT_EQ(parse("", dir.path()), parse("", dir.path()));
+    EXPECT_NE(parse("", dir.path()), parse("[community_bootstrap]\nenabled=false\n", dir.path()));
+    EXPECT_NE(parse("", dir.path()), parse("[community_bootstrap]\nstall_minutes=11\n", dir.path()));
 }
 
 TEST(CommunityBootstrapConfig, KeysAndStallMinutes) {

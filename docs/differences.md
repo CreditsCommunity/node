@@ -200,7 +200,10 @@ stall_minutes=10
 ```
 
 **Where the list comes from, and who has it on.** The community packages and the Docker image ship
-`community_bootstrap.txt` next to `config.ini`: the keys of the mainnet nodes that announced the
+`community_bootstrap.txt` next to `config.ini`. The node reads it (or the file `confidants_file`
+names, when relative) only from the folder of the `config.ini` it was started with
+(`--config-file`), never from the working directory, so a file left in some other folder cannot
+arm the fallback; anyone who can write to that folder can change `config.ini` itself. The file holds the keys of the mainnet nodes that announced the
 community version when the release was made, each with the stake to sign a round (the file says
 when and how they were chosen; one place in the repository, `packaging/mainnet/community_bootstrap.txt`).
 So, without any setting:

@@ -3397,7 +3397,7 @@ fi
 if [ "$COMMUNITY_BOOTSTRAP" = default ]; then
     for i in $(seq 1 "$NODES"); do
         alt_node "$i" && continue
-        armed=$(grep -ac "COMMUNITY BOOTSTRAP: fallback armed, [0-9]* keys from community_bootstrap.txt.*, wait $COMMUNITY_STALL_DEFAULT min" "$WORK/n$i/node.log" || true)
+        armed=$(grep -ac "COMMUNITY BOOTSTRAP: fallback armed, [0-9]* keys from [^ ]*community_bootstrap.txt.*, wait $COMMUNITY_STALL_DEFAULT min" "$WORK/n$i/node.log" || true)
         [ "$armed" -gt 0 ] || { grep -a 'COMMUNITY BOOTSTRAP: fallback' "$WORK/n$i/node.log" | head -2; echo "FAIL: n$i did not log the fallback armed from community_bootstrap.txt"; exit 1; }
     done
     echo "community bootstrap: $(grep -a 'COMMUNITY BOOTSTRAP: fallback armed' "$WORK"/n*/node.log | head -1 | sed -E 's/.*(COMMUNITY BOOTSTRAP: fallback armed, [0-9]+ keys)[^,]*(, wait [0-9]+ min).*/\1\2/') on every node of this build"

@@ -1092,7 +1092,9 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.snapshotData_ = parseSnapshotData(config);
-        result.communityBootstrapData_ = parseCommunityBootstrapData(config);
+        // the list file next to config.ini (absolute: the working directory plays no part)
+        const auto configPath = boost::filesystem::absolute(boost::filesystem::path(fileName));
+        result.communityBootstrapData_ = parseCommunityBootstrapData(config, configPath.parent_path().string());
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -1394,7 +1396,7 @@ void addCommunityKeys(const std::string& text, const std::string& where, std::ve
 }
 }  // namespace
 
-CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property_tree::ptree& config, const std::string& defaultFile) {
+CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property_tree::ptree& config, const std::string& configDir) {
     CommunityBootstrapData result;
     static const boost::property_tree::ptree kEmpty;
     const bool hasSection = config.count(BLOCK_NAME_COMMUNITY_BOOTSTRAP) > 0;
@@ -1440,11 +1442,21 @@ CommunityBootstrapData Config::parseCommunityBootstrapData(const boost::property
         result.source = "[community_bootstrap] confidants= of config.ini";
         return result;
     }
-    const std::string file = data.count("confidants_file") ? data.get<std::string>("confidants_file") : defaultFile;
-    if (file.empty()) {
+    const std::string name = data.count("confidants_file") ? data.get<std::string>("confidants_file") : std::string(kCommunityBootstrapFile);
+    if (name.empty()) {
         result.source = "[community_bootstrap] confidants_file= names no file";
         return result;
     }
+    if (configDir.empty()) {
+        result.source = "the folder of config.ini is not known";
+        return result;
+    }
+    // a relative name is in the folder of config.ini, not in the working directory
+    boost::filesystem::path path(name);
+    if (path.is_relative()) {
+        path = boost::filesystem::path(configDir) / path;
+    }
+    const std::string file = path.string();
     std::ifstream in(file);
     if (!in) {
         result.source = "no " + file;

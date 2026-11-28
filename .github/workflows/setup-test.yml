@@ -174,7 +174,7 @@ jobs:
           # older than that start-up line (a $TAG before it) says nothing about it
           if grep -aq 'COMMUNITY BOOTSTRAP: fallback' csnode/log/log_*.txt; then
             grep -ah 'COMMUNITY BOOTSTRAP: fallback' csnode/log/log_*.txt | tail -1 | cut -c1-300
-            grep -aq 'COMMUNITY BOOTSTRAP: fallback armed, [0-9]* keys from community_bootstrap.txt.*, wait 10 min' csnode/log/log_*.txt
+            grep -aq 'COMMUNITY BOOTSTRAP: fallback armed, [0-9]* keys from [^ ]*community_bootstrap.txt.*, wait 10 min' csnode/log/log_*.txt
           else
             echo "the node of $TAG predates the community bootstrap start-up line"
           fi
