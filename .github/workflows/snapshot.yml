@@ -83,9 +83,9 @@ jobs:
           cd ..
           python3 ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min 90
 
-      # the monitor is a third party: when it does not answer (exit 3) the snapshot is published
-      # without this check, and the release notes say so; a mismatch fails. check_node.py names its
-      # client in the User-Agent: the monitor refuses urllib's default one
+      # the monitor is a third party: when it does not answer or refuses the runner (401, 403, 429:
+      # exit 3) the snapshot is published without this check, and the release notes say so; a
+      # mismatch fails. The comparison of every wallet with the official nodes below still runs
       - name: Check against the monitor
         id: monitor
         if: env.SKIP != '1'
@@ -93,7 +93,7 @@ jobs:
           status=0
           python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 50 || status=$?
           if [ "$status" -eq 3 ]; then
-            echo "::warning::the monitor cannot be reached: the balances were not compared with it"
+            echo "::warning::the monitor cannot be reached or refuses the runner: the balances were not compared with it"
             echo "monitor=skipped" >> "$GITHUB_OUTPUT"
           elif [ "$status" -ne 0 ]; then
             exit "$status"
@@ -266,7 +266,7 @@ jobs:
           fi
           if [ "$MONITOR" = skipped ]; then
             # one line per snapshot published without the monitor, the newest first, at most 10
-            line="- $(date -u +%F): block ${seq:-$(ls out/*.tar.zst | sed -nE 's/.*-([0-9]+)\.tar\.zst/\1/p')} published without the comparison of balances with the public monitor, which did not answer"
+            line="- $(date -u +%F): block ${seq:-$(ls out/*.tar.zst | sed -nE 's/.*-([0-9]+)\.tar\.zst/\1/p')} published without the comparison of balances with the public monitor, which did not answer or refused the runner"
             body=$(gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
             mark='published without the comparison'
             { grep -v "$mark" <<<"$body" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' || true
