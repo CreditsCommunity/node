@@ -15,7 +15,9 @@
       from the node (WalletsGet, at random); only those whose last transaction, per the monitor, is
       older than 24 hours and in a block the node has are compared, so both sides refer to the same
       state. Exit 1 on any mismatch or when fewer than N/2
-      wallets could be compared; exit 3 when the monitor cannot be reached before any mismatch. --self-test-mismatch alters one balance to prove a mismatch fails.
+      wallets could be compared; exit 3 when the monitor cannot be reached, or refuses this client
+      (HTTP 401, 403 or 429), before any mismatch. --self-test-mismatch alters one balance to prove a
+      mismatch fails.
 
 Monitor API (https://monitor.credits.com/CreditsNetwork/Api), plain GET:
   ExtendedBalance?id=<address>                  -> {"balance": "<decimal CS>", ...}
@@ -140,9 +142,11 @@ def balances(args):
                     continue  # recently active: the two sides may refer to different blocks
             theirs = Decimal(monitor(f"ExtendedBalance?id={address}")["balance"])
         except Exception as e:
-            # only a monitor that is down or unreachable is skipped: a 4xx or an answer that does not
-            # parse is a fault of this check, or a changed monitor, and fails
-            down = (isinstance(e, urllib.error.HTTPError) and e.code >= 500) or (
+            # only a monitor that is down, unreachable or refusing this client is skipped (it has
+            # answered 403 to the CI runners since 2026-11-27, whatever the User-Agent): another 4xx
+            # or an answer that does not parse is a fault of this check, or a changed monitor, and fails
+            refused = isinstance(e, urllib.error.HTTPError) and e.code in (401, 403, 429)
+            down = refused or (isinstance(e, urllib.error.HTTPError) and e.code >= 500) or (
                 not isinstance(e, urllib.error.HTTPError) and isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError)))
             if not down:
                 print(f"FAIL: unexpected answer from the monitor: {e!r}", flush=True)
@@ -152,7 +156,8 @@ def balances(args):
                 break
             # exit 3: the workflow publishes without this check and says so (the monitor is a third
             # party, down for days at times); a mismatch already found still fails
-            print(f"WARNING: the monitor cannot be reached, balances not compared ({compared} so far): {e}", flush=True)
+            why = "refuses this client" if refused else "cannot be reached"
+            print(f"WARNING: the monitor {why}, balances not compared ({compared} so far): {e}", flush=True)
             return 3
         ours = amount(w.balance)
         if args.self_test_mismatch and compared == 0:
