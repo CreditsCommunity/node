@@ -174,6 +174,7 @@ $curBackend = Current 'storage' 'db_backend'
 if (-not $curBackend) { $curBackend = Current 'storage' 'block_db' }
 $curPrune = Current 'storage' 'prune_keep_blocks'
 $curServe = Current 'snapshot' 'serve'
+$curCb = (Current 'community_bootstrap' 'enabled').ToLower()
 
 # 1. pruned or full
 $storageDefault = 'pruned'
@@ -274,6 +275,36 @@ Write-Host '4. Sharing'
 Write-Host '   The node can share snapshots of the chain with new nodes, so that they start in minutes.'
 Write-Host '   It uses at most 2 MB/s of upload, only while the node is synced, and about 200 MB of disk.'
 $serve = Ask '   Share snapshots with other nodes? (yes/no)' $serveDefault @('yes', 'no')
+Write-Host ''
+
+# the community bootstrap fallback: on unless config.ini says enabled=false; its keys come from
+# community_bootstrap.txt (shipped with the package) unless config.ini lists its own (confidants=)
+$cbDefault = if (@('false', 'off', 'no', '0') -contains $curCb) { 'no' } else { 'yes' }
+$cbKeys = 0
+if (Test-Path 'community_bootstrap.txt') {
+    foreach ($l in Get-Content -LiteralPath 'community_bootstrap.txt') {
+        $cbKeys += @(($l -replace '#.*', '') -split '[,\s]+' | Where-Object { $_ }).Count
+    }
+}
+$cbOwnList = $false
+$inCb = $false
+foreach ($l in $lines) {
+    if ($l -match '^\s*\[') { $inCb = ($l -match '^\s*\[community_bootstrap\]'); continue }
+    if ($inCb -and $l -match '^\s*confidants\s*=') { $cbOwnList = $true }
+}
+Write-Host '   If every official node stops at once, the network stalls until they are back. With the'
+Write-Host '   community bootstrap fallback, after 10 minutes without a block (and no node ahead), more than'
+Write-Host '   half of the community nodes listed in community_bootstrap.txt may restart it; the official'
+Write-Host '   nodes take those blocks when they return. Nothing changes while blocks come.'
+if ($cbOwnList) {
+    Write-Host '   config.ini sets its own list ([community_bootstrap] confidants=, an empty one: off): it is kept.'
+} elseif ($cbKeys -gt 0) {
+    Write-Host "   community_bootstrap.txt lists $cbKeys keys."
+} else {
+    Write-Host '   There is no community_bootstrap.txt in this folder (copy it from the package): without it'
+    Write-Host '   the fallback stays off whatever the answer.'
+}
+$cb = Ask '   Arm the community bootstrap fallback? (yes/no)' $cbDefault @('yes', 'no')
 Write-Host ''
 
 # 5. the contract executor (when config.ini runs one)
@@ -419,6 +450,7 @@ switch ($first) {
 }
 if ($backfill) { Write-Host "  backfill:     $backfill" }
 Write-Host "  share:        $serve"
+Write-Host "  community bootstrap fallback: $cb"
 if ($executorChoice -ne 'none') {
     switch ($executorAction) {
         'keep'     { Write-Host "  executor:     $executorChoice, the jars in this folder are kept" }
@@ -448,12 +480,14 @@ Copy-Item -LiteralPath $config -Destination $backup
 
 $fetch = if ($first -eq 'network') { 'auto' } else { 'off' }
 $serveValue = if ($serve -eq 'yes') { 'on' } else { 'off' }
+$cbValue = if ($cb -eq 'yes') { 'true' } else { 'false' }
 
-# config.ini without its [snapshot] and [storage] sections, then the new ones ([snapshot] first)
+# config.ini without its [snapshot], [community_bootstrap] and [storage] sections, then the new ones
+# ([snapshot] first, [storage] last)
 $out = New-Object System.Collections.Generic.List[string]
 $skip = $false; $blank = $false
 foreach ($l in $lines) {
-    if ($l -match '^\s*\[') { $skip = ($l -match '^\s*\[(snapshot|storage)\]') }
+    if ($l -match '^\s*\[') { $skip = ($l -match '^\s*\[(snapshot|community_bootstrap|storage)\]') }
     if ($skip -or $l -match '^; written by setup\.(sh|bat) on ') { continue }
     if ($l.Trim() -eq '') { if ($blank) { continue }; $blank = $true } else { $blank = $false }
     $out.Add($l)
@@ -463,6 +497,15 @@ $out.Add("; written by setup.bat on $(Get-Date -Format 'yyyy-MM-dd HH:mm'), the 
 $out.Add('[snapshot]')
 $out.Add("serve=$serveValue")
 $out.Add("fetch=$fetch")
+$out.Add('')
+$out.Add('[community_bootstrap]')
+$out.Add("enabled=$cbValue")
+# its other keys set by hand (confidants, confidants_file, stall_minutes...) are kept
+$inCb = $false
+foreach ($l in $lines) {
+    if ($l -match '^\s*\[') { $inCb = ($l -match '^\s*\[community_bootstrap\]'); continue }
+    if ($inCb -and $l -match '^\s*[a-z_]+\s*=' -and $l -notmatch '^\s*enabled\s*=') { $out.Add($l.Trim()) }
+}
 $out.Add('')
 $out.Add('[storage]')
 $out.Add("db_backend=$backend")

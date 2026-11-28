@@ -32,6 +32,9 @@ TOKENS_CACHE=${CREDITS_TOKENS_CACHE:-off}
 EXECUTOR=${CREDITS_EXECUTOR:-on}
 RESET=${CREDITS_RESET:-0}
 BACKFILL=${CREDITS_BACKFILL:-on}
+# the community bootstrap fallback: empty leaves config.ini as it is (on with the image's list unless
+# config.ini says otherwise); on or off sets [community_bootstrap] enabled at every start
+COMMUNITY_BOOTSTRAP=${CREDITS_COMMUNITY_BOOTSTRAP:-}
 CONVERT_ARGS=()
 
 log() { echo "[entrypoint] $*"; }
@@ -45,6 +48,7 @@ refuse() {
 case "$BACKEND" in berkeleydb|lmdb|rocksdb) ;; *) log "CREDITS_DB_BACKEND must be berkeleydb, lmdb or rocksdb"; exit 2 ;; esac
 case "$SNAPSHOT" in github|p2p|off) ;; *) log "CREDITS_SNAPSHOT must be github, p2p or off"; exit 2 ;; esac
 for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL" "$TOKENS_CACHE"; do case "$v" in on|off) ;; *) log "CREDITS_API, CREDITS_EXECUTOR, CREDITS_SERVE_SNAPSHOT, CREDITS_BACKFILL and CREDITS_TOKENS_CACHE must be on or off"; exit 2 ;; esac; done
+case "$COMMUNITY_BOOTSTRAP" in ""|on|off) ;; *) log "CREDITS_COMMUNITY_BOOTSTRAP must be on or off"; exit 2 ;; esac
 [ -z "$MIN_SOURCES" ] || [[ "$MIN_SOURCES" =~ ^[0-9]+$ ]] || { log "CREDITS_SNAPSHOT_MIN_SOURCES must be a number"; exit 2; }
 [[ "$P2P_PORT" =~ ^[0-9]+$ ]] || { log "CREDITS_P2P_PORT must be a number"; exit 2; }
 
@@ -152,6 +156,21 @@ write_config() {
     log "config.ini written: $STORAGE storage on $BACKEND, p2p port $P2P_PORT, API $API, executor $EXECUTOR, token cache $TOKENS_CACHE, snapshots: serve $SERVE, fetch $fetch"
 }
 
+# set_community_bootstrap <true|false>: enabled= in [community_bootstrap] of config.ini
+set_community_bootstrap() {
+    awk -v v="$1" '
+        function add() { print "[community_bootstrap]"; print "enabled=" v; print ""; done = 1 }
+        /^[[:space:]]*\[/ {
+            if (in_s && !done) { print "enabled=" v; done = 1 }
+            in_s = ($0 ~ /^[[:space:]]*\[community_bootstrap\]/)
+            if (!done && !has && $0 ~ /^[[:space:]]*\[storage\]/) add()
+        }
+        in_s && /^[[:space:]]*enabled[[:space:]]*=/ { if (!done) print "enabled=" v; done = 1; next }
+        { print }
+        END { if (!done) { if (!in_s) { print ""; print "[community_bootstrap]" } print "enabled=" v } }
+    ' has="$(grep -c '^[[:space:]]*\[community_bootstrap\]' config.ini || true)" config.ini > config.ini.new && mv config.ini.new config.ini
+}
+
 # what config.ini asks for: "<pruned|full> <backend>"
 config_storage() {
     awk -F= '
@@ -226,6 +245,17 @@ for f in settings.properties known_hosts.txt default_confidants.txt; do
 done
 # the image's version, on every start: the node puts it in the snapshots it builds
 [ ! -e "$OPT/VERSION" ] || cp -f "$OPT/VERSION" VERSION
+# the community bootstrap fallback's list, on every start: each image brings the list of its release
+# (an operator's own list goes in config.ini, [community_bootstrap] confidants=)
+[ ! -e "$OPT/community_bootstrap.txt" ] || cp -f "$OPT/community_bootstrap.txt" community_bootstrap.txt
+# CREDITS_COMMUNITY_BOOTSTRAP=on|off: [community_bootstrap] enabled in config.ini (the section goes
+# before [storage], which stays the last one, when missing); the other keys of the section are kept
+if [ -n "$COMMUNITY_BOOTSTRAP" ]; then
+    cb_value=true
+    [ "$COMMUNITY_BOOTSTRAP" = on ] || cb_value=false
+    set_community_bootstrap "$cb_value"
+    log "community bootstrap fallback: $COMMUNITY_BOOTSTRAP (CREDITS_COMMUNITY_BOOTSTRAP, [community_bootstrap] enabled=$cb_value)"
+fi
 # the serving nodes of the weekly survey, when the package has them
 [ ! -e "$OPT/snapshot_sources.txt" ] || [ -e snapshot_sources.txt ] || cp "$OPT/snapshot_sources.txt" snapshot_sources.txt
 if [ ! -f keys/NodePublic.txt ]; then

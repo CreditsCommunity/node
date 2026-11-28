@@ -21,7 +21,7 @@ pass() { echo "ok: $*"; }
 # a fake package: the real configuration, a stub node, no executor
 pkg="$work/package"
 mkdir -p "$pkg/ojdkbuild/java-11-openjdk-11.0.4/bin"
-cp "$repo"/packaging/mainnet/{settings.properties,known_hosts.txt,default_confidants.txt} "$pkg/"
+cp "$repo"/packaging/mainnet/{settings.properties,known_hosts.txt,default_confidants.txt,community_bootstrap.txt} "$pkg/"
 cp "$repo/packaging/mainnet/config.ini" "$pkg/config.ini"
 printf '\n[storage]\ncheckpoint_every=100000\nblock_db=lmdb\n' >> "$pkg/config.ini"
 touch "$pkg/contract-executor.jar" "$pkg/sc-api-support.jar"
@@ -72,7 +72,7 @@ newdata() { local d="$work/data-$1"; mkdir -p "$d"; echo "$d"; }
 # 1. first start
 d=$(newdata 1)
 out=$(run "$d" -e CREDITS_SNAPSHOT=off)
-for f in config.ini settings.properties known_hosts.txt default_confidants.txt keys/NodePublic.txt keys/NodePrivate.txt .storage; do
+for f in config.ini settings.properties known_hosts.txt default_confidants.txt community_bootstrap.txt keys/NodePublic.txt keys/NodePrivate.txt .storage; do
     [ -e "$d/$f" ] || fail "first start: $f missing"
 done
 [ "$(stat -c %a "$d/keys/NodePrivate.txt")" = 600 ] || fail "private key mode"
@@ -95,6 +95,31 @@ grep -q '^tokens_cache=true' "$d/config.ini" && grep -q '^port=9090' "$d/config.
 set +e; out=$(run "$(newdata 1c)" -e CREDITS_TOKENS_CACHE=maybe); rc=$?; set -e
 [ "$rc" = 2 ] || { echo "$out"; fail "CREDITS_TOKENS_CACHE=maybe accepted"; }
 pass "the wallet on the PATH, CREDITS_TOKENS_CACHE"
+
+# 1c. the community bootstrap fallback: on by the image's list without a variable (config.ini has no
+# active section); CREDITS_COMMUNITY_BOOTSTRAP=off/on sets enabled at every start, keeping the other
+# keys; the image's list replaces an older one at every start
+d=$(newdata 1cb)
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+grep -q '^\[community_bootstrap\]' "$d/config.ini" && fail "a [community_bootstrap] section written without CREDITS_COMMUNITY_BOOTSTRAP"
+cmp -s "$d/community_bootstrap.txt" "$repo/packaging/mainnet/community_bootstrap.txt" || fail "community_bootstrap.txt is not the image's"
+echo "# an older list" > "$d/community_bootstrap.txt"
+out=$(run "$d" -e CREDITS_SNAPSHOT=off -e CREDITS_COMMUNITY_BOOTSTRAP=off)
+cmp -s "$d/community_bootstrap.txt" "$repo/packaging/mainnet/community_bootstrap.txt" || fail "community_bootstrap.txt not replaced by the image's"
+grep -q 'community bootstrap fallback: off' <<<"$out" || { echo "$out"; fail "CREDITS_COMMUNITY_BOOTSTRAP=off not logged"; }
+[ "$(sed -n '/^\[community_bootstrap\]/,/^\[/p' "$d/config.ini" | grep -c '^enabled=false')" = 1 ] || { cat "$d/config.ini"; fail "enabled=false"; }
+# [storage] stays the last section
+[ "$(grep '^\[' "$d/config.ini" | tail -1)" = "[storage]" ] || fail "[storage] not the last section"
+sed -i '/^enabled=false/a stall_minutes=20' "$d/config.ini"
+run "$d" -e CREDITS_SNAPSHOT=off -e CREDITS_COMMUNITY_BOOTSTRAP=on >/dev/null
+[ "$(grep -c '^\[community_bootstrap\]' "$d/config.ini")" = 1 ] && grep -q '^enabled=true' "$d/config.ini" \
+    && ! grep -q '^enabled=false' "$d/config.ini" && grep -q '^stall_minutes=20' "$d/config.ini" || { cat "$d/config.ini"; fail "CREDITS_COMMUNITY_BOOTSTRAP=on"; }
+# without the variable, config.ini is left as it is
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+grep -q '^enabled=true' "$d/config.ini" || fail "enabled changed without CREDITS_COMMUNITY_BOOTSTRAP"
+set +e; out=$(run "$(newdata 1cb2)" -e CREDITS_COMMUNITY_BOOTSTRAP=maybe); rc=$?; set -e
+[ "$rc" = 2 ] || { echo "$out"; fail "CREDITS_COMMUNITY_BOOTSTRAP=maybe accepted"; }
+pass "community bootstrap list and CREDITS_COMMUNITY_BOOTSTRAP"
 
 # 2. second start keeps keys and a hand edit
 key=$(cat "$d/keys/NodePublic.txt")

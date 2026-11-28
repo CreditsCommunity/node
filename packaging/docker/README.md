@@ -13,6 +13,8 @@ A full node (`CREDITS_STORAGE=full`) on rocksdb, its default, or on lmdb (`CREDI
 
 The node also serves its own snapshots to its neighbours (`CREDITS_SERVE_SNAPSHOT=on`, the default; at most 2 MB/s, half while it is a confidant). See `docs/snapshots.md`.
 
+The community bootstrap fallback is on: if every official node stops at once, after 10 minutes without a block (and no neighbour ahead) more than half of the community nodes listed in the image's `community_bootstrap.txt` may restart the network, and the official nodes take those blocks when they return. The log says `COMMUNITY BOOTSTRAP: fallback armed` at the start. The container copies the image's list to `~/.credits/community_bootstrap.txt` at every start, so each release brings its own list. `CREDITS_COMMUNITY_BOOTSTRAP=off` turns it off (it sets `[community_bootstrap] enabled=false` in `config.ini` at every start, `on` sets `true`); unset, `config.ini` decides. Your own list goes in `config.ini` (`confidants=`). See "Community bootstrap fallback" in `docs/differences.md`.
+
 ## Data: `~/.credits`
 
 | Path | What |
@@ -25,6 +27,7 @@ The node also serves its own snapshots to its neighbours (`CREDITS_SERVE_SNAPSHO
 | `snapshot.json`, `snapshot.verified` | The snapshot this node started from, and its digest check at the first start. |
 | `snapshot.mismatch` | The restored state did not match the snapshot: the node does not start until it is removed (set `CREDITS_RESET=1` once to start over). |
 | `snapshot/` | The snapshots this node builds and serves to its neighbours. |
+| `community_bootstrap.txt` | The community bootstrap fallback's list, the image's (replaced at every start). |
 | `snapshot-download/` | A download in progress; the next first start resumes it. |
 
 The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid. Keep `user:` a non-root uid: the node, its keys and the wallet's key store must not run or be written as root.
