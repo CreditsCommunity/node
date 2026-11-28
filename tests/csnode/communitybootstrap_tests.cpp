@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -407,12 +409,28 @@ TEST(CommunityBootstrap, ATableReplayedFromAnotherRoundDoesNotVerify) {
 }
 
 namespace {
-CommunityBootstrapData parse(const std::string& ini) {
+// a default list file that does not exist unless a test writes it
+const std::string kNoFile = "no-such-dir-for-tests/community_bootstrap.txt";
+
+CommunityBootstrapData parse(const std::string& ini, const std::string& defaultFile = kNoFile) {
     std::istringstream in(ini);
     boost::property_tree::ptree tree;
     boost::property_tree::read_ini(in, tree);
-    return Config::parseCommunityBootstrapData(tree);
+    return Config::parseCommunityBootstrapData(tree, defaultFile);
 }
+
+// a list file in the temporary directory, removed with the object
+struct ListFile {
+    std::string path;
+    explicit ListFile(const std::string& text, const char* name = "community_bootstrap_test.txt")
+    : path((std::filesystem::temp_directory_path() / name).string()) {
+        std::ofstream(path) << text;
+    }
+    ~ListFile() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+};
 
 const char* const kKeyA = "3rUevsW5xfob6qDxWMDFwwTQCq39SYhzstuyfUGSDvF2";
 const char* const kKeyB = "ESWr7ZThCmP2DVNNgrcsCvZZ2rrhDnFRW8oUFEpKpgdD";
@@ -426,11 +444,64 @@ cs::PublicKey decoded(const char* text) {
 }
 }  // namespace
 
-TEST(CommunityBootstrapConfig, OffWithoutTheSection) {
+// an official-style folder: no section and no list file, the fallback stays off
+TEST(CommunityBootstrapConfig, OffWithoutTheSectionAndTheFile) {
     const auto c = parse("[params]\nipv6=false\n");
-    EXPECT_EQ(c, CommunityBootstrapData{});
     EXPECT_TRUE(c.confidants.empty());
-    EXPECT_EQ(c.stallMinutes, 30u);
+    EXPECT_TRUE(c.enabled);
+    EXPECT_EQ(c.stallMinutes, 10u);
+    EXPECT_EQ(c.source, "no " + kNoFile);
+}
+
+// a community package: no section, the shipped list file arms it with a 10 minute wait
+TEST(CommunityBootstrapConfig, OnFromTheListFileWithoutTheSection) {
+    const ListFile file(std::string("# community nodes\n") + kKeyA + "  # one\n\n" + kKeyB + "\r\n" + kKeyA + "\nnotakey\n");
+    const auto c = parse("[params]\nipv6=false\n", file.path);
+    ASSERT_EQ(c.confidants.size(), 2u);
+    EXPECT_EQ(c.confidants[0], decoded(kKeyA));
+    EXPECT_EQ(c.confidants[1], decoded(kKeyB));
+    EXPECT_EQ(c.stallMinutes, 10u);
+    EXPECT_EQ(c.source, file.path);
+    // a section with only stall_minutes still takes the file
+    const auto d = parse("[community_bootstrap]\nstall_minutes=20\n", file.path);
+    EXPECT_EQ(d.confidants.size(), 2u);
+    EXPECT_EQ(d.stallMinutes, 20u);
+}
+
+TEST(CommunityBootstrapConfig, EnabledFalseTurnsItOff) {
+    const ListFile file(kKeyA);
+    for (const char* off : {"false", "off", "no", "0", "False"}) {
+        const auto c = parse(std::string("[community_bootstrap]\nenabled=") + off + "\n", file.path);
+        EXPECT_TRUE(c.confidants.empty()) << off;
+        EXPECT_FALSE(c.enabled) << off;
+    }
+    EXPECT_TRUE(parse(std::string("[community_bootstrap]\nenabled=false\nconfidants=") + kKeyA + "\n").confidants.empty());
+    EXPECT_EQ(parse("[community_bootstrap]\nenabled=true\n", file.path).confidants.size(), 1u);
+    // anything else is taken as true
+    EXPECT_EQ(parse("[community_bootstrap]\nenabled=maybe\n", file.path).confidants.size(), 1u);
+}
+
+TEST(CommunityBootstrapConfig, TheListOfConfigIniWinsOverTheFile) {
+    const ListFile file(kKeyA);
+    const auto c = parse(std::string("[community_bootstrap]\nconfidants=") + kKeyB + "\n", file.path);
+    ASSERT_EQ(c.confidants.size(), 1u);
+    EXPECT_EQ(c.confidants[0], decoded(kKeyB));
+    // an empty confidants= turns it off, as before
+    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants=\n", file.path).confidants.empty());
+    // confidants_file names another file, or none
+    const ListFile other(kKeyB, "community_bootstrap_other.txt");
+    const auto d = parse("[community_bootstrap]\nconfidants_file=" + other.path + "\n", file.path);
+    ASSERT_EQ(d.confidants.size(), 1u);
+    EXPECT_EQ(d.confidants[0], decoded(kKeyB));
+    EXPECT_TRUE(parse("[community_bootstrap]\nconfidants_file=\n", file.path).confidants.empty());
+}
+
+// the config observer compares the settings: turning it off is a change
+TEST(CommunityBootstrapConfig, EqualityFollowsEverySetting) {
+    const ListFile file(kKeyA);
+    EXPECT_EQ(parse("", file.path), parse("", file.path));
+    EXPECT_NE(parse("", file.path), parse("[community_bootstrap]\nenabled=false\n", file.path));
+    EXPECT_NE(parse("", file.path), parse("[community_bootstrap]\nstall_minutes=11\n", file.path));
 }
 
 TEST(CommunityBootstrapConfig, KeysAndStallMinutes) {
@@ -445,9 +516,9 @@ TEST(CommunityBootstrapConfig, BadValuesAreLeftOut) {
     const auto c = parse(std::string("[community_bootstrap]\nconfidants=notakey ") + kKeyB + "\nstall_minutes=0\n");
     ASSERT_EQ(c.confidants.size(), 1u);
     EXPECT_EQ(c.confidants[0], decoded(kKeyB));
-    EXPECT_EQ(c.stallMinutes, 30u);
-    EXPECT_EQ(parse("[community_bootstrap]\nstall_minutes=10081\n").stallMinutes, 30u);
-    EXPECT_EQ(parse("[community_bootstrap]\nstall_minutes=5m\n").stallMinutes, 30u);
+    EXPECT_EQ(c.stallMinutes, 10u);
+    EXPECT_EQ(parse("[community_bootstrap]\nstall_minutes=10081\n").stallMinutes, 10u);
+    EXPECT_EQ(parse("[community_bootstrap]\nstall_minutes=5m\n").stallMinutes, 10u);
     EXPECT_EQ(parse("[community_bootstrap]\nstall_minutes=1\n").stallMinutes, 1u);
     // an empty list keeps it off
     EXPECT_TRUE(parse("[community_bootstrap]\nconfidants=\n").confidants.empty());

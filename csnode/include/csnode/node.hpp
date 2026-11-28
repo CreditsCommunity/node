@@ -457,6 +457,7 @@ public slots:
     void sendBlockAlarmSignal(cs::Sequence seq);
     void onRoundTimeElapsed();
     // the community bootstrap fallback ([community_bootstrap], off by default): see communitybootstrap.hpp
+    void logCommunityBootstrapSettings() const;
     std::set<cs::PublicKey> communityConfidants() const;
     // progress seen (a round package, a regular bootstrap table): the fallback closes again
     void onCommunityProgress();

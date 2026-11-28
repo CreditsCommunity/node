@@ -14,7 +14,8 @@
 
 namespace cs {
 
-// Community bootstrap: a liveness fallback, off by default ([community_bootstrap] in config.ini).
+// Community bootstrap: a liveness fallback ([community_bootstrap] in config.ini; on when the folder holds the
+// community_bootstrap.txt the community packages ship, off without it).
 //
 // Only the initial confidants (initialConfidants_) start a bootstrap, and a table with any other key
 // needs the project's signature. If the initial confidants that are still running are too few, the
