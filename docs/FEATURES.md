@@ -173,7 +173,7 @@ Everything listed here is in release 4.2.532-community.20.1 or earlier.
   BOOTSTRAP: fallback armed`); a folder without the list file, such as an official one, keeps it off.
   The set-up asks, `[community_bootstrap] enabled=false` or `CREDITS_COMMUNITY_BOOTSTRAP=off` turns
   it off. Nothing changes while blocks come.
-  [#188](https://github.com/CreditsCommunity/node/pull/188), [#PR](https://github.com/CreditsCommunity/node/pull/PR)
+  [#188](https://github.com/CreditsCommunity/node/pull/188), [#205](https://github.com/CreditsCommunity/node/pull/205)
 
 - **Nodes behind a NAT recover after an outage.** The p2p layer records the port a peer announces,
   not the ephemeral port of its outgoing connection, and a closing connection no longer drops healthy
